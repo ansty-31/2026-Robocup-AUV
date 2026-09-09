@@ -1,0 +1,79 @@
+# =============================================================
+# vision.yaml — 纯视觉参数（相机 / 图像补偿 / 模型推理 / 仿真 / 任务视觉目标）
+# 仅供本工程识别推理链路使用；训练数据集制作在 PC 工程（RDKX5-YOLOv11n-）
+# =============================================================
+
+camera:
+  # 真机相机打开失败时自动退化到该相机的 sim（软自适应，联调友好）
+  fallback_sim: true
+  front:                 # 前视：撞球/过门使用
+    type: usb            # sim | usb
+    device: 0            # usb: 0 或 /dev/videoN
+    width: 1280
+    height: 720
+    fps: 30
+    calibration: /home/sunrise/AUV/cfg/front_camera.yaml   # 去畸变标定 yaml（null=跳过）
+  down:                  # 下视(IMX415 MIPI)：保留——录素材/未来任务用；返回出发区已改记忆返回，策略不再用下视
+    type: sim            # sim | mipi
+    device: /dev/video1
+    width: 640
+    height: 360
+    fps: 20
+    calibration: null
+
+image:
+  # 识别前图像链路（推理统一入口）
+  undistort: true                # true: cv2.remap 去畸变（需对应 camera.*.calibration）
+  white_balance_bgr: [1.0, 1.05, 1.15]   # 白平衡通道增益（B,G,R）轻微
+  clahe_clip: 0.5                # LAB-L 通道 CLAHE clipLimit（0=关闭，轻微）
+  gamma: 0.85                    # gamma LUT（<1 提亮，1.0=关闭）
+
+color:
+  line_red:                # 下视红色标示线（任务二）
+    rgb: {r_min: 150, g_max: 90, b_max: 90}     # 无 cv2 时的 RGB 近似
+    hsv: {h1: [0, 12], h2: [168, 180], s_min: 90, v_min: 90}  # cv2 双区间
+    min_area_ratio: 0.002
+
+model:
+  mode: hbm_runtime               # mock | hbm_runtime | onnx（mock=虚拟测试）
+  format: rdk_x5_bin       # RDK X5 模型必须是 X5 OE 工具链(hb_mapper makertbin)产出的 .bin
+                           # 注意：.hbm 是车载 J5/J6/S100(Nash) 格式，X5(Bayes-e) 无法加载！
+  # ===== 双权重（ball 与 gate 分离）=====
+  # 权重① ball：沿用单模型多类别 .bin（model.path 下）
+  path: /home/sunrise/AUV/models/auv_multi.bin
+  strict_x5_bin: true      # true: 拒绝 .hbm 后缀并提示正确编译链路
+  input_size: 640          # 模型方形输入
+  input_name: images         # hbm_runtime 输入名（板端报错时填模型实际名）
+  score_threshold: 0.5
+  nms_threshold: 0.45
+  labels: [blue_ball, gate, red_ball]   # 类别顺序必须与训练/导出一致（决定解码类别）
+  # 权重② gate keypoint（占位）：导出 .bin 后填入下方 task_models.gate.path，
+  # 与权重①同时配置、互不影响（ball 走 model.path，gate 走 task_models.gate）。
+  # path 为空 → gate 用 mock 联调/或跳过（取决于 model.mode）
+  task_models:
+    gate: {path: "", kind: keypoint, labels: [gate],
+           kpt_order: [TL, TR, BR, BL]}   # ← 占位：models/gate_kpt.bin
+
+mission:
+  target_color: blue       # 任务目标球颜色：red | blue
+
+sim:                       # 虚拟相机（前视/下视各自仿真）
+  noise: 8
+  front: {}                # 前视虚拟：噪声底（目标识别走 mock 检测）
+  down:
+    red_line: {enable: true, width: 30, dx_offset: 0.0}
+  ball:                    # mock 检测器出球序列
+    appear_frame: 5
+    ratio_start: 0.05
+    ratio_step: 0.006
+    hit_ratio: 0.85
+    center_jitter: 0.03
+
+debug:                     # 运行监测（仅本工程调试用）
+  show_video: true          # 弹窗显示带识别框的相机画面（无 DISPLAY/cv2 时自动跳过）
+  overlay_text: true        # 画面叠加 状态/任务信息
+gate:                         # 过门（§3 几何 / keypoint / PnP 参数）
+  geometry: {frame_w: 0.70, frame_h: 0.50, bar_width: 0.05,
+             sym_bars: true, body_center_offset: 0.0}
+  keypoint: {conf_thr: 0.5}
+  pnp: {reproj_px: 8.0, z_min: 0.2, z_max: 15.0, refine: true}

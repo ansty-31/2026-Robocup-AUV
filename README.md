@@ -1,0 +1,68 @@
+# AUV 视觉导航项目（RDK X5 / Ubuntu 22.04 / Python）
+
+RoboCup AUV 赛事视觉代码。平台：**RDK X5（3.5.0）**，前视 USB + 下视 IMX415(MIPI)（下视保留，用于录素材/未来任务）。
+识别：YOLO 蓝/红球 + gate（**keypoint 四角 + PnP** 新前端）；串口 11B 帧向 STM32 下发 DOF。
+
+> 先读：`README.md`（用法）→ `doc/算法说明.md`（总体）→ `doc/算法说明-gate-PnP移植方案.md`（gate 设计与移植）。
+
+## 目录分区（英文分区命名）
+
+```
+auv_vision/
+├── main.py              # 装配/状态机入口（ball/gate；由 task1_2/*.sh 或直接调用）
+├── recorder.py          # 素材录制（--camera front|down；不参与任务）
+├── base/                # 基础部件：settings.py(配置) · camera.py(前视/下视/mipi) · uart.py
+├── common/              # 通用功能：PID.py · preprocess.py(图像链路) · detector.py(检测)
+├── task1_2/             # 任务一（撞球）+ 记忆返回工具：
+│   ├── ball.py          #   任务一 撞球 BallTask
+│   ├── return_by_memory.py  #   记忆返回（撞球后，不依赖视觉）
+│   └── run_*.sh         #   编排：待机→下潜→前进→撞球(记轨迹)→记忆返回→回退
+├── gate/                # 任务三 过门（keypoint+PnP；geometry/frontend/decode/task/…）
+├── cfg/                 # vision.yaml · comm.yaml（参数唯一来源）
+├── doc/                 # 算法说明.md · 算法说明-gate-PnP移植方案.md
+├── models/ · tests/     # 权重(.bin) · 无硬件测试
+```
+
+分区语义：`base`（平台基础设施）/ `common`（跨任务公用）/ `task1_2`（任务一 + 记忆返回工具）/ `gate`（任务三）。
+依赖规则：任务代码只 import `base`/`common` 与同级任务模块；`main.py` 是唯一装配点。
+
+## 快速开始（本机，无硬件）
+
+```bash
+python3 tests/test_uart.py              # 串口字节（pty 回环）
+python3 tests/test_pid.py / test_logic.py / test_detector.py / test_preprocess.py
+python3 tests/test_gate_geometry.py     # gate PnP 合成往返
+python3 tests/test_gate_flow.py         # gate 相位机（进近→穿门/REACQUIRE，mock）
+python3 main.py --task ball             # 只跑撞球（SIM/mock）
+python3 main.py --task gate             # 试跑过门（cfg model.mode: mock）
+```
+
+### 真机编排（.sh，见 task1_2/）
+```bash
+cd task1_2 && ./run_ball_return.sh   # 待机45→下潜3→前进3→撞球(记轨迹)→记忆返回→回退
+# 手动等价：
+#   AUV_DOF_LOG=/tmp/path.csv python3 main.py --task ball
+#   python3 task1_2/return_by_memory.py --log /tmp/path.csv
+```
+- **返回出发区 = 记忆返回**（纯航位推算反向回放，见 return_by_memory.py）；
+- 下视相机 `cfg/vision.yaml camera.down` 与 `base/camera.py`（sim/mipi）**保留**，仅策略不再使用。
+
+## 任务算法速览
+
+- **任务一 撞球**（task1_2/ball.py）：面积占比分级调速 + 视觉居中 PID + 智能搜索；
+- **记忆返回**（task1_2/return_by_memory.py）：轨迹反向回放（`--extra-sec` 保险余量）；
+- **任务三 过门**（gate/gate_task.py）：keypoint 四角 → IPPE 6-DoF，深度 `Z=tvec.z`；
+  RANGE_ALIGN 子状态 GOLDEN/CREEP/HOLD/REACQUIRE → APPROACH → THROUGH（机身过门判据）。
+  门 = 闭合矩形框(红 PVC，0.70×0.50 m，悬空，对称无朝向要求)。
+
+## 参数（cfg/*.yaml）
+`vision.yaml`：camera(front/down)、`image.*`（**ball/gate 共用图像链路，勿改**）、`model.*`
+（含 `task_models.gate`）、`gate.*`（几何/keypoint/PnP）；`comm.yaml`：serial/dof_map/心跳/急停、
+`tasks.enabled`（默认 `[ball]`；gate 需后端或 mock）、`ball/gate` 任务参数。
+模型：X5 OE `.bin`（march `bayes-e`）；`.hbm` 不兼容。
+
+## 运行监测
+串口帧打印 + 画面叠加（含 gate phase/substate/z/pass）——cfg debug 开关；`AUV_SHOW=0` 关窗口。
+
+## 联调 TODO
+gate keypoint `.bin`（导出后做解码自检 §6）；REACQUIRE 后退 dof sign 实测；高低门编排。
