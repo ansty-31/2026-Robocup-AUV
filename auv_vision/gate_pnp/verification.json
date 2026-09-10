@@ -1,0 +1,97 @@
+{
+  "status": "IMPLEMENTED_AND_AUTOMATED_TESTS_PASSED",
+  "verified_at_utc": "2026-09-10T07:19:36.073841+00:00",
+  "python": "3.13.15 | packaged by Anaconda, Inc. | (main, Aug 14 2026, 17:17:48) [MSC v.1942 64 bit (AMD64)]",
+  "interpreter": "C:\\Users\\ASUS\\miniconda3\\envs\\PythonProject\\python.exe",
+  "packages": {
+    "numpy": "2.5.3",
+    "opencv-python": "5.0.0.93",
+    "PyYAML": "6.0.3"
+  },
+  "ultralytics_installed": false,
+  "tests": {
+    "count": 65,
+    "exit_code": 0,
+    "command": [
+      "C:\\Users\\ASUS\\miniconda3\\envs\\PythonProject\\python.exe",
+      "-B",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tests",
+      "-v"
+    ],
+    "working_directory": "D:\\document\\其他\\AUV\\gate_pnp",
+    "log": "test-results.txt"
+  },
+  "no_input_entrypoints": {
+    "pnp": {
+      "status": "NO_INPUT",
+      "reason": "No keypoint observation supplied",
+      "target_index": null,
+      "frame_id": null,
+      "timestamp": null,
+      "rms_error_px": null,
+      "candidates": [],
+      "pose": null
+    },
+    "guidance": {
+      "phase": "ACQUIRE",
+      "action": "HOLD",
+      "reason": "No new observation frame",
+      "target_id": "default",
+      "frame_id": null,
+      "timestamp": null,
+      "target_index": null,
+      "visible_points": [],
+      "pnp_result": null,
+      "alignment_error": null,
+      "scan_direction": null,
+      "speed_profile": null
+    }
+  },
+  "attachment_preservation": {
+    "config/front_camera.yaml": {
+      "sha256": "0ba4daa8580cbe29cc2eb9a5e232e9486ffb81c917d24b551bfae7f7a4ac76a5",
+      "identical_to_previous_delivery": true
+    },
+    "config/vision.yaml": {
+      "sha256": "0ea79b4f24ac9b1f5f7165007871453a2203b2b573fb9689a37879e65c45bff8",
+      "identical_to_previous_delivery": true
+    },
+    "reference/prepare_frames(1).py": {
+      "sha256": "cdb31c3ddd3285fbbe13fdf7ecde377ccfc64f2784e54ed55f58e9aaff57a13c",
+      "identical_to_previous_delivery": true
+    }
+  },
+  "independent_review": {
+    "findings": 2,
+    "fixed": 2,
+    "scoped_recheck": "passed",
+    "fixes": [
+      "Malformed non-target detections produce ERROR, not a no-gate scan condition",
+      "Invalid target_index produces HOLD and cannot leak nonfinite JSON metadata"
+    ]
+  },
+  "verified_behaviors": [
+    "Original 32 PnP/adapter regression tests",
+    "Unicode-path calibration reading without source modification",
+    "Partial-gate extraction and explicit multi-target selection",
+    "Recovery debounce, frame freshness/order, alternating search",
+    "Stable PnP then alignment; alignment loss re-enters recovery",
+    "Stable centering and direction before a single START_PASS",
+    "PASSING never recovers view on valid large/partial/no-gate observations",
+    "Input errors HOLD without leaving PASSING; lifecycle resets explicit",
+    "Result-double extraction through real OpenCV PnP to guidance decisions"
+  ],
+  "not_verified": [
+    "Actual YOLO model inference",
+    "Physical actuator commands",
+    "Camera-to-body extrinsic calibration",
+    "Hardware motion and actual gate crossing",
+    "Underwater position/attitude accuracy",
+    "Real-data tuning of guidance thresholds",
+    "OpenCV version actually used for existing training images"
+  ]
+}

@@ -1,0 +1,5 @@
+# Versions actually used for the recorded tests on Python 3.13.15 / Windows.
+# Use the same OpenCV build as preprocessing; do not overwrite a training env blindly.
+numpy==2.5.3
+opencv-python==5.0.0.93
+PyYAML==6.0.3

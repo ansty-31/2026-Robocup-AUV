@@ -1,0 +1,15 @@
+{
+  "width_m": 0.7,
+  "height_m": 0.5,
+  "target_class_names": ["gate"],
+  "keypoint_indices": [0, 1, 2, 3],
+  "detection_confidence": 0.5,
+  "keypoint_confidence": 0.5,
+  "max_rms_error_px": 3.0,
+  "ambiguity_gap_px": 0.2,
+  "same_pose_rotation_deg": 0.1,
+  "same_pose_translation_m": 0.001,
+  "min_quad_area_px2": 4.0,
+  "min_edge_px": 1.0,
+  "min_area_edge_ratio": 0.0001
+}
