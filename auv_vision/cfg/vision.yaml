@@ -21,6 +21,16 @@ camera:
     fps: 20
     calibration: null
 
+stream:
+  # 前视画面推流（零转码 MJPEG；板端 stream_server.py，PC 端 stream_view.py）
+  # 语义：谁打开相机谁顺带推流（UVC 只允许单进程取流），所以开录像/识别都能同时推，
+  #       不会争抢相机；enable=false 时完全不生效。
+  enable: true             # 改成 false 即关闭
+  host: 192.168.137.2      # 水面 PC 的 IP（接收脚本/ffplay 跑在这台机器上）
+  port: 5000               # UDP 端口（PC: ffplay -f mjpeg "udp://@:5000"）
+  stream_fps: 30           # 推流帧率上限（相机 720p MJPG 有 60fps 档，可按带宽调）
+  pkt: 8000                # UDP 切片大小（1316 更保守，8000 更省 CPU）
+
 image:
   # 识别前图像链路（推理统一入口）
   undistort: true                # true: cv2.remap 去畸变（需对应 camera.*.calibration）

@@ -10,7 +10,10 @@ RoboCup AUV 赛事视觉代码。平台：**RDK X5（3.5.0）**，前视 USB + �
 ```
 auv_vision/
 ├── main.py              # 装配/状态机入口（ball/gate；由 task1_2/*.sh 或直接调用）
-├── recorder.py          # 素材录制（--camera front|down；不参与任务）
+├── stream_server.py     # 前视画面低延迟推流（零转码 MJPEG → UDP/HTTP；可嵌入式与识别/录像共用相机）
+├── stream_view.py       # 水面 PC 端接收/显示/录制（配 stream_server.py）
+├── manual.sh            # 手动模式唯一入口：遥控桥 + 录像 + 推流
+├── manual/              # 手动模式三件套：udp_server.py(遥控桥) · recorder.py(录像) · stream.py(推流/接收库)
 ├── base/                # 基础部件：settings.py(配置) · camera.py(前视/下视/mipi) · uart.py
 ├── common/              # 通用功能：PID.py · preprocess.py(图像链路) · detector.py(检测)
 ├── task1_2/             # 任务一（撞球）+ 记忆返回工具：
@@ -63,6 +66,33 @@ cd task1_2 && ./run_ball_return.sh   # 待机45→下潜3→前进3→撞球(记
 
 ## 运行监测
 串口帧打印 + 画面叠加（含 gate phase/substate/z/pass）——cfg debug 开关；`AUV_SHOW=0` 关窗口。
+
+## 画面推流 / 手动模式（端到端约 60~90 ms）
+方案与实测数据见 `doc/前视USB相机低延迟推流方案.md`；根目录只有一个入口脚本 `manual.sh`，
+推流/接收实现在 `manual/stream.py`（库）。
+
+**录像放在水面 PC**（板端只推流：省板端 CPU、不受写盘拖累，帧率更高）。
+
+```bash
+# 板端：遥控桥 + 推流（默认；无串口硬件加 --sim）
+./manual.sh
+# 例外：确需板端本地录像时（PC 不在场）
+./manual.sh --record --seconds 60 --out rec.mp4
+
+# 水面 PC —— 用 pc/ 的总调度脚本（键盘遥控 + 本地录像，见 ../pc/README.md）
+cd ../pc
+./pc.sh                    # 键盘遥控 + 录像（默认直接出 mp4 到 pc/record/）
+./pc.sh --show             # 边看边录（结束后自动封 mp4）
+./pc.sh --raw              # 只留原始 .mjpeg
+./pc.sh --view             # 只看画面
+```
+
+> 同一个 UDP 端口同一时刻只能被一个进程接收：**既要看又要录就用 ②**（`--record-raw` 在同一进程里直存 + 显示）。
+
+**推流不会和识别抢相机**：UVC 设备同一时刻只允许一个进程取流（第二个进程报 `Device or resource busy`）。
+推流因此不单独起进程，而是由 `base/camera.py` 在打开相机时顺带把**原始 JPEG** 交给 `manual/stream.py` 发出
+（开关：`cfg/vision.yaml` 的 `stream.enable`，手动模式由 `manual.sh` 用环境变量覆盖）。
+另外 `cv2.VideoCapture` 默认协商 YUYV（本相机 720p 只有 9 fps），`base/camera.py` 已强制 MJPG（60 fps 档）。
 
 ## 联调 TODO
 gate keypoint `.bin`（导出后做解码自检 §6）；REACQUIRE 后退 dof sign 实测；高低门编排。
