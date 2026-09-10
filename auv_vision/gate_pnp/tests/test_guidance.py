@@ -66,12 +66,131 @@ class GuidanceTests(unittest.TestCase):
         self.assertEqual(result.action,self.Action.TURN_RIGHT)
 
     def test_partial_and_ambiguous_patterns_hold_without_fabricated_pose(self):
-        for visible in [(1,0,0,0),(1,0,1,0),(1,1,0,0),(0,0,0,0)]:
+        for visible in [(1,0,0,0),(1,0,1,0),(1,1,1,0),(0,0,0,0)]:
             self.controller.start_target('default')
             for t in [0,.1,.2,.3]:
                 result=self.step(t,visible=visible)
             self.assertEqual(result.action,self.Action.HOLD)
             self.assertIsNone(result.pnp_result)
+
+    def test_vertical_recovery_requires_both_duration_and_three_fresh_frames(self):
+        import json
+        for visible,expected in [((1,1,0,0),'DESCEND'),((0,0,1,1),'ASCEND')]:
+            for times in [(0,.05,.1,.2),(0,.2,.21)]:
+                with self.subTest(visible=visible,times=times):
+                    self.controller.start_target('default')
+                    for t in times[:-1]:
+                        self.assertEqual(self.step(t,visible=visible).action,self.Action.HOLD)
+                    result=self.step(times[-1],visible=visible)
+                    self.assertEqual(result.action.value,expected)
+                    self.assertEqual(result.phase,self.Phase.ACQUIRE)
+                    self.assertEqual(result.visible_points,('TL','TR') if expected=='DESCEND' else ('BR','BL'))
+                    self.assertIsNone(result.pnp_result)
+                    self.assertIsNone(result.alignment_error)
+                    self.assertIsNone(result.speed_profile)
+                    self.assertEqual(json.loads(json.dumps(result.to_dict(),allow_nan=False))['action'],expected)
+
+    def test_alternating_top_bottom_conditions_restart_vertical_confirmation(self):
+        for visible,opposite,expected in [((1,1,0,0),(0,0,1,1),'DESCEND'),
+                                          ((0,0,1,1),(1,1,0,0),'ASCEND')]:
+            self.controller.start_target('default')
+            for t,mask in [(0,visible),(.1,opposite),(.2,visible),(.3,opposite),
+                           (.4,visible),(.5,visible)]:
+                self.assertEqual(self.step(t,visible=mask).action,self.Action.HOLD)
+            self.assertEqual(self.step(.6,visible=visible).action.value,expected)
+
+    def test_input_fault_or_duplicate_clears_vertical_confirmation(self):
+        for visible,expected in [((1,1,0,0),'DESCEND'),((0,0,1,1),'ASCEND')]:
+            for fault in ('no_input','duplicate','malformed'):
+                with self.subTest(visible=visible,fault=fault):
+                    self.controller.start_target('default')
+                    self.step(0,visible=visible)
+                    last=self.obs(.1,visible=visible)
+                    self.controller.update(last,.1)
+                    bad={'no_input':None,'duplicate':last,
+                         'malformed':replace(self.obs(.2,visible=visible),confidence=None)}[fault]
+                    self.assertEqual(self.controller.update(bad,.2).action,self.Action.HOLD)
+                    for t in [.3,.4]:
+                        self.assertEqual(self.step(t,visible=visible).action,self.Action.HOLD)
+                    self.assertEqual(self.step(.5,visible=visible).action.value,expected)
+
+    def test_other_visibility_combinations_never_trigger_vertical_recovery(self):
+        from itertools import product
+        for visible in product((0,1),repeat=4):
+            if visible in ((1,1,0,0),(0,0,1,1)):
+                continue
+            with self.subTest(visible=visible):
+                self.controller.start_target('default')
+                for t in [0,.1,.2,.3]:
+                    result=self.step(t,visible=visible)
+                    self.assertNotIn(result.action.value,('DESCEND','ASCEND'))
+
+    def test_vertical_visibility_uses_confidence_threshold(self):
+        for confidence,expected in [((.5,.5,.49,.49),'DESCEND'),
+                                     ((.49,.49,.5,.5),'ASCEND'),
+                                     ((.5,.49,0,0),'HOLD'),((.49,.5,0,0),'HOLD'),
+                                     ((0,0,.5,.49),'HOLD'),((0,0,.49,.5),'HOLD')]:
+            self.controller.start_target('default')
+            for t in [0,.1,.2]:
+                result=self.step(t,visible=confidence)
+            self.assertEqual(result.action.value,expected)
+
+    def test_vertical_visibility_excludes_nonfinite_and_outside_coordinates(self):
+        for missing,expected in [((2,3),'DESCEND'),((0,1),'ASCEND')]:
+            for invalid in [(float('nan'),0),(float('inf'),0),(-1,100),(640,100),(100,640)]:
+                with self.subTest(missing=missing,invalid=invalid):
+                    self.controller.start_target('default')
+                    for t in [0,.1,.2]:
+                        obs=self.obs(t)
+                        points=obs.points.copy()
+                        points[list(missing)]=invalid
+                        result=self.controller.update(replace(obs,points=points),t)
+                    self.assertEqual(result.action.value,expected)
+
+    def test_vertical_recovery_uses_semantic_ids_not_pixel_height(self):
+        for visible,expected in [((1,1,0,0),'DESCEND'),((0,0,1,1),'ASCEND')]:
+            self.controller.start_target('default')
+            for t in [0,.1,.2]:
+                obs=self.obs(t,visible=visible)
+                points=obs.points.copy()
+                points[:,1]=639-points[:,1]
+                result=self.controller.update(replace(obs,points=points),t)
+            self.assertEqual(result.action.value,expected)
+
+    def test_backward_has_priority_over_both_vertical_conditions(self):
+        for visible,expected in [((1,1,0,0),'DESCEND'),((0,0,1,1),'ASCEND')]:
+            self.controller.start_target('default')
+            for t in [0,.1]:
+                self.assertEqual(self.step(t,visible=visible,bbox=(100,0,500,640)).action,self.Action.HOLD)
+            self.assertEqual(self.step(.2,visible=visible,bbox=(100,0,500,640)).action,self.Action.BACKWARD)
+            # Only the top edge touches: the vertical condition starts a new streak.
+            for t in [.3,.4]:
+                self.assertEqual(self.step(t,visible=visible,bbox=(100,0,500,570)).action,self.Action.HOLD)
+            self.assertEqual(self.step(.5,visible=visible,bbox=(100,0,500,570)).action.value,expected)
+
+    def test_lost_points_in_align_allow_both_vertical_recovery_actions(self):
+        for visible,expected in [((1,1,0,0),'DESCEND'),((0,0,1,1),'ASCEND')]:
+            self.controller.start_target('default')
+            self.advance_to_align()
+            for t in [.4,.5]:
+                result=self.step(t,visible=visible)
+                self.assertEqual((result.phase,result.action),(self.Phase.ACQUIRE,self.Action.HOLD))
+                self.assertIsNone(result.pnp_result)
+            self.assertEqual(self.step(.6,visible=visible).action.value,expected)
+
+    def test_passing_never_triggers_vertical_recovery_even_after_input_fault(self):
+        for visible in [(1,1,0,0),(0,0,1,1)]:
+            for bbox in [(150,100,490,540),(100,0,500,640)]:
+                self.controller.start_target('default')
+                self.advance_to_pass()
+                for t in [.9,1,1.1]:
+                    result=self.step(t,visible=visible,bbox=bbox)
+                    self.assertEqual((result.phase,result.action),(self.Phase.PASSING,self.Action.CONTINUE_PASS))
+                result=self.controller.update(None,1.2)
+                self.assertEqual((result.phase,result.action),(self.Phase.PASSING,self.Action.HOLD))
+                for t in [1.3,1.4,1.5]:
+                    result=self.step(t,visible=visible,bbox=bbox)
+                    self.assertEqual((result.phase,result.action),(self.Phase.PASSING,self.Action.CONTINUE_PASS))
 
     def test_no_target_scan_right_then_left_but_no_input_holds(self):
         for t in np.round(np.arange(0,3.61,.1),6):
