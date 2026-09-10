@@ -1,0 +1,61 @@
+# =============================================================
+# vision.yaml — 纯视觉参数（相机 / 图像补偿 / 模型推理 / 仿真 / 任务视觉目标）
+# 仅供本工程识别推理链路使用；训练数据集制作在 PC 工程（RDKX5-YOLOv11n-）
+# =============================================================
+
+camera:
+  # 真机相机打开失败时自动退化到该相机的 sim（软自适应，联调友好）
+  fallback_sim: true
+  front:                 # 前视：撞球/过门使用
+    type: usb            # sim | usb
+    device: 0            # usb: 0 或 /dev/videoN
+    width: 1280
+    height: 720
+    fps: 30
+    calibration: /app/auv_vision/cfg/front_camera.yaml   # 去畸变标定 yaml（null=跳过）
+  down:                  # 下视：返回出发区使用（IMX415 MIPI）
+    type: sim            # sim | mipi
+    device: /dev/video1
+    width: 640
+    height: 360
+    fps: 20
+    calibration: null
+
+image:
+  # 识别前图像链路（推理统一入口）
+  undistort: true                # true: cv2.remap 去畸变（需对应 camera.*.calibration）
+  white_balance_bgr: [1.0, 1.05, 1.15]   # 白平衡通道增益（B,G,R）轻微
+  clahe_clip: 0.5                # LAB-L 通道 CLAHE clipLimit（0=关闭，轻微）
+  gamma: 0.85                    # gamma LUT（<1 提亮，1.0=关闭）
+
+color:
+  line_red:                # 下视红色标示线（任务二）
+    rgb: {r_min: 150, g_max: 90, b_max: 90}     # 无 cv2 时的 RGB 近似
+    hsv: {h1: [0, 12], h2: [168, 180], s_min: 90, v_min: 90}  # cv2 双区间
+    min_area_ratio: 0.002
+
+model:
+  mode: mock               # mock | hbm_runtime | onnx（mock=虚拟测试）
+  format: rdk_x5_hbm       # 说明性：板端 BPU 模型形态（YOLO→ONNX→dnn_compile）
+  # 单权重多类别：红球/蓝球/门 共用一个模型（PC 工程 RDKX5-YOLOv11n- 联合训练/导出）
+  path: /app/auv_vision/models/auv_multi.hbm
+  input_size: 640          # 模型方形输入
+  input_name: null         # hbm_runtime 输入名（板端报错时填模型实际名）
+  score_threshold: 0.5
+  nms_threshold: 0.45
+  labels: [red_ball, blue_ball, gate]   # 类别顺序必须与训练/导出一致（决定解码类别）
+
+mission:
+  target_color: blue       # 任务目标球颜色：red | blue
+
+sim:                       # 虚拟相机（前视/下视各自仿真）
+  noise: 8
+  front: {}                # 前视虚拟：噪声底（目标识别走 mock 检测）
+  down:
+    red_line: {enable: true, width: 30, dx_offset: 0.0}
+  ball:                    # mock 检测器出球序列
+    appear_frame: 5
+    ratio_start: 0.05
+    ratio_step: 0.006
+    hit_ratio: 0.85
+    center_jitter: 0.03

@@ -1,0 +1,18 @@
+{
+  "visible_confidence": 0.5,
+  "too_close_height_ratio": 0.9,
+  "boundary_margin_ratio": 0.02,
+  "action_confirm_s": 0.2,
+  "action_min_frames": 3,
+  "no_target_confirm_s": 0.5,
+  "scan_half_period_s": 3.0,
+  "pnp_hold_s": 0.3,
+  "pnp_min_frames": 3,
+  "alignment_x_tolerance_m": 0.03,
+  "alignment_y_tolerance_m": 0.03,
+  "alignment_axis_tolerance_deg": 5.0,
+  "alignment_hold_s": 0.5,
+  "alignment_min_frames": 5,
+  "max_frame_age_s": 0.5,
+  "max_frame_gap_s": 0.25
+}

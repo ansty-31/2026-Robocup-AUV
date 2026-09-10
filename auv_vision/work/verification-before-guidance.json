@@ -1,0 +1,72 @@
+{
+  "status": "IMPLEMENTED_AND_AUTOMATED_TESTS_PASSED",
+  "verified_at_utc": "2026-09-09T09:41:37.756997+00:00",
+  "python": "3.13.15 | packaged by Anaconda, Inc. | (main, Aug 14 2026, 17:17:48) [MSC v.1942 64 bit (AMD64)]",
+  "interpreter": "C:\\Users\\ASUS\\miniconda3\\envs\\PythonProject\\python.exe",
+  "packages": {
+    "numpy": "2.5.3",
+    "opencv-python": "5.0.0.93",
+    "PyYAML": "6.0.3"
+  },
+  "ultralytics_installed": false,
+  "tests": {
+    "command": [
+      "C:\\Users\\ASUS\\miniconda3\\envs\\PythonProject\\python.exe",
+      "-B",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tests",
+      "-v"
+    ],
+    "working_directory": "C:\\Users\\ASUS\\Documents\\Codex\\2026-09-09\\github-plugin-github-openai-curated-remote\\outputs\\gate_pnp",
+    "exit_code": 0,
+    "log": "test-results.txt",
+    "count": 32
+  },
+  "no_input_entrypoint": {
+    "status": "NO_INPUT",
+    "reason": "No keypoint observation supplied",
+    "target_index": null,
+    "frame_id": null,
+    "timestamp": null,
+    "rms_error_px": null,
+    "candidates": [],
+    "pose": null
+  },
+  "attachment_copies": {
+    "config/front_camera.yaml": {
+      "source_sha256": "0ba4daa8580cbe29cc2eb9a5e232e9486ffb81c917d24b551bfae7f7a4ac76a5",
+      "copy_sha256": "0ba4daa8580cbe29cc2eb9a5e232e9486ffb81c917d24b551bfae7f7a4ac76a5",
+      "identical": true
+    },
+    "config/vision.yaml": {
+      "source_sha256": "0ea79b4f24ac9b1f5f7165007871453a2203b2b573fb9689a37879e65c45bff8",
+      "copy_sha256": "0ea79b4f24ac9b1f5f7165007871453a2203b2b573fb9689a37879e65c45bff8",
+      "identical": true
+    },
+    "reference/prepare_frames(1).py": {
+      "source_sha256": "cdb31c3ddd3285fbbe13fdf7ecde377ccfc64f2784e54ed55f58e9aaff57a13c",
+      "copy_sha256": "cdb31c3ddd3285fbbe13fdf7ecde377ccfc64f2784e54ed55f58e9aaff57a13c",
+      "identical": true
+    }
+  },
+  "independent_review": {
+    "findings": 1,
+    "fixed": 1,
+    "scoped_recheck": "passed",
+    "fix": "Ambiguous candidates straddling maximum RMS threshold remain AMBIGUOUS"
+  },
+  "verification_scope": {
+    "synthetic_pose_recovery": true,
+    "opencv_resize_geometry": true,
+    "result_object_adapter_contract": true,
+    "optional_model_libraries_blocked_import_test": true,
+    "actual_yolo_inference": false,
+    "underwater_position_accuracy": false,
+    "underwater_attitude_accuracy": false,
+    "hardware_runtime": false,
+    "actual_training_image_opencv_version_confirmed": false
+  }
+}
