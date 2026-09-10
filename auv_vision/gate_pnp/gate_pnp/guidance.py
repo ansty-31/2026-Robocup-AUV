@@ -201,6 +201,10 @@ class GateGuidance:
             action=Action.TURN_RIGHT
         elif tuple(mask)==(False,True,True,False):
             action=Action.TURN_LEFT
+        elif tuple(mask)==(True,True,False,False):
+            action=Action.DESCEND
+        elif tuple(mask)==(False,False,True,True):
+            action=Action.ASCEND
         if action:
             self._pnp.reset()
             self._motion.add(action,obs.timestamp)
