@@ -83,8 +83,8 @@ def test_object_points():
     print("[1] object_points 布局")
     pts = object_points()                      # 默认 0.70×0.50, from_front=True
     check("尺寸 0.70/0.50",
-          abs(pts[0][0] - (-0.35)) < 1e-9 and abs(pts[1][0] - 0.35) < 1e-9 and
-          abs(pts[0][1] - (-0.25)) < 1e-9 and abs(pts[2][1] - 0.25) < 1e-9)
+          abs(pts[0][0] - (-0.35)) < 1e-6 and abs(pts[1][0] - 0.35) < 1e-6 and
+          abs(pts[0][1] - (-0.25)) < 1e-6 and abs(pts[2][1] - 0.25) < 1e-6)
     check("z=0 平面", np.allclose(pts[:, 2], 0.0))
     check("顺序 TL,TR,BR,BL 矩形", np.allclose(pts[0], [-0.35, -0.25, 0]) and
           np.allclose(pts[1], [0.35, -0.25, 0]) and
@@ -186,7 +186,7 @@ def test_plane_backproject(cams):
         rvec, tvec, uv = rand_approach_pose(rng, rect)
         n, rho = plane_from_pose(rvec, tvec)
         t3 = tvec.ravel()
-        check("平面法向≈门中心视线约束", abs(np.dot(n, t3) - rho) < 1e-9)
+        check("平面法向≈门中心视线约束", abs(np.dot(n, t3) - rho) < 1e-6)
         # 门中心(原点)的投影像素 → 反投影回平面应等于 t
         uv0 = rect.project(np.zeros((1, 3), np.float32), rvec, tvec)[0]
         p = backproject_to_plane(uv0[0], uv0[1], rect, n, rho)

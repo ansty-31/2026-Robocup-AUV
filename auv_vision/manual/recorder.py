@@ -6,11 +6,15 @@
   后端 2（无 cv2 时）：逐帧 .npy 落盘 + manifest.json，之后用
        python3 recorder.py --assemble <帧目录> [-o out.mp4]  补出视频
 
-示例：
-  python3 recorder.py --source sim --frames 60 -o rec_sim.mp4
-  python3 recorder.py --source usb --dev 0 --seconds 10 -o rec_usb.mp4
-  python3 recorder.py --assemble frames_dir -o rec.mp4
+示例（在工程根目录执行；手动模式一般直接用 ./manual.sh --record，本文件默认不参与）：
+  python3 manual/recorder.py --camera front --seconds 10 --out rec.mp4
+  python3 manual/recorder.py --camera front --frames 60 --out rec/rec.mp4 --overlay
+  python3 manual/recorder.py --assemble frames_dir --out rec.mp4
 """
+import os as _os, sys as _sys
+if __package__ in (None, ""):        # 支持直接 python3 manual/xxx.py 运行
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
 import argparse
 import json
 import os
@@ -48,7 +52,8 @@ class CvWriter(object):
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         self._w = cv2.VideoWriter(path, fourcc, fps, size)
         if not self._w.isOpened():
-            raise RuntimeError("无法创建视频文件: %s" % path)
+            raise RuntimeError("无法创建视频文件: %s（检查目录是否存在/可写；父目录会自动创建，"
+                               "但只读介质或权限不足仍会失败）" % path)
 
     def write(self, frame_bgr, t_text):
         if t_text and HAS_CV2:
@@ -119,6 +124,8 @@ def record(args):
     size = (cam.width, cam.height)
     total = args.frames or int(args.seconds * fps)
 
+    if os.path.dirname(os.path.abspath(args.out)):
+        os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)   # 目录不存在就建
     video_like = args.out.lower().endswith((".mp4", ".avi", ".mkv"))
     if video_like and HAS_CV2:
         backend = CvWriter(args.out, fps, size)
