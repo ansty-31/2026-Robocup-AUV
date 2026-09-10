@@ -92,6 +92,12 @@ def build_neutral_frame():
                  list(S.comm.frame.btn_values))
 
 
+def build_frame_with_header(header, surge=0.0, sway=0.0, heave=0.0, yaw=0.0):
+    """以自定义帧头构建 11B 帧（交接/待命用；如 0xAA 表示交给下位机接管）。"""
+    axes = dof_to_axis_bytes(surge, sway, heave, yaw)
+    return bytes([header] + axes + list(S.comm.frame.btn_values))
+
+
 # ---------------------------------------------------------------------------
 # 控制器
 # ---------------------------------------------------------------------------
@@ -110,6 +116,7 @@ class UartController(object):
         self._last_tx_log = 0
         self._dof_log_f = None
         self._last_dof_t = time.monotonic()
+        self._rxbuf = bytearray()                # 接收缓存（“特殊标志”判定用）
         log_path = os.environ.get("AUV_DOF_LOG")
         if log_path:
             try:
@@ -263,10 +270,54 @@ class UartController(object):
             n = self._ser.in_waiting
             if n:
                 data = self._ser.read(n)
+                self._rxbuf.extend(data)
+                if len(self._rxbuf) > 4096:          # 防无限增长
+                    del self._rxbuf[:-1024]
                 if S.DEBUG:
                     print("[UART<-] %s" % data.hex())
         except Exception:
             pass
+
+    # ---------------- 接收标志（交接握手用） ----------------
+    def rx_clear(self):
+        """清空接收缓存。"""
+        self._rxbuf = bytearray()
+
+    def rx_has(self, flag):
+        """接收缓存是否已出现 flag(字节串)；命中后丢弃该段(含)之前的缓存。"""
+        if not flag:
+            return False
+        i = bytes(self._rxbuf).find(flag)
+        if i < 0:
+            return False
+        del self._rxbuf[:i + len(flag)]
+        return True
+
+    def send_dof_header(self, header, surge=0.0, sway=0.0, heave=0.0, yaw=0.0,
+                        force=True):
+        """以自定义帧头发一帧（交接/待命心跳；跳过 ramp）。"""
+        return self.send_frame_bytes(
+            build_frame_with_header(header, surge, sway, heave, yaw),
+            force=force)
+
+    def wait_flag(self, flag, timeout_ms=0, tick=None, tick_interval_ms=50):
+        """等待接收缓存出现 flag；期间每 tick_interval_ms 调 tick()（如发心跳）。
+
+        返回 True=收到标志；False=超时。timeout_ms<=0 = 不限时。
+        """
+        t0 = _now_ms()
+        last_tick = 0
+        while True:
+            self._drain_rx()
+            if self.rx_has(flag):
+                return True
+            now = _now_ms()
+            if timeout_ms and (now - t0) >= timeout_ms:
+                return False
+            if tick is not None and (now - last_tick) >= tick_interval_ms:
+                last_tick = now
+                tick()
+            time.sleep(0.01)
 
     def close(self):
         if self._dof_log_f is not None:

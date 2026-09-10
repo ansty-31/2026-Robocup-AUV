@@ -72,6 +72,25 @@ ball:                      # 面积占比分级（视觉量 → 运动决策）
   center_confirm_frames: 3          # 连续居中帧数达标后才允许前进
   pid: {kp: 0.9, ki: 0.05, kd: 0.15, out_max: 0.6, deadzone: 0.04}
 
+handover:                  # 返回出发区策略B：视觉居中 → 交下位机接管握手 → 收权 → 后退
+  header: 170              # 0xAA 交接帧头：以该帧头发帧表示“暂时交给下位机接管”
+  resume_flag: ""          # 下位机回传的“特殊标志”(十六进制串, 如 "aa55ff")；空=不判定内容
+  resume_timeout_s: 0      # 0=一直等下位机标志；>0 超时则继续(仅联调用)
+  standby_neutral: true    # 待命期间持续以 header 发中性帧心跳(≥20Hz)
+  rev1_s: 1                # 撞球结束后先后退时长(秒)
+  rev2_s: 3                # 收权居中后直接后退时长(秒)
+  rev_speed: -0.35         # 后退速度(归一化; 负=后退)
+  yaw_kp: 0.8              # 原地居中: yaw 比例增益
+  yaw_max: 0.5             # yaw 限幅
+  yaw_sign: 1              # yaw 方向(装反改 -1)
+  sway_kp: 0.9             # 收权后: 仅左右平移居中的比例增益
+  sway_max: 0.6            # sway 限幅
+  sway_sign: -1            # sway 方向(与 ball 居中一致; 装反改 1)
+  y_align: false           # 原地居中是否也用 heave 修垂直(默认仅水平)
+  center_x_eps: 0.10       # 水平居中阈值(归一化偏差)
+  center_confirm_frames: 3 # 连续居中帧数达标
+  center_timeout_s: 20     # 每段居中阶段超时(秒)
+
 back:                      # 返回出发区（下视红线相位机）
   timeout_ms: 300000
   align_deadzone: 0.10
