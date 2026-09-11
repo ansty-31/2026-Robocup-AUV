@@ -42,19 +42,41 @@ def calibration_maps(path, width, height):
                                        (width, height), cv2.CV_16SC2)
 
 
+_CLAHE_CACHE = {}
+_GAMMA_CACHE = {}
+
+
+def _clahe(clip):
+    c = _CLAHE_CACHE.get(clip)
+    if c is None:
+        c = _cv2().createCLAHE(clipLimit=clip, tileGridSize=(8, 8))
+        _CLAHE_CACHE[clip] = c
+    return c
+
+
+def _gamma_lut(gamma):
+    lut = _GAMMA_CACHE.get(gamma)
+    if lut is None:
+        lut = np.array([pow(i / 255.0, gamma) * 255 for i in range(256)],
+                       dtype=np.uint8)
+        _GAMMA_CACHE[gamma] = lut
+    return lut
+
+
 def enhance(frame, gains, clip, gamma):
-    """画面补偿：白平衡通道增益 → LAB-L CLAHE(clip>0 时) → gamma LUT。"""
+    """画面补偿：白平衡通道增益 → LAB-L CLAHE(clip>0 时) → gamma LUT。
+
+    CLAHE 对象与 gamma LUT 缓存复用（原先每帧 createCLAHE / 重建 LUT）。
+    """
     cv2 = _cv2()
     f = np.clip(frame.astype(np.float32) * np.array(gains, np.float32),
                 0, 255).astype(np.uint8)
     if clip > 0:
         lab = cv2.cvtColor(f, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
-        l = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8, 8)).apply(l)
+        l = _clahe(clip).apply(l)
         f = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
-    lut = np.array([pow(i / 255.0, gamma) * 255 for i in range(256)],
-                   dtype=np.uint8)
-    return cv2.LUT(f, lut)
+    return cv2.LUT(f, _gamma_lut(gamma))
 
 
 # ---------------------------------------------------------------------------
@@ -85,17 +107,17 @@ class ModelPreprocessor(object):
         return self._maps[key]
 
     def process(self, frame_bgr):
-        """raw(BGR,任意尺寸) → 补偿+缩放的方形帧（模型输入像素形式）。"""
+        """raw(BGR,任意尺寸) → 去畸变 → 缩放 → 补偿(在模型输入尺寸上做，省时)。"""
         cv2 = _cv2()
         h, w = frame_bgr.shape[:2]
         maps = self._maps_for(w, h)
         f = frame_bgr
         if maps is not None:
             f = cv2.remap(f, maps[0], maps[1], cv2.INTER_LINEAR)
-        f = enhance(f, self.gains, self.clip, self.gamma)
         if (w, h) != (self.size, self.size):
             f = cv2.resize(f, (self.size, self.size),
                            interpolation=cv2.INTER_LINEAR)
+        f = enhance(f, self.gains, self.clip, self.gamma)   # 640 上做，约 1/3 耗时
         return f
 
     def scale(self, frame_w, frame_h):

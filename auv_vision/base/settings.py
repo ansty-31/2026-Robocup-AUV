@@ -20,6 +20,7 @@ LOG_FPS = True
 
 STATE_IDLE = "IDLE"
 STATE_BALL = "BALL"
+STATE_BALL_FWD = "BALL_FWD"      # 撞球简化版（无命中识别，累计前进10s停）
 STATE_BACK = "BACK"
 STATE_GATE = "GATE"
 STATE_DONE = "DONE"

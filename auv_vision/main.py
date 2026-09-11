@@ -29,13 +29,16 @@ from base.camera import create_camera
 from base.uart import UartController, install_signal_handlers
 from common.detector import DetectorHub
 from task1_2.ball import BallTask
+from task1_2.ball_forward import BallForwardTask
 from gate.gate_task import GateTask
 from gate.gate_detector import build_gate_backend
 
-TASK_CLASS = {"ball": BallTask, "gate": GateTask}
-TASK_CAM = {"ball": "front", "gate": "front"}
-STATE_TASK = {S.STATE_BALL: "ball", S.STATE_GATE: "gate"}
-TASK_STATE = {"ball": S.STATE_BALL, "gate": S.STATE_GATE}
+TASK_CLASS = {"ball": BallTask, "ball_fwd": BallForwardTask, "gate": GateTask}
+TASK_CAM = {"ball": "front", "ball_fwd": "front", "gate": "front"}
+STATE_TASK = {S.STATE_BALL: "ball", S.STATE_BALL_FWD: "ball_fwd",
+              S.STATE_GATE: "gate"}
+TASK_STATE = {"ball": S.STATE_BALL, "ball_fwd": S.STATE_BALL_FWD,
+              "gate": S.STATE_GATE}
 
 
 class AppController(object):
@@ -169,6 +172,27 @@ class AppController(object):
             self.state = S.STATE_DONE
         self._state_start = now_ms
 
+    def close(self):
+        """收尾：关闭推流 + 相机 + 串口，避免残留占用（相机/串口被占会导致下次像“锁死”）。"""
+        try:
+            from base.camera import get_stream_pusher
+            pusher = get_stream_pusher()
+            if pusher is not None:
+                pusher.close()
+        except Exception:
+            pass
+        for cam in getattr(self, "cams", {}).values():
+            fn = getattr(cam, "close", None)
+            if callable(fn):
+                try:
+                    fn()
+                except Exception:
+                    pass
+        try:
+            self.uart.close()
+        except Exception:
+            pass
+
     def run(self):
         install_signal_handlers(self.uart)
         print("===== %s | 任务=%s | camera front=%s | detector=%s ====="
@@ -188,6 +212,7 @@ class AppController(object):
         finally:
             if not self.uart.estop_active:
                 self.uart.neutral()
+            self.close()
             print("[MAIN] 已停止")
 
 
@@ -195,12 +220,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--task", default="all",
-                    help="本次任务: all|ball|gate（默认 all=comm.yaml enabled）")
+                    help="本次任务: all|ball|ball_fwd|gate（默认 all=comm.yaml enabled）")
     args = ap.parse_args()
     tasks = list(S.comm.tasks.enabled) if args.task == "all" else [args.task]
     for t in tasks:
         if t not in TASK_CLASS:
-            print("未知任务: %s（可选 all|ball|gate）" % t)
+            print("未知任务: %s（可选 all|ball|ball_fwd|gate）" % t)
             sys.exit(2)
     AppController(tasks).run()
 

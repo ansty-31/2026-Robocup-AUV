@@ -67,33 +67,36 @@ def test_ball_centering():
     S.comm.ball.pid.kp, S.comm.ball.pid.ki, S.comm.ball.pid.kd = 0.9, 0.05, 0.15
     try:
         uart = UartController(sim=True)
-        hub = _FakeHub(cx_ratio=0.70)            # 球心偏右
+        hub = _FakeHub(cx_ratio=0.62)            # 球心偏右 → yaw 右转(正)
         task = BallTask(uart, hub, 640, 360)
         import numpy as np
         frame = np.zeros((360, 640, 3), dtype=np.uint8)
-        # 前进阶段出现目标且偏右 → PID 应给出负 sway（向左修正）
+        # 撞球居中改为“仅 yaw 旋转”，不再左右平移
         now = 1000
-        sway_seen = []
+        yaw_seen, sway_seen = [], []
         for i in range(80):
             now += 33
             task.process(frame, now)
+            yaw_seen.append(task.last_info.get("yaw", 0.0))
             sway_seen.append(task.last_info["sway"])
-        neg = [s for s in sway_seen[10:] if s < -0.02]
-        check("centering_sway_left", len(neg) > 0, sway_seen[-3:])
-        # 球回到画面中心 → 收敛到死区附近（积分清零）
+        pos = [y for y in yaw_seen[10:] if y > 0.02]
+        check("centering_yaw_right", len(pos) > 0, yaw_seen[-3:])
+        check("centering_no_sway", all(abs(s) < 1e-9 for s in sway_seen[5:]),
+              sway_seen[-3:])
+        # 球回到画面中心 → yaw 收敛到死区附近（积分清零）
         hub.set_center(0.5, 0.5)
         for i in range(40):
             now += 33
             task.process(frame, now)
-        check("centering_converge", abs(task.last_info["sway"]) <= 0.05,
-              task.last_info["sway"])
-        # 偏差方向相反 → 修正方向相反
-        hub.set_center(0.30, 0.5)
+        check("centering_converge", abs(task.last_info["yaw"]) <= 0.05,
+              task.last_info["yaw"])
+        # 偏差方向相反 → 转向方向相反
+        hub.set_center(0.38, 0.5)
         for i in range(30):
             now += 33
             task.process(frame, now)
-        check("centering_sway_right", task.last_info["sway"] > 0.02,
-              task.last_info["sway"])
+        check("centering_yaw_left", task.last_info["yaw"] < -0.02,
+              task.last_info["yaw"])
     finally:
         (S.comm.ball.align_x, S.comm.ball.align_y, S.DEBUG,
          S.comm.ball.pid.kp, S.comm.ball.pid.ki, S.comm.ball.pid.kd) = saved

@@ -81,6 +81,23 @@ def bgr_to_packed_nv12(bgr, out_w, out_h):
     return np.concatenate([y.reshape(-1), uv.reshape(-1)])
 
 
+def bgr_to_packed_nv12_fast(bgr, out_w, out_h):
+    """BGR→packed NV12（cv2 版：快 ~30x，色度为标准 BT.601）。
+
+    ⚠️ 与 numpy 版 bgr_to_packed_nv12 的色度**不同**（numpy 版把 2x2 求和当平均，
+    色度偏差被放大 4 倍）。切换会改变模型输入，请上机 A/B 验证后再定。
+    """
+    if bgr.shape[1] != out_w or bgr.shape[0] != out_h:
+        raise RuntimeError("分辨率不符：需 %dx%d" % (out_w, out_h))
+    import cv2
+    yuv = cv2.cvtColor(bgr, cv2.COLOR_BGR2YUV_I420).reshape(-1)
+    n = out_w * out_h
+    uv = np.empty(n // 2, dtype=np.uint8)
+    uv[0::2] = yuv[n:n + n // 4]           # U 平面 → 交织
+    uv[1::2] = yuv[n + n // 4:n + n // 2]  # V 平面 → 交织
+    return np.concatenate([yuv[:n], uv])
+
+
 def _nms(boxes, scores, iou_th):
     keep = []
     order = scores.argsort()[::-1]
@@ -283,7 +300,10 @@ class HbmRuntimeDetector(_RealBase):
         return "input"
 
     def _infer(self, square, h, w):
-        nv12 = bgr_to_packed_nv12(square, self._iw, self._ih)
+        if S.get("vision.model.fast_nv12", False):
+            nv12 = bgr_to_packed_nv12_fast(square, self._iw, self._ih)
+        else:
+            nv12 = bgr_to_packed_nv12(square, self._iw, self._ih)
         outputs = self._model.run({self._key: nv12})
         # run() -> {模型名: {输出名: ndarray}}；单模型时解一层
         if isinstance(outputs, dict) and len(outputs) == 1:

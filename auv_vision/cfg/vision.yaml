@@ -54,6 +54,7 @@ model:
   strict_x5_bin: true      # true: 拒绝 .hbm 后缀并提示正确编译链路
   input_size: 640          # 模型方形输入
   input_name: images         # hbm_runtime 输入名（板端报错时填模型实际名）
+  fast_nv12: ture         # true: 用 cv2 快速 NV12(快~30x, 标准BT.601色度)；false: 原 numpy 版
   score_threshold: 0.5
   nms_threshold: 0.45
   labels: [blue_ball, gate, red_ball]   # 类别顺序必须与训练/导出一致（决定解码类别）
@@ -65,7 +66,7 @@ model:
            kpt_order: [TL, TR, BR, BL]}   # ← 占位：models/gate_kpt.bin
 
 mission:
-  target_color: blue       # 任务目标球颜色：red | blue
+  target_color: red       # 任务目标球颜色：red | blue
 
 sim:                       # 虚拟相机（前视/下视各自仿真）
   noise: 8

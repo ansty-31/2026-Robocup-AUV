@@ -49,13 +49,23 @@ class BallTask(object):
         self._centered = False         # 球心已居中，允许前进
         self._center_cnt = 0           # 连续居中帧数
         self._spin_start_ms = None     # 搜索旋转脉冲起点
+        self._engage_until_ms = 0      # 看到球后“切入保持”截止时刻(期间不打搜索脉冲)
+        self._dashing = False          # 最后一次冲刺中(命中确认后居中+前进)
+        self._dash_until_ms = 0        # 冲刺截止时刻
+        self._hit_done = False         # 冲刺完成 = 命中(DONE)
         pid_kw = dict(kp=S.comm.ball.pid.kp, ki=S.comm.ball.pid.ki,
                       kd=S.comm.ball.pid.kd,
                       out_min=-S.comm.ball.pid.out_max,
                       out_max=S.comm.ball.pid.out_max,
                       deadzone=S.comm.ball.pid.deadzone)
-        self._pid_x = PID(**pid_kw)
+        # 垂直居中(heave) 用 ball.pid；水平居中不再横移，只用下面的 yaw PID
         self._pid_y = PID(**pid_kw)
+        # 居中 yaw：带阻尼(kd)的 PID，靠近时自动减速/刹车，避免转过头
+        self._pid_yaw = PID(kp=S.comm.ball.edge_yaw_kp, ki=0.0,
+                            kd=S.comm.ball.edge_yaw_kd,
+                            out_min=-S.comm.ball.edge_yaw_max,
+                            out_max=S.comm.ball.edge_yaw_max,
+                            deadzone=0.0)
         self.last_info = {"action": "stop", "ratio": 0.0, "growth": 0.0,
                           "dx": 0.0, "dy": 0.0, "sway": 0.0, "heave": 0.0,
                           "surge": 0.0,
@@ -76,25 +86,34 @@ class BallTask(object):
         return self._ema - prev
 
     def _surge_plan(self, r, g):
-        """面积占比分级 → 前进目标（归一化）+ 阶段标签（供日志/测试）。"""
+        """面积占比分级 → (前进目标, 阶段标签)。
+
+        远/需加速：surge_fast；接近(r>=r_near)：surge_slow 减速；到 r_hit 停。
+        """
+        fast = S.comm.ball.surge_fast
+        slow = S.comm.ball.surge_slow
         if r >= S.comm.ball.r_hit:
             return 0.0, "stop"
         if r >= S.comm.ball.r_near:
-            return 0.35, "forward_slow"
+            return slow, "forward_slow"
         if r >= S.comm.ball.r_slow:
             if g > S.comm.ball.growth_eps:
-                return 1.0, "forward_fast"
-            return 0.35, "forward_slow"
-        return 1.0, "forward_fast"
+                return fast, "forward_fast"
+            return slow, "forward_slow"
+        return fast, "forward_fast"
 
     def _center_ctl(self, cx, cy, now_ms):
-        """球心相对画面中心的归一化偏差 → PID → (sway, heave) 目标。"""
+        """球心偏差 → (dx, dy, sway, heave, yaw)。
+
+        撞球居中**只用 yaw 旋转**（不需要左右平移，sway 恒为 0）；
+        heave（升降）按 align_y 可选。
+        """
         dx = (cx - self.w / 2.0) / (self.w / 2.0)
         dy = (cy - self.h / 2.0) / (self.h / 2.0)
-        px = self._pid_x.update(dx, now_ms) if S.comm.ball.align_x else 0.0
+        yaw = self._pid_yaw.update(dx, now_ms) if S.comm.ball.align_x else 0.0
         py = self._pid_y.update(dy, now_ms) if S.comm.ball.align_y else 0.0
-        # 偏差在右/下 → 需向左/上修正：DOF 输出取反
-        return dx, dy, -px, -py
+        # 偏差在下 → 需向上修正：DOF 输出取反
+        return dx, dy, 0.0, -py, yaw
 
     def _search_logic(self, now_ms):
         """无目标智能搜索：连续 60s 无目标→慢速前进 2s 探测新区域；
@@ -140,6 +159,7 @@ class BallTask(object):
         growth = self._ema_update(ratio)
 
         surge = 0.0
+        yaw = 0.0
         label = "search"
         dx = dy = sway = heave = 0.0
         if det is not None:
@@ -148,11 +168,21 @@ class BallTask(object):
             self._search_start_ms = now_ms
             self._advance_until_ms = None
             self._spin_start_ms = None     # 重新看到目标：搜索脉冲从头开始
+            self._engage_until_ms = now_ms + S.comm.ball.engage_hold_s * 1000
             cx, cy = det.center
             dx = (cx - self.w / 2.0) / (self.w / 2.0)
             dy = (cy - self.h / 2.0) / (self.h / 2.0)
-            if not self._centered:
-                # 看到球：先停(不前进)，仅横向/升降对准让球心居中
+            if self._dashing:
+                # 最后一次冲刺：居中(yaw) + 前进
+                dx, dy, sway, heave, yaw = self._center_ctl(cx, cy, now_ms)
+                if now_ms < self._dash_until_ms:
+                    surge, label = S.comm.ball.dash_surge, "dash"
+                else:
+                    self._dashing = False
+                    self._hit_done = True       # 冲刺完成 = 命中
+                    surge, label = 0.0, "stop"
+            elif not self._centered:
+                # 看到球：先停(不前进)，只用 yaw 旋转把球心转到画面中间
                 if abs(dx) <= S.comm.ball.center_eps and \
                         abs(dy) <= S.comm.ball.center_eps:
                     self._center_cnt += 1
@@ -162,49 +192,74 @@ class BallTask(object):
                     self._center_cnt = 0
                 surge = 0.0
                 label = "center"
-                # 偏差在右/下 → 需向左/上修正(DOF 取反)
-                if S.comm.ball.align_x:
-                    sway = -self._pid_x.update(dx, now_ms)
-                else:
-                    sway = 0.0
-                if S.comm.ball.align_y:
-                    heave = -self._pid_y.update(dy, now_ms)
-                else:
-                    heave = 0.0
+                # 撞球居中：仅 yaw(旋转)，不做左右平移(sway 恒 0)
+                yaw = self._pid_yaw.update(dx, now_ms) if S.comm.ball.align_x \
+                    else 0.0
+                sway = 0.0
+                heave = -self._pid_y.update(dy, now_ms) if S.comm.ball.align_y \
+                    else 0.0
             else:
                 # 已居中：按面积分级前进 + 持续居中修正
                 surge, label = self._surge_plan(self._ema or 0.0, growth)
                 if label == "stop":
+                    # 只是“贴近并停住”不算撞到：短时连续达阈值 → 最后一次冲刺
                     self._hit_cnt += 1
-                if surge > 0:
-                    dx, dy, sway, heave = self._center_ctl(cx, cy, now_ms)
+                    if self._hit_cnt >= S.comm.ball.hit_confirm_frames:
+                        self._dashing = True
+                        self._dash_until_ms = now_ms + \
+                            S.comm.ball.dash_dur_s * 1000
+                        surge, label = S.comm.ball.dash_surge, "dash"
                 else:
-                    self._pid_x.reset()
+                    self._hit_cnt = 0          # 非连续近距帧 → 重新计数
+                if surge > 0:
+                    dx, dy, sway, heave, yaw = self._center_ctl(cx, cy, now_ms)
+                else:
                     self._pid_y.reset()
+                    self._pid_yaw.reset()
         else:
-            if self._seen and self._ema is not None and \
+            if self._dashing:
+                # 冲刺中丢目标：盲冲到底(仅前进)
+                if now_ms < self._dash_until_ms:
+                    surge, label = S.comm.ball.dash_surge, "dash"
+                else:
+                    self._dashing = False
+                    self._hit_done = True
+                    surge, label = 0.0, "stop"
+            elif self._seen and self._ema is not None and \
                     self._ema >= S.comm.ball.r_near:
-                self._hit_cnt += 1            # 近距消失 = 越球
-                label = "stop"
+                # 近距消失：不能算命中 → 低速后退
+                self._hit_cnt = 0
+                surge = S.comm.ball.backward_surge
+                label = "backward"
             elif self._seen and self._lost_cnt < S.comm.ball.lost_grace_frames:
                 self._lost_cnt += 1
                 surge = 0.25                   # 短时丢失：低速保持惯性
                 label = "forward_slow"
+            elif now_ms < self._engage_until_ms:
+                # 刚看到过球但短暂丢失：暂停搜索脉冲，原地保持(中性)等重新锁定
+                self._lost_cnt += 1
+                label = "hold"
+            elif self._start_ms is not None and \
+                    now_ms - self._start_ms < S.comm.ball.entry_look_s * 1000:
+                # 入场“看一眼”：先原地保持、只识别不动作；看到球就按识别结果进 center
+                label = "look"
             else:
                 self._lost_cnt += 1            # 未见/长丢：原地旋转搜索
                 self._centered = False         # 丢球：重新等待居中对准
+                self._hit_cnt = 0
                 label, surge = self._search_logic(now_ms)
 
-        # 直接下发 DOF：前进+居中修正；搜索用 10% 脉冲旋转(转一下停2s)
+        # 直接下发 DOF：前进+居中修正；搜索用脉冲旋转(转一下停一会儿)
         if label == "search":
             yaw = self._search_pulse_yaw(now_ms)
             self.uart.send_dof(0.0, 0.0, 0.0, yaw)
         else:
-            self.uart.send_dof(surge, sway, heave, 0.0)
+            # center 阶段可能带 yaw(球在画面边缘时转向球)，其余阶段 yaw=0
+            self.uart.send_dof(surge, sway, heave, yaw)
 
         status = S.STATUS_RUNNING
         reason = ""
-        if self._hit_cnt >= S.comm.ball.hit_confirm_frames:
+        if self._hit_done:
             status, reason = S.STATUS_DONE, "hit"
         elif self._search_exhausted:
             status, reason = S.STATUS_DONE, "search_stop"
@@ -217,6 +272,7 @@ class BallTask(object):
             "growth": round(growth, 4), "dx": round(dx, 4),
             "dy": round(dy, 4), "sway": round(sway, 4),
             "heave": round(heave, 4), "surge": round(surge, 3),
+            "yaw": round(yaw, 4),
             "status": status, "reason": reason})
         if S.DEBUG and status == S.STATUS_DONE:
             print("[BALL] DONE(%s) %s r=%.3f sway=%.2f frames=%d"
