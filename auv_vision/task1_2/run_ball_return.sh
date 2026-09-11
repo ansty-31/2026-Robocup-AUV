@@ -18,13 +18,19 @@ cd "$(dirname "$0")/.."
 
 TASK="${AUV_TASK:-ball}"
 LOG="${AUV_DOF_LOG:-/tmp/path.csv}"
-WAIT_S="${AUV_WAIT_S:-45}"
+WAIT_S="${AUV_WAIT_S:-30}"
 DESCEND_S="${AUV_DESCEND_S:-3}"
 FWD_S="${AUV_FWD_S:-3}"
 FWD_SURGE="${AUV_FWD_SURGE:-0.35}"
 REV_S="${AUV_REV_S:-3}"
 REV_SURGE="${AUV_REV_SURGE:--0.35}"
 RETURN_MODE="${AUV_RETURN:-memory}"
+
+# 清理上次残留：孤儿 main.py 会占住相机/串口，导致下次启动像“锁死”
+if pkill -f "python3 main.py --task" 2>/dev/null; then
+  echo "[clean] 已清理上一次残留的 main.py 进程"
+  sleep 1
+fi
 
 echo "=================================================================="
 echo " 撞球(${TASK}) + 返回出发区(策略: ${RETURN_MODE})（下潜 ${DESCEND_S}s，待机 ${WAIT_S}s）"
