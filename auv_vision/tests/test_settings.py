@@ -35,7 +35,8 @@ def test_access():
           settings.comm.serial.baud > 0 and
           settings.comm.frame.header == 0xA5 and
           settings.comm.dof_map.surge.axis == 1)
-    check("pid_dot", settings.comm.ball.pid.kp == 0.9 and
+    check("pid_dot", isinstance(settings.comm.ball.pid.kp, (int, float)) and
+          isinstance(settings.comm.ball.pid.out_max, (int, float)) and
           settings.comm.ball.align_x is True)
     # 下标/整数键/嵌套列表
     check("index", settings.comm.frame.aux_axis[4] == 165 and

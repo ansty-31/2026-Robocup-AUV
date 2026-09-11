@@ -82,20 +82,25 @@ def make_ctrl(tasks):
 def test_ball_full_stages():
     ctrl = make_ctrl(["ball"])
     actions = set()
+    peak = 0.0
     now = 0
     for _ in range(4000):
         now += 33
         ctrl.step(now)
-        actions.add(ctrl.tasks["ball"].last_info["action"])
+        info = ctrl.tasks["ball"].last_info
+        actions.add(info["action"])
+        peak = max(peak, info["ratio"])
         if ctrl.state == S.STATE_DONE:
             break
     info = ctrl.tasks["ball"].last_info
     if info["reason"] != "hit":
         print("ball info:", info)
     check("ball_reason_hit", info["reason"] == "hit")
-    check("ball_actions", {"search", "forward_fast", "forward_slow", "stop"}
-          <= actions, actions)
-    check("ball_ratio", info["ratio"] > 0.5, "ratio=%.3f" % info["ratio"])
+    check("ball_actions", {"forward_fast", "forward_slow", "stop"} <= actions,
+          actions)
+    check("ball_entry_state", bool(actions & {"look", "search"}), actions)
+    # 命中由“最后一次冲刺”确认：DONE 时球已被撞飞，故看过程峰值而非终值
+    check("ball_peak_ratio", peak > 0.5, "peak=%.3f" % peak)
 
 
 # ---- 2) 状态机：单任务顺序 -------------------------------------------------

@@ -157,16 +157,15 @@ def main():
                 data, addr = sock.recvfrom(256)
                 target = parse_motion_packet(data)
                 last_rx = now
-                # if S.DEBUG and now - last_log >= 0.25:
-                #     print("[UDP] %s -> surge=%.2f sway=%.2f heave=%.2f yaw=%.2f"
-                #           % (addr[0], target[0], target[1], target[2],
-                #              target[3]))
-                    # last_log = now
+                if now - last_log >= 0.25:      # 收到 PC 包就打印（诊断手动控制是否收到指令）
+                    print("[UDP] %s -> surge=%.2f sway=%.2f heave=%.2f yaw=%.2f"
+                          % (addr[0], target[0], target[1], target[2],
+                             target[3]))
+                    last_log = now
             except socket.timeout:
                 pass
             except ValueError as exc:
-                if S.DEBUG:
-                    print("[UDP] bad packet: %s" % exc)
+                print("[UDP] bad packet: %r (%s)" % (bytes(data[:32]), exc))
 
             if now - last_rx > timeout_s:
                 target = (0.0, 0.0, 0.0, 0.0)

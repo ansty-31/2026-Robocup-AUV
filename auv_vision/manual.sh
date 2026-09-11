@@ -23,6 +23,13 @@
 set -u
 cd "$(dirname "$0")"
 
+# 手动接管前先清理残留的视觉任务：main.py 会持续向串口发帧并占用相机，
+# 导致手动遥控帧被压掉 / 推流打不开（表现为“切成手动也没法控制”）。
+if pkill -f "python3 main.py --task" 2>/dev/null; then
+  echo "[clean] 已停止残留的 main.py（释放串口/相机）"
+  sleep 1
+fi
+
 HOST="${AUV_STREAM_HOST:-192.168.137.2}"
 PORT="${AUV_STREAM_PORT:-5000}"
 STREAM_FPS="${AUV_STREAM_FPS:-30}"

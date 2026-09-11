@@ -24,6 +24,10 @@ class Camera(object):
     def read(self):
         raise NotImplementedError
 
+    def close(self):
+        """释放相机资源（子类按需覆写）。"""
+        pass
+
 
 # ---------------------------------------------------------------------------
 # 虚拟相机（前视/下视各自仿真；下视带红色标示线供 back 真实颜色逻辑测试）
@@ -166,6 +170,16 @@ class UsbCamera(Camera):
             if ok2:
                 pusher.offer(enc)
         return buf
+
+    def close(self):
+        """释放 V4L2 采集句柄（否则进程异常退出后相机可能被占用）。"""
+        cap = getattr(self, "_cap", None)
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
+            self._cap = None
 
 
 class MipiCamera(Camera):
