@@ -50,7 +50,7 @@ model:
                            # 注意：.hbm 是车载 J5/J6/S100(Nash) 格式，X5(Bayes-e) 无法加载！
   # ===== 双权重（ball 与 gate 分离）=====
   # 权重① ball：沿用单模型多类别 .bin（model.path 下）
-  path: /home/sunrise/AUV/models/auv_multi.bin
+  path: /home/sunrise/AUV/models/yolo11n_detect_bayese_640x640_nv12.bin
   strict_x5_bin: true      # true: 拒绝 .hbm 后缀并提示正确编译链路
   input_size: 640          # 模型方形输入
   input_name: images         # hbm_runtime 输入名（板端报错时填模型实际名）
@@ -61,7 +61,7 @@ model:
   # 权重② gate keypoint（占位）：导出 .bin 后填入下方 task_models.gate.path，
   # 与权重①同时配置、互不影响（ball 走 model.path，gate 走 task_models.gate）。
   # path 为空 → gate 用 mock 联调/或跳过（取决于 model.mode）
-  task_models:
+  task_models: gate_kpt_bayese_640x640_nv12.bin
     gate: {path: "", kind: keypoint, labels: [gate],
            kpt_order: [TL, TR, BR, BL]}   # ← 占位：models/gate_kpt.bin
 
