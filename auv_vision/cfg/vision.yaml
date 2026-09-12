@@ -61,12 +61,13 @@ model:
   # 权重② gate keypoint（占位）：导出 .bin 后填入下方 task_models.gate.path，
   # 与权重①同时配置、互不影响（ball 走 model.path，gate 走 task_models.gate）。
   # path 为空 → gate 用 mock 联调/或跳过（取决于 model.mode）
-  task_models: gate_kpt_bayese_640x640_nv12.bin
-    gate: {path: "", kind: keypoint, labels: [gate],
-           kpt_order: [TL, TR, BR, BL]}   # ← 占位：models/gate_kpt.bin
+  task_models:
+    gate: {path: /home/sunrise/AUV/models/gate_kpt_bayese_640x640_nv12.bin,
+           kind: keypoint, labels: [gate],
+           kpt_order: [TL, TR, BR, BL]}   # 门 keypoint 权重(4角点)
 
 mission:
-  target_color: red       # 任务目标球颜色：red | blue
+  target_color: blue       # 任务目标球颜色：red | blue
 
 sim:                       # 虚拟相机（前视/下视各自仿真）
   noise: 8
