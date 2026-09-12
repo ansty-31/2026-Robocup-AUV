@@ -43,6 +43,7 @@ class BallForwardTask(BallTask):
         self._last_ms = now_ms
 
         det = self.hub.detect(self.name, frame)
+        self.last_dets = self.hub.detect_all(frame)   # 同帧缓存命中, 零额外开销
         ratio = det.ratio(self.w, self.h) if det is not None else 0.0
         self._ema_update(ratio)            # 仅用于日志/画框
 

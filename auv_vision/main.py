@@ -11,7 +11,7 @@
 
 用法：
     python3 main.py --task all          # 按 comm.yaml tasks.enabled 顺序执行
-    python3 main.py --task ball         # 本次只执行撞球（gate 同理）
+    python3 main.py --task gate         # 本次只执行撞球（ball 同理）
 """
 import argparse
 import os
@@ -48,7 +48,11 @@ class AppController(object):
         tasks = list(tasks or S.comm.tasks.enabled)
         for name in tasks:                     # 装配层：gate 专用后端（mock/真实）
             if name == "gate":
-                self.hub.register("gate", build_gate_backend())
+                backend = build_gate_backend()
+                self.hub.register("gate", backend)
+                if backend is None:
+                    print("[MAIN] ⚠️ gate 后端不可用：权重缺失/路径不对")
+                    print("       先跑 python3 preview_detect.py --gate-kpt 自检权重")
         self.cams = {"front": create_camera("front")}
         self.tasks = {}
         for name in tasks:
@@ -62,6 +66,15 @@ class AppController(object):
         self._log_t = time.time()
         self._video_on = self._init_video()
 
+    def check_ready(self, tasks):
+        """返回不可用任务名列表（下水前自检：避免设备已入水却空跑）。"""
+        bad = []
+        for name in tasks:
+            task = self.tasks.get(name)
+            if task is None or not task.ready:
+                bad.append(name)
+        return bad
+
     # ------------------------------------------------------------------ 画面监测
     _KIND_COLOR = {"red_ball": (60, 60, 255), "blue_ball": (255, 150, 30),
                    "gate": (60, 255, 60), "unknown": (200, 200, 200)}
@@ -71,10 +84,19 @@ class AppController(object):
             return False
         if not HAS_CV2:
             return False
-        if not os.environ.get("DISPLAY") and not os.environ.get("AUV_FORCE_SHOW"):
+        disp = os.environ.get("DISPLAY")
+        if not disp and not os.environ.get("AUV_FORCE_SHOW"):
             print("[MAIN] 无 DISPLAY，跳过画面窗口（需要时 export DISPLAY=:0 或 "
                   "AUV_FORCE_SHOW=1）")
             return False
+        # 板端 cv2 是 Qt 构建：X 不可用时 namedWindow **直接 abort 进程**（不是异常，
+        # try/except 拦不住）→ 先自己确认本地 X socket 存在，别让浮窗把整船任务搞崩
+        if disp and not os.environ.get("AUV_FORCE_SHOW"):
+            n = disp.split(":")[-1].split(".")[0]
+            if not os.path.exists("/tmp/.X11-unix/X%s" % n):
+                print("[MAIN] DISPLAY=%s 无对应 X socket，跳过画面窗口"
+                      "（需要强制时 AUV_FORCE_SHOW=1）" % disp)
+                return False
         try:
             cv2.namedWindow("AUV")
             return True
@@ -83,20 +105,40 @@ class AppController(object):
             return False
 
     def _draw(self, frame, dets):
-        """叠加 识别框/类别/中心线 + 状态信息 后显示。"""
+        """叠加 识别框/角点/中心线 + 状态信息 后显示。
+
+        dets 用**当前任务本帧已算出的检测结果**（见各 task.last_dets），
+        不再调 hub.detect_all：否则 gate 任务会额外跑一遍 ball 权重，帧率腰斩。
+        """
         img = frame.copy()
         h, w = img.shape[:2]
         fs = max(0.45, w / 900.0)
         cv2.line(img, (w // 2, 0), (w // 2, h), (255, 255, 255), 1)
         cv2.line(img, (0, h // 2), (w, h // 2), (255, 255, 255), 1)
+        kpt_r = max(3, int(w / 360.0))
         for d in dets:
             color = self._KIND_COLOR.get(d.kind, self._KIND_COLOR["unknown"])
-            cv2.rectangle(img, (d.x, d.y), (d.x + d.w, d.y + d.h),
-                          color, 2)
-            lab = "%s %.2f" % (d.kind, d.score)
-            ty = d.y - 8 if d.y > 24 else d.y + d.h + 20
-            cv2.putText(img, lab, (d.x, ty), cv2.FONT_HERSHEY_SIMPLEX,
-                        fs * 0.7, color, 1, cv2.LINE_AA)
+            if d.w > 0 and d.h > 0:
+                cv2.rectangle(img, (d.x, d.y), (d.x + d.w, d.y + d.h),
+                              color, 2)
+                lab = "%s %.2f" % (d.kind, d.score)
+                ty = d.y - 8 if d.y > 24 else d.y + d.h + 20
+                cv2.putText(img, lab, (d.x, ty), cv2.FONT_HERSHEY_SIMPLEX,
+                            fs * 0.7, color, 1, cv2.LINE_AA)
+            kpts = getattr(d, "kpts", None)
+            if kpts is None:
+                continue
+            kc = getattr(d, "kpt_conf", None)
+            for i in range(len(kpts)):
+                c = float(kc[i]) if kc is not None else 1.0
+                if c <= 0.0:
+                    continue
+                px, py = int(kpts[i][0]), int(kpts[i][1])
+                pc = color if c >= 0.5 else (150, 150, 150)
+                cv2.circle(img, (px, py), kpt_r, pc, -1)
+                cv2.putText(img, "%d" % i, (px + kpt_r + 2, py - kpt_r),
+                            cv2.FONT_HERSHEY_SIMPLEX, fs * 0.5, pc, 1,
+                            cv2.LINE_AA)
         lines = ["state=%s task=%s frame=%d"
                  % (self.state, list(self.tasks), self.frames)]
         if self.state in STATE_TASK:
@@ -149,7 +191,7 @@ class AppController(object):
                 if frame is not None:
                     task.process(frame, now_ms)
                     if self._video_on:
-                        self._draw(frame, self.hub.detect_all(frame))
+                        self._draw(frame, getattr(task, "last_dets", None) or [])
                     if task.last_info["status"] == S.STATUS_DONE:
                         self._advance(now_ms, "%s_done(%s)"
                                       % (self.state, task.last_info["reason"]))
@@ -193,11 +235,22 @@ class AppController(object):
         except Exception:
             pass
 
+    def _model_desc(self):
+        """本次运行实际会加载的权重（一眼确认没走错模型）。"""
+        parts = []
+        if any(n in self.tasks for n in ("ball", "ball_fwd")):
+            parts.append("ball=%s" % os.path.basename(str(S.vision.model.path)))
+        if "gate" in self.tasks:
+            gc = S.get("vision.model.task_models.gate", None) or {}
+            parts.append("gate=%s" % os.path.basename(str(gc.get("path", "?"))))
+        return " ".join(parts) or "-"
+
     def run(self):
         install_signal_handlers(self.uart)
         print("===== %s | 任务=%s | camera front=%s | detector=%s ====="
               % (S.PROJECT_NAME, [k for k in self.tasks],
                  S.vision.camera.front.type, S.vision.model.mode))
+        print("===== 权重: %s =====" % self._model_desc())
         period = 1.0 / max(S.vision.camera.front.fps, 5)
         try:
             while self.state != S.STATE_DONE:
@@ -227,7 +280,17 @@ def main():
         if t not in TASK_CLASS:
             print("未知任务: %s（可选 all|ball|ball_fwd|gate）" % t)
             sys.exit(2)
-    AppController(tasks).run()
+    ctrl = AppController(tasks)
+    # 单任务运行（下水前）自检：后端/权重不可用就直接拒绝启动，避免入水后空跑
+    bad = ctrl.check_ready(tasks) if len(tasks) == 1 else []
+    if bad:
+        print("[MAIN] ✗ 任务 %s 的后端不可用，拒绝启动：%s" % (bad[0], ctrl._model_desc()))
+        if "gate" in bad:
+            print("       检查 cfg/vision.yaml → model.task_models.gate.path 是否存在，"
+                  "并先跑 preview_detect.py --gate-kpt 自检")
+        ctrl.close()
+        sys.exit(3)
+    ctrl.run()
 
 
 if __name__ == "__main__":

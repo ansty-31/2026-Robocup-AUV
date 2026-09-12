@@ -9,7 +9,12 @@ RANGE_ALIGN 子状态（按前端 mode 与门框占屏比仲裁）：
   CREEP    远距小框（coarse far / width）：慢速 creep + 框心对中
   HOLD     中/近角不足：surge=0 保持对中；≥hold.max_frames → REACQUIRE
   REACQUIRE 短后退重取整门（拉距→4 角重现）；超限 → SEARCH
-穿过例外：Z ≤ z.cross → THROUGH（忽略角丢失，直行；目标消失确认 → 计数+1）
+穿过例外（两条，任一成立即 THROUGH，忽略角丢失直行）：
+  ① 位姿可信且 Z ≤ z.cross 连续 cross_confirm_frames 帧；
+  ② 进近中已到近距(Z ≤ z.near_lost_m)后整门丢失（门占满视野/机身入门框）。
+  THROUGH 内再按 through.confirm_frames 帧确认 → 计数 +1（达 pass_target → DONE）。
+  位姿跳变保护：pnp.max_z_jump_m 内的帧间变化才可信，突变帧弃帧退化 coarse，
+  防平面 PnP 错解(尤其偶发 z≤cross)把船直接推出去。
 
 依赖：gate.geometry（位姿）、gate.gate_frontend（mode）、common.PID。
 参数：cfg/vision.yaml gate.* 与 cfg/comm.yaml gate.*。
@@ -60,13 +65,23 @@ class GateTask(object):
         self.body_center_offset = float(geo.get("body_center_offset", 0.0))
         self.obj3 = object_points(self.frame_w_m, self.frame_h_m)
         self.camera = board_camera()
+        # 下水前自检：标定分辨率必须与实际帧一致，否则 PnP 深度整体缩放错
+        if (self.camera.width, self.camera.height) != (self.w, self.h):
+            print("[GATE] ⚠️ 标定尺寸 %dx%d ≠ 实际帧 %dx%d：PnP 距离会系统性偏差，"
+                  "请按当前分辨率重新标定 (cfg/front_camera.yaml)"
+                  % (self.camera.width, self.camera.height, self.w, self.h))
 
         pid_kw = dict(kp=G.pid.kp, ki=G.pid.ki, kd=G.pid.kd,
                       out_min=-G.pid.out_max, out_max=G.pid.out_max,
                       deadzone=G.pid.deadzone)
-        self._pid_sway = PID(**pid_kw)
-        self._pid_heave = PID(**pid_kw)
-        self._pid_yaw = PID(**pid_kw)
+        # 两套横向 PID：位姿档喂"t_x/0.5(m) 归一化"，像素档喂"框心偏差 归一化"。
+        # 单位不同必须分开：合用一个 PID 时 kd>0 会在档位切换瞬间产生跨量纲 D 尖峰
+        # （撞球只有像素档，所以它一套就够）。
+        self._pid_sway_pose = PID(**pid_kw)
+        self._pid_heave_pose = PID(**pid_kw)
+        self._pid_sway_px = PID(**pid_kw)
+        self._pid_heave_px = PID(**pid_kw)
+        # 过门不做原地转向（机身穿过开口即可，无朝向要求）→ 无 yaw PID
 
         self.last_info = {"phase": PH_SEARCH, "substate": "", "mode": "",
                           "action": "stop", "z": 0.0, "dx": 0.0, "dy": 0.0,
@@ -82,26 +97,30 @@ class GateTask(object):
         self.phase = PH_SEARCH
         self.substate = ""
         self.mode = ""
-        self._last_pose = None            # (rvec, tvec) 上一帧位姿（p3p 消歧/防抖）
+        self._last_pose = None            # (rvec, tvec) 上一帧位姿（消歧/防抖）
         self._z_last = None
+        self._z_guard = False             # 上一帧是否有可信位姿（z 跳变保护基准）
         self._lost_cnt = 0
         self._center_cnt = 0
         self._hold_cnt = 0
+        self._cross_cnt = 0              # 连续 z≤cross 帧数（穿门确认，防单帧错解）
         self._through_frames = 0
         self._reacquire_start = None
         self._search_entry_ms = None
         self._pass_cnt = 0
         self._finished = False
         self._reason = ""
+        self.last_dets = []               # 本帧门检测（供 main._draw 画角点）
 
     @property
     def ready(self):
         return self.hub.has_extra(self.name)
 
     # ------------------------------------------------------------ 工具
-    def _pid_out(self, err_m):
-        """位置误差(m) → PID（带死区/限幅）。"""
-        return _dof_clip(self._pid_sway.update(err_m))
+    def _reset_lateral_pids(self):
+        for p in (self._pid_sway_pose, self._pid_heave_pose,
+                  self._pid_sway_px, self._pid_heave_px):
+            p.reset()
 
     def _set_info(self, action, mode="", substate="",
                   z=None, dx=0.0, dy=0.0, sway=0.0, heave=0.0,
@@ -122,14 +141,17 @@ class GateTask(object):
         self.substate = ""
         self._through_frames = 0
         self._lost_cnt = 0
-        self._pid_sway.reset()
-        self._pid_heave.reset()
+        self._z_guard = False
+        self._reset_lateral_pids()
 
     def _start_search(self):
         self.phase = PH_SEARCH
         self.substate = ""
         self._search_entry_ms = None
         self._last_pose = None
+        self._z_last = None
+        self._z_guard = False
+        self._cross_cnt = 0
         self._lost_cnt = 0
         self._hold_cnt = 0
 
@@ -159,6 +181,7 @@ class GateTask(object):
             return S.STATUS_DONE
 
         dets = self.hub.detect_list(self.name, frame)
+        self.last_dets = dets
         det = None
         for d in dets:
             if d.kind == "gate" and (det is None or d.score > det.score):
@@ -188,7 +211,7 @@ class GateTask(object):
     def _step(self, det, now_ms):
         G = self._G
         if self.phase == PH_THROUGH:
-            self._tick_through(now_ms)
+            self._tick_through(now_ms)      # 穿门=直行，不做横向微调
             return
         if det is None:
             self._tick_lost(now_ms)
@@ -209,16 +232,34 @@ class GateTask(object):
             obj3s = self.obj3[ids]
             img2s = np.asarray(det.kpts)[ids]
             pnp = V.pnp
-            prev = self._last_pose if mode == MODE_P3P else None
+            # 有上帧位姿就用于消歧（平面 IPPE 双解在远距/小目标时 RMS 接近，
+            # 纯靠 RMS 会帧间来回跳；上帧距离惩罚把解锁在连续分支上）
+            prev = self._last_pose
             res = gate_pose(self.camera, obj3s, img2s, prev=prev,
                             reproj_thr=pnp.get("reproj_px", 8.0),
                             z_bounds=(pnp.get("z_min", 0.2),
                                       pnp.get("z_max", 15.0)),
                             refine=pnp.get("refine", True))
             if res is not None:
+                # z 跳变保护：上一帧也有可信位姿时，z 突变视为错解弃帧
+                # （错解若给出 z ≤ z.cross 会直接触发 THROUGH → 满速冲出去）
+                max_jump = float(pnp.get("max_z_jump_m", 0.8))
+                if self._z_guard and self._z_last is not None and max_jump > 0:
+                    z_new = float(res[1].ravel()[2])
+                    if abs(z_new - self._z_last) > max_jump:
+                        if S.DEBUG:
+                            print("[GATE] 弃帧: z 跳变 %.2f→%.2f m (>%.2f)"
+                                  % (self._z_last, z_new, max_jump))
+                        res = None
+            if res is not None:
+                self._z_guard = True
                 self._on_pose(det, res, now_ms, mode=mode, kpt=n)
                 return
-            mode = MODE_COARSE          # 位姿校验失败 → 退化 coarse
+            mode = MODE_COARSE          # 位姿校验失败/跳变 → 退化 coarse
+        # 本帧没有可用位姿：解除跳变判据，下个位姿重新建立基准（防“卡死”）；
+        # 同时清零穿门确认计数 → 只有“连续帧”都判就近才算过门
+        self._z_guard = False
+        self._cross_cnt = 0
         if mode == MODE_WIDTH:
             self._on_width(det, now_ms, ids)
             return
@@ -235,16 +276,28 @@ class GateTask(object):
         self._z_last = z
         t = tvec.ravel()
         dx_m, dy_m = float(t[0]), float(t[1])
-        if z <= G.z.cross:
-            self._start_through()
-            self._set_info("through", mode=mode, z=z, surge=G.surge.through,
-                           dx=dx_m, dy=dy_m, kpt=kpt)
-            return
-        sway = -_dof_clip(self._pid_sway.update(
-            max(-1, min(1, dx_m / _ALIGN_SCALE))))
-        heave = -_dof_clip(self._pid_heave.update(
-            max(-1, min(1, dy_m / _ALIGN_SCALE))))
+        # 横向微调（位姿档 PID，统一量纲：t_x/0.5 → ±1）
+        sway = -_dof_clip(self._pid_sway_pose.update(
+            max(-1, min(1, dx_m / _ALIGN_SCALE)), now_ms))
+        heave = -_dof_clip(self._pid_heave_pose.update(
+            max(-1, min(1, dy_m / _ALIGN_SCALE)), now_ms))
         aligned = abs(dx_m) <= G.align.xy_m and abs(dy_m) <= G.align.xy_m
+        if z <= G.z.cross:
+            # 穿门确认：单帧就近不冲（平面 PnP 偶发错解若给出 z≤cross，
+            # 直接 THROUGH 会让船满速冲出去），连续 n 帧才判过门
+            self._cross_cnt += 1
+            need = int(G.z.get("cross_confirm_frames", 2))
+            if self._cross_cnt >= max(1, need):
+                # 冲刺：只前进，不带横向微调（微调已在上一帧做完）
+                self._start_through()
+                self._set_info("through", mode=mode, z=z, surge=G.surge.through,
+                               dx=dx_m, dy=dy_m, kpt=kpt)
+            else:
+                # 冲刺前最后一帧：不前进，只做横向微调对准
+                self._set_info("center", mode=mode, z=z, dx=dx_m, dy=dy_m,
+                               sway=sway, heave=heave, kpt=kpt)
+            return
+        self._cross_cnt = 0
 
         if self.phase in (PH_SEARCH,):
             self.phase = PH_ALIGN
@@ -262,9 +315,9 @@ class GateTask(object):
             self._set_info("center", mode=mode, z=z, dx=dx_m, dy=dy_m,
                            sway=sway, heave=heave, kpt=kpt)
         elif self.phase == PH_APPROACH:
-            if z > G.z.fast_max:
-                surge = G.surge.fast
-            elif z > G.z.slow_max:
+            # 进近两档（远→快 / 近→慢）；分档点 = z.slow_max
+            # 注：z.fast_max 暂未分档（如需三档在此加中间档）
+            if z > G.z.slow_max:
                 surge = G.surge.fast
             else:
                 surge = G.surge.slow
@@ -291,8 +344,8 @@ class GateTask(object):
         cx, cy = bbox_center(det)
         dxn = (aim_x - self.w / 2.0) / (self.w / 2.0)
         dyn = (cy - self.h / 2.0) / (self.h / 2.0)
-        sway = -_dof_clip(self._pid_sway.update(dxn))
-        heave = -_dof_clip(self._pid_heave.update(dyn))
+        sway = -_dof_clip(self._pid_sway_px.update(dxn, now_ms))
+        heave = -_dof_clip(self._pid_heave_px.update(dyn, now_ms))
         aligned = abs(dxn) <= G.align.xy_m and abs(dyn) <= G.align.xy_m
         if self.phase == PH_SEARCH:
             self.phase = PH_ALIGN
@@ -328,9 +381,10 @@ class GateTask(object):
         cx, cy = bbox_center(det)
         dxn = (cx - self.w / 2.0) / (self.w / 2.0)
         dyn = (cy - self.h / 2.0) / (self.h / 2.0)
-        sway = -_dof_clip(self._pid_sway.update(dxn))
-        heave = -_dof_clip(self._pid_heave.update(dyn))
-        aligned = abs(dxn) <= 0.05 and abs(dyn) <= 0.10
+        sway = -_dof_clip(self._pid_sway_px.update(dxn, now_ms))
+        heave = -_dof_clip(self._pid_heave_px.update(dyn, now_ms))
+        aligned = abs(dxn) <= G.coarse.get("align_x", 0.05) and \
+            abs(dyn) <= G.coarse.get("align_y", 0.10)
 
         if self.phase == PH_SEARCH:
             self.phase = PH_ALIGN
@@ -383,6 +437,8 @@ class GateTask(object):
     def _tick_lost(self, now_ms):
         G = self._G
         self._lost_cnt += 1
+        self._z_guard = False             # 丢目标→解除 z 跳变基准
+        self._cross_cnt = 0
         if self.phase in (PH_ALIGN,) and self.substate == SUB_REACQUIRE:
             self._tick_reacquire(now_ms)
             return
@@ -395,9 +451,22 @@ class GateTask(object):
                 self._set_info("search")
             return
         if self.phase == PH_APPROACH:
-            if self._lost_cnt <= G.pose_hold_frames and self._z_last is not None:
-                self._set_info("forward_slow", z=self._z_last,
-                               surge=G.surge.creep)
+            near_lost_m = float(G.z.get("near_lost_m", 1.0))
+            if self._z_last is not None and self._z_last <= near_lost_m:
+                # 进近已到近距(z≤near_lost_m)却整门丢失：门已占满视野/机身进入门框，
+                # 这是**真过门**的典型现象 → 直接判过门并直行穿越（不等防抖、不后退）；
+                # 否则只会退回 SEARCH，永远数不到过门（旧版这里靠 PnP 错解偶然给出
+                # z≤cross 才“过门”）
+                if S.DEBUG:
+                    print("[GATE] 近距丢失(z=%.2f≤%.2f) → 判过门"
+                          % (self._z_last, near_lost_m))
+                self._start_through()
+                self._set_info("through", surge=G.surge.through)
+            elif self._lost_cnt <= G.pose_hold_frames and self._z_last is not None:
+                # 还在远处、只是短暂丢失：**轻微后退**（学撞球：丢目标时不带速度盲冲，
+                # 退一点换取重新锁定/更大视野），退满防抖窗口仍无目标 → 转 SEARCH
+                self._set_info("backward_slow", z=self._z_last,
+                               surge=-float(G.surge.lost_backward))
             else:
                 self._start_search()
                 self._set_info("search")
@@ -407,6 +476,7 @@ class GateTask(object):
         self._set_info("search", yaw=yaw)
 
     def _tick_through(self, now_ms):
+        """穿门：**只前进、不微调**（横向修正全部留在冲刺前完成）。"""
         G = self._G
         self._through_frames += 1
         if self._lost_cnt is not None:

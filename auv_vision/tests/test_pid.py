@@ -59,6 +59,9 @@ class _FakeHub(object):
         cy = int(fh * self._cy)
         return Det("blue_ball", 0.9, cx - s // 2, cy - s // 2, s, s)
 
+    def detect_all(self, frame):          # main._draw 走这里（真实 DetectorHub 同 API）
+        return [self.detect("ball", frame)]
+
 
 def test_ball_centering():
     saved = (S.comm.ball.align_x, S.comm.ball.align_y, S.DEBUG,

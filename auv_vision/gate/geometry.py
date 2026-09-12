@@ -161,11 +161,20 @@ def reproj_rms(camera, obj3, img2, rvec, tvec):
 # ---------------------------------------------------------------------------
 # 位姿解算（§4.4）
 # ---------------------------------------------------------------------------
+def _finite(r, t):
+    """候选必须是有限值：IPPE 在退化配置(门正对、某些 z)会返回 nan 解。"""
+    return np.all(np.isfinite(np.asarray(r, np.float64))) and \
+        np.all(np.isfinite(np.asarray(t, np.float64)))
+
+
 def _iter_candidates(camera, obj3, img2, prev=None):
     """生成候选 (rvec,tvec) 列表。
 
     - ≥4 点（共面矩形）：solvePnPGeneric(IPPE)（cv2 4/5 兼容，取 rvecs/tvecs）；
-      失败退回单次 solvePnP。
+      解全为 nan/异常时依次退 SQPNP → ITERATIVE(带上帧猜值)。
+      **注意**：退化配置(门正对、某些 z)下 IPPE 会返回 2 个 nan 解；若不判有效性，
+      就会“有候选但全废”，把后面的兜底路径堵死 → gate_pose 返回 None → 任务退化成
+      coarse（**正对门时反而丢位姿**）。
     - 恰好 3 点：必须有上帧猜值 prev（ITERATIVE + guess 收敛，无猜值 3 点不可靠）；
       为兼容 cv2 4 先试 solvePnPGeneric(P3P) 多解，失败再走 guess 路径。
     """
@@ -178,19 +187,34 @@ def _iter_candidates(camera, obj3, img2, prev=None):
     if n >= 4:
         try:
             res = cv2.solvePnPGeneric(obj3, img2, K, D, flags=cv2.SOLVEPNP_IPPE)
-            rvecs, tvecs = res[1], res[2]
-            cands = list(zip(rvecs, tvecs))
+            cands = [(r, t) for r, t in zip(res[1], res[2]) if _finite(r, t)]
         except Exception:
             cands = []
         if not cands:
-            ok, r, t = cv2.solvePnP(obj3, img2, K, D, flags=cv2.SOLVEPNP_SQPNP)
-            if ok:
-                cands = [(r, t)]
+            try:
+                ok, r, t = cv2.solvePnP(obj3, img2, K, D,
+                                        flags=cv2.SOLVEPNP_SQPNP)
+                if ok and _finite(r, t):
+                    cands = [(r, t)]
+            except Exception:
+                pass
+        if not cands:                      # 最后兜底：ITERATIVE（有上帧猜值更快收敛）
+            try:
+                if prev is not None:
+                    ok, r, t = cv2.solvePnP(obj3, img2, K, D, prev[0], prev[1],
+                                            useExtrinsicGuess=True,
+                                            flags=cv2.SOLVEPNP_ITERATIVE)
+                else:
+                    ok, r, t = cv2.solvePnP(obj3, img2, K, D,
+                                            flags=cv2.SOLVEPNP_ITERATIVE)
+                if ok and _finite(r, t):
+                    cands = [(r, t)]
+            except Exception:
+                pass
     elif n == 3:
         try:                               # cv2 4.x：P3P 多解（cv2 5 此路径会 assert 失败）
             res = cv2.solvePnPGeneric(obj3, img2, K, D, flags=cv2.SOLVEPNP_P3P)
-            rvecs, tvecs = res[1], res[2]
-            cands = list(zip(rvecs, tvecs))
+            cands = [(r, t) for r, t in zip(res[1], res[2]) if _finite(r, t)]
         except Exception:
             cands = []
         if not cands and prev is not None:
@@ -200,7 +224,7 @@ def _iter_candidates(camera, obj3, img2, prev=None):
                                     np.asarray(t0, np.float64),
                                     useExtrinsicGuess=True,
                                     flags=cv2.SOLVEPNP_ITERATIVE)
-            if ok:
+            if ok and _finite(r, t):
                 cands = [(r, t)]
     return cands
 
@@ -235,11 +259,13 @@ def gate_pose(camera, obj3, img2, prev=None,
     for r, t in cands:
         r = np.asarray(r, np.float64)
         t = np.asarray(t, np.float64)
+        if not _finite(r, t):            # nan/inf 解直接丢
+            continue
         tz = float(t.ravel()[2])
         if not (lo <= tz <= hi):
             continue
         rms = reproj_rms(camera, obj3, img2, r, t)
-        if rms > reproj_thr:
+        if not np.isfinite(rms) or rms > reproj_thr:
             continue
         score = rms
         if prev is not None:                 # 上帧距离惩罚：多解/歧义时倾向连贯

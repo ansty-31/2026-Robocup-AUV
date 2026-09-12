@@ -52,6 +52,9 @@ class FakeHub(object):
     def detect(self, name, frame):
         return self.t
 
+    def detect_all(self, frame):          # main._draw 走这里（真实 DetectorHub 同 API）
+        return [self.t] if self.t is not None else []
+
 
 W, H = 1280, 720
 FRAME = np.zeros((H, W, 3), np.uint8)

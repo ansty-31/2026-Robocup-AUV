@@ -70,6 +70,7 @@ class BallTask(object):
                           "dx": 0.0, "dy": 0.0, "sway": 0.0, "heave": 0.0,
                           "surge": 0.0,
                           "status": S.STATUS_RUNNING, "reason": ""}
+        self.last_dets = []          # 本帧检测结果（供 main._draw 画框，不再二次推理）
 
     @property
     def ready(self):
@@ -155,6 +156,7 @@ class BallTask(object):
             return S.STATUS_DONE
 
         det = self.hub.detect(self.name, frame)
+        self.last_dets = self.hub.detect_all(frame)   # 同帧缓存命中, 零额外开销
         ratio = det.ratio(self.w, self.h) if det is not None else 0.0
         growth = self._ema_update(ratio)
 

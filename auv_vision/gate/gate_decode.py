@@ -15,11 +15,39 @@ from __future__ import annotations
 import numpy as np
 
 import base.settings as S
-from common.detector import (Det, bgr_to_packed_nv12, decode_yolo11_split,  # noqa: F401
-                      _nms)
+from common.detector import (Det, bgr_to_packed_nv12, bgr_to_packed_nv12_fast,
+                      decode_yolo11_split, _nms)  # noqa: F401
 from gate.geometry import GATE_FRAME_W, GATE_FRAME_H
 
 _KPT_PER_PT = 3                       # (x, y, visible)
+
+
+def find_model_input(model, default="input"):
+    """解析 hbm_runtime 模型的输入名。
+
+    以模型自身元数据(input_names/input_name)为准；cfg 的 vision.model.input_name
+    只有在确实命中模型输入名时才采用，否则忽略 —— 避免出现
+    `Input name "input" is invalid for model ...` 这类硬编码错。
+    """
+    names = []
+    for attr in ("input_names", "input_name"):
+        v = getattr(model, attr, None)
+        if isinstance(v, dict):                     # {model_name: [输入名...]}
+            for val in v.values():
+                if isinstance(val, (list, tuple)):
+                    names.extend(str(x) for x in val)
+                elif isinstance(val, str):
+                    names.append(val)
+        elif isinstance(v, (list, tuple)):
+            names.extend(str(x) for x in v)
+        elif isinstance(v, str):
+            names.append(v)
+    cfg = getattr(S.vision.model, "input_name", None)
+    if cfg and names and str(cfg) in names:
+        return str(cfg)
+    if names:
+        return names[0]
+    return str(cfg) if cfg else default
 
 
 def decode_yolo11_kpt(outputs, labels, frame_w, frame_h,
@@ -121,6 +149,7 @@ class GateKeypointBackend(object):
         self.path = path
         self.input_size = int(input_size)
         self.kind = kind
+        self._key = "input"                       # hbm_runtime 输入名(加载后解析)
         self._init_backend()
 
     # ------------------------------------------------------------ 后端加载
@@ -128,6 +157,7 @@ class GateKeypointBackend(object):
         if self.kind == "hbm_runtime":
             import hbm_runtime
             self._model = hbm_runtime.HB_HBMRuntime(self.path)
+            self._key = find_model_input(self._model)
         elif self.kind == "pyeasy_dnn":
             from hobot_dnn import pyeasy_dnn as dnn
             self._model = dnn.load(self.path)
@@ -147,9 +177,12 @@ class GateKeypointBackend(object):
         pre = ModelPreprocessor(calib_path=S.vision.camera.front.calibration)
         h, w = frame.shape[:2]
         square = pre.process(frame)
-        nv12 = bgr_to_packed_nv12(square, pre.size, pre.size)
+        if S.get("vision.model.fast_nv12", False):
+            nv12 = bgr_to_packed_nv12_fast(square, pre.size, pre.size)
+        else:
+            nv12 = bgr_to_packed_nv12(square, pre.size, pre.size)
         if self.kind == "hbm_runtime":
-            outputs = self._model.run({"input": nv12})
+            outputs = self._model.run({self._key: nv12})
             if isinstance(outputs, dict) and len(outputs) == 1:
                 outputs = next(iter(outputs.values()))
         elif self.kind == "pyeasy_dnn":

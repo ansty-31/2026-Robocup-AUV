@@ -36,6 +36,7 @@ python3 tests/test_uart.py              # 串口字节（pty 回环）
 python3 tests/test_pid.py / test_logic.py / test_detector.py / test_preprocess.py
 python3 tests/test_gate_geometry.py     # gate PnP 合成往返
 python3 tests/test_gate_flow.py         # gate 相位机（进近→穿门/REACQUIRE，mock）
+python3 tests/test_gate_standalone.py   # gate 单任务接线（用门权重/不加载 ball/拒绝空跑）
 python3 main.py --task ball             # 只跑撞球（SIM/mock）
 python3 main.py --task gate             # 试跑过门（cfg model.mode: mock）
 ```
@@ -43,12 +44,23 @@ python3 main.py --task gate             # 试跑过门（cfg model.mode: mock）
 ### 真机编排（.sh，见 task1_2/）
 ```bash
 cd task1_2 && ./run_ball_return.sh   # 待机45→下潜3→前进3→撞球(记轨迹)→记忆返回→回退
+cd task1_2 && ./run_gate.sh          # 待机30→(可选下潜/前进)→只跑 gate（下水前自检权重）
 # 手动等价：
 #   AUV_DOF_LOG=/tmp/path.csv python3 main.py --task ball
 #   python3 task1_2/return_by_memory.py --log /tmp/path.csv
 ```
 - **返回出发区 = 记忆返回**（纯航位推算反向回放，见 return_by_memory.py）；
 - 下视相机 `cfg/vision.yaml camera.down` 与 `base/camera.py`（sim/mipi）**保留**，仅策略不再使用。
+
+### 只用 gate 权重跑过门（单独下水测 gate）
+```bash
+python3 main.py --task gate                  # 只装配 gate 后端 → hub.detect_list("gate")
+python3 preview_detect.py --gate-kpt         # 下水前：门框 + 4 角点 + 置信度（船不动）
+```
+- `main.py --task gate` **只加载 `model.task_models.gate.path`**（即 `gate_kpt_*.bin`），
+  单权重 ball 模型惰性加载、本次完全不碰；启动横幅会打印实际权重文件名；
+- gate 后端不可用（权重缺失/路径错）时**直接拒绝启动（退出码 3）**，不会入水后空跑；
+- 窗口叠加 = 当前任务本帧检测（gate 为门框 + 4 角点编号），不再额外跑一遍模型。
 
 ## 任务算法速览
 
