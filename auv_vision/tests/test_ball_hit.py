@@ -65,7 +65,8 @@ def det_ratio(ratio, cx=W / 2.0, cy=H / 2.0):
 def test_near_loss_backward():
     u, h = FakeUart(), FakeHub()
     t = BallTask(u, h, W, H)
-    h.t = det_ratio(0.50)                    # >= r_near(0.30)
+    # 0.46：< r_hit(0.50) 不算命中；丢球瞬间 ema≈0.7*0.46=0.32 ≥ r_near(0.30) → 应后退
+    h.t = det_ratio(0.46)
     now = 0
     for _ in range(10):
         t.process(FRAME, now); now += 100

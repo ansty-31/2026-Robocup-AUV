@@ -28,6 +28,8 @@ estop:
   repeat_ms: 30            # 急停连发中性帧间隔
 ramp:
   speed_per_s: 220.0       # 轴字节平滑速率（0=关闭）
+  dof_per_s: 1.0           # DOF 级线性斜坡：归一化速度/秒（0=关闭）
+                           #   模拟人手推杆：速度连续变化到目标，而不是直接激增
 
 motion:                    # 动作/速度预设（归一化 DOF：surge,sway,heave,yaw）
   search_yaw: 0.3          # 无目标时原地旋转搜索（30% 转速，右转）

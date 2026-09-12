@@ -111,6 +111,15 @@ class UartController(object):
         self._axes = neutral_axis_bytes()        # 当前输出轴（平滑后）
         self._dof_target = (0.0, 0.0, 0.0, 0.0)  # 期望 DOF
         self._last_update_ms = _now_ms()   # 首帧 ramp 从当前时刻起算
+        # DOF 级线性斜坡（模拟人手推杆的连续变化；ramp.dof_per_s<=0 直通）
+        self._dof_ramp = None
+        _dof_rate = S.get("comm.ramp.dof_per_s", 0.0) or 0.0
+        if _dof_rate > 0:
+            try:
+                from common.ramp import DofRamp      # 惰性导入，避免 base↔common 耦合
+                self._dof_ramp = DofRamp(_dof_rate)
+            except Exception as _e:
+                print("[UART] DOF 线性斜坡不可用(%s)；改为直通" % _e)
         self.last_send_ms = 0
         self.last_motion = "stop"
         self._last_tx_log = 0
@@ -144,13 +153,20 @@ class UartController(object):
                      list(S.comm.frame.btn_values))
 
     def _ramp_step(self):
-        """按距上次更新时间平滑推进运动轴字节（模拟摇杆手感）。"""
+        """平滑推进运动输出（模拟摇杆手感）：
+
+        ① DOF 级线性斜坡：按 `ramp.dof_per_s`(归一化DOF/秒) 把期望 DOF 线性逼近，
+           避免速度直接激增（人手推杆的连续变化感）；`<=0` 直通；
+        ② 轴字节级平滑：按 `ramp.speed_per_s` 再平滑一次（保留原手感）。
+        """
         now = _now_ms()
         dt = max(0.0, (now - self._last_update_ms) / 1000.0)
         self._last_update_ms = now
+        dof = (self._dof_ramp.update(self._dof_target, dt)
+               if self._dof_ramp is not None else self._dof_target)
+        tgt = dof_to_axis_bytes(*dof)
         step_max = (256.0 if S.comm.ramp.speed_per_s <= 0
                     else S.comm.ramp.speed_per_s * dt)
-        tgt = dof_to_axis_bytes(*self._dof_target)
         for i in range(4):                    # 仅平滑双摇杆区
             diff = tgt[i] - self._axes[i]
             if abs(diff) <= step_max:
@@ -241,6 +257,8 @@ class UartController(object):
     def neutral(self):
         """回中性并强发一帧。"""
         self._dof_target = (0.0, 0.0, 0.0, 0.0)
+        if self._dof_ramp is not None:
+            self._dof_ramp.reset((0.0, 0.0, 0.0, 0.0))   # 停车不走 DOF 斜坡
         self.last_motion = "stop"
         return self.send_motion(name="stop", force=True)
 
