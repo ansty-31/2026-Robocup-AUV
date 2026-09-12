@@ -100,7 +100,9 @@ def test_pty_roundtrip():
     os.close(slave)
 
     saved_ramp = S.comm.ramp.speed_per_s
+    saved_dof_ramp = S.get("comm.ramp.dof_per_s", 0.0)
     S.comm.ramp.speed_per_s = 0          # 关闭平滑使帧可预期
+    S.comm.ramp.dof_per_s = 0            # 关闭 DOF 级线性斜坡
     u = UartController(dev=slave_name, baud=115200, sim=False)
     check("serial_opened", not u.sim)
     try:
@@ -128,6 +130,7 @@ def test_pty_roundtrip():
               u.set_motion("forward_fast") is False)
     finally:
         S.comm.ramp.speed_per_s = saved_ramp
+        S.comm.ramp.dof_per_s = saved_dof_ramp
         u.close()
         os.close(master)
 
@@ -135,8 +138,10 @@ def test_pty_roundtrip():
 def test_ramp():
     """ramp：目标满偏需多个心跳周期逐步逼近（无阶跃）。"""
     saved = S.comm.ramp.speed_per_s
+    saved_dof = S.get("comm.ramp.dof_per_s", 0.0)
     saved_debug = S.DEBUG
     S.comm.ramp.speed_per_s = 220.0
+    S.comm.ramp.dof_per_s = 0        # 本用例只看“轴字节斜坡”
     S.DEBUG = False
     try:
         ctrl = UartController(sim=True)
@@ -156,6 +161,7 @@ def test_ramp():
         check("ramp_back_mid", ctrl._axes[ax] <= 130, ctrl._axes[ax])
     finally:
         S.comm.ramp.speed_per_s = saved
+        S.comm.ramp.dof_per_s = saved_dof
         S.DEBUG = saved_debug
 
 
