@@ -88,4 +88,5 @@ gate:                         # 过门（§3 几何 / keypoint / PnP 参数）
   geometry: {frame_w: 0.70, frame_h: 0.50, bar_width: 0.05,
              sym_bars: true, body_center_offset: 0.0}
   keypoint: {conf_thr: 0.5}
-  pnp: {reproj_px: 8.0, z_min: 0.2, z_max: 15.0, refine: true}
+  pnp: {reproj_px: 8.0, z_min: 0.2, z_max: 15.0, refine: true,
+        max_z_jump_m: 0.8}       # 帧间 z 突变>该值视为错解弃帧(防满速冲门)

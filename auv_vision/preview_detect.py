@@ -19,6 +19,12 @@
   python3 preview_detect.py --classes all --save /tmp/pv --duration 20
   python3 preview_detect.py --classes gate --model models/auv_multi.bin --conf 0.4
 
+门角点(关键点)模式 —— 用 gate 任务模型 gate_kpt_bayese_640x640_nv12.bin，
+画 4 个角点 + 四边形，并打印每点坐标/置信度与四角组合判定：
+  python3 preview_detect.py --gate-kpt --stream                  # 门角点预览
+  DISPLAY=:0 python3 preview_detect.py --gate-kpt --show         # 板子桌面窗口
+  python3 preview_detect.py --gate-kpt --conf 0.3 --duration 20  # 降低角点置信度门槛
+
 按 Ctrl-C 或窗口里按 q/Esc 退出；结束打印各类别累计帧数。
 """
 import argparse
@@ -42,6 +48,11 @@ except ImportError:
 COLORS = {"red_ball": (60, 60, 255), "blue_ball": (255, 150, 30),
           "gate": (60, 255, 60), "unknown": (200, 200, 200)}
 
+# 门角点显示：名字取 cfg 的 kpt_order，画点门槛 KPT_VIS_THR
+_GATE_CFG = S.get("vision.model.task_models.gate", None) or {}
+KPT_NAMES = tuple(_GATE_CFG.get("kpt_order") or ("TL", "TR", "BR", "BL"))
+KPT_VIS_THR = 0.30
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
@@ -50,6 +61,9 @@ def main():
     ap.add_argument("--classes", default="gate",
                     help="要显示的类别(逗号分隔)；all=全部")
     ap.add_argument("--model", default=None, help="覆盖模型路径(默认 cfg 里的)")
+    ap.add_argument("--gate-kpt", action="store_true",
+                    help="门角点模式: 用 vision.model.task_models.gate 的 keypoint 权重，"
+                         "画 4 角点+四边形并打印坐标/置信度")
     ap.add_argument("--conf", type=float, default=None, help="覆盖 score_threshold")
     ap.add_argument("--show", action="store_true", help="本机窗口显示")
     ap.add_argument("--stream", action="store_true", help="UDP 推流带框画面给 PC")
@@ -74,16 +88,43 @@ def main():
     # 本脚本自己画框/推流，关掉 camera.py 的“原始 MJPEG 推流钩子”避免重复
     os.environ["AUV_STREAM"] = "0"
 
+    backend = None
+    model_desc = S.vision.model.path
+    if a.gate_kpt:
+        try:
+            from gate.gate_detector import build_gate_backend
+        except ImportError:
+            from auv_vision.gate.gate_detector import build_gate_backend
+        backend = build_gate_backend()
+        if backend is None:
+            print("[PV] 门角点后端不可用(权重缺失)；检查 vision.model.task_models.gate.path")
+            return 3
+        want = None
+        gc = S.get("vision.model.task_models.gate", None) or {}
+        model_desc = "%s (%s)" % (gc.get("path", "?"), gc.get("kind", "keypoint"))
+
     print("=" * 64)
-    print(" 真机识别预览(无运动) | 模型: %s" % S.vision.model.path)
-    print(" 类别: %s | conf=%.2f | 相机: %s | 显示: show=%s stream=%s save=%s"
-          % ("ALL" if want is None else sorted(want),
-             S.vision.model.score_threshold, a.camera,
-             a.show, a.stream, a.save or "-"))
+    print(" 真机识别预览(无运动) | 模型: %s" % model_desc)
+    if a.gate_kpt:
+        print(" 模式: 门角点(keypoint) | conf=%.2f | 相机: %s | 显示: show=%s stream=%s save=%s"
+              % (S.vision.model.score_threshold, a.camera,
+                 a.show, a.stream, a.save or "-"))
+    else:
+        print(" 类别: %s | conf=%.2f | 相机: %s | 显示: show=%s stream=%s save=%s"
+              % ("ALL" if want is None else sorted(want),
+                 S.vision.model.score_threshold, a.camera,
+                 a.show, a.stream, a.save or "-"))
     print("=" * 64)
 
     cam = create_camera(a.camera)
     hub = DetectorHub()
+    parse_kpt_mode = None
+    if backend is not None:
+        hub.register("gate", backend)         # 复用门任务后端(独立权重)
+        try:
+            from gate.gate_frontend import parse_kpt_mode
+        except ImportError:
+            from auv_vision.gate.gate_frontend import parse_kpt_mode
 
     pusher = None
     if a.stream:
@@ -116,19 +157,41 @@ def main():
             if frame is None:
                 time.sleep(0.01)
                 continue
-            dets = hub.detect_all(frame)          # 一次前向，全类别
-            if want is not None:
-                dets = [d for d in dets if d.kind in want]
+            if a.gate_kpt:
+                dets = hub.detect_list("gate", frame)     # 门角点专用权重
+            else:
+                dets = hub.detect_all(frame)             # 一次前向，全类别
+                if want is not None:
+                    dets = [d for d in dets if d.kind in want]
             for d in dets:
                 counts[d.kind] = counts.get(d.kind, 0) + 1
 
             img = frame.copy()
             for d in dets:
                 col = COLORS.get(d.kind, COLORS["unknown"])
-                cv2.rectangle(img, (d.x, d.y), (d.x + d.w, d.y + d.h), col, 2)
-                cv2.putText(img, "%s %.2f" % (d.kind, d.score),
-                            (d.x, max(14, d.y - 6)), cv2.FONT_HERSHEY_SIMPLEX,
-                            0.6, col, 2)
+                if d.w > 0 and d.h > 0:
+                    cv2.rectangle(img, (d.x, d.y), (d.x + d.w, d.y + d.h), col, 2)
+                    cv2.putText(img, "%s %.2f" % (d.kind, d.score),
+                                (d.x, max(14, d.y - 6)), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.6, col, 2)
+                if a.gate_kpt and d.kpts is not None:
+                    quad = []
+                    for i in range(min(len(d.kpts), len(KPT_NAMES))):
+                        c = float(d.kpt_conf[i]) if d.kpt_conf is not None else 1.0
+                        if c <= 0.0:
+                            continue
+                        px, py = int(round(float(d.kpts[i][0]))), \
+                            int(round(float(d.kpts[i][1])))
+                        pcol = (60, 255, 60) if c >= KPT_VIS_THR else (150, 150, 150)
+                        cv2.circle(img, (px, py), 5, pcol, -1)
+                        cv2.circle(img, (px, py), 7, (0, 0, 0), 1)
+                        cv2.putText(img, "%s %.2f" % (KPT_NAMES[i], c),
+                                    (px + 8, py - 6), cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.45, pcol, 1)
+                        quad.append((px, py))
+                    if len(quad) >= 3:
+                        cv2.polylines(img, [np.array(quad, dtype=np.int32).reshape(-1, 1, 2)],
+                                      len(quad) == 4, (60, 255, 60), 2)
             fps = n / max(time.time() - t0, 1e-6)
             cv2.putText(img, "%s det=%d %.1ffps" % (S.vision.model.mode,
                                                     len(dets), fps),
@@ -150,6 +213,31 @@ def main():
             if time.time() - last_log >= 2.0:
                 print("[PV] %.1f fps | 本帧 det=%d | 累计 %s"
                       % (fps, len(dets), counts))
+                if a.gate_kpt:
+                    if not dets:
+                        print("     (本帧未检出门)")
+                    for k, d in enumerate(dets[:3]):
+                        if d.kpts is None:
+                            print("     [%d] 无角点输出 (score=%.2f)" % (k, d.score))
+                            continue
+                        kc = d.kpt_conf if d.kpt_conf is not None else \
+                            np.ones(len(d.kpts), np.float32)
+                        n_ok = int(np.sum(np.asarray(kc) >= KPT_VIS_THR))
+                        print("     [%d] score=%.2f 有效角点(>=%.2f)=%d/%d"
+                              % (k, d.score, KPT_VIS_THR, n_ok, len(d.kpts)))
+                        print("         kpts: %s"
+                              % " ".join("%s(%.0f,%.0f)" % (KPT_NAMES[i], d.kpts[i][0],
+                                                            d.kpts[i][1])
+                                         for i in range(min(len(d.kpts), len(KPT_NAMES)))))
+                        print("         conf: %s"
+                              % " ".join("%s=%.2f" % (KPT_NAMES[i], kc[i])
+                                         for i in range(min(len(kc), len(KPT_NAMES)))))
+                        if parse_kpt_mode is not None:
+                            try:
+                                mode, ids = parse_kpt_mode(d.kpts, d.kpt_conf)
+                                print("         判定: mode=%s ids=%s" % (mode, list(ids)))
+                            except Exception as e:
+                                print("         判定失败: %s" % e)
                 last_log = time.time()
             if a.duration and (time.time() - t0) >= a.duration:
                 break

@@ -53,6 +53,44 @@ def make_cameras():
     return [("pinhole", CameraModel.pinhole(1280, 720, 800.0, 800.0, 640.0, 360.0))]
 
 
+try:                          # pytest 收集时提供 cams（原先缺 fixture → 4 个 error）
+    import pytest
+
+    @pytest.fixture(scope="module")
+    def cams():
+        return make_cameras()
+except ImportError:           # 直接 python3 跑本文件时不需要 fixture
+    pass
+
+
+# ---------------------------------------------------------------------------
+# 6) 退化配置：IPPE 会返回 nan 解，必须靠 SQPNP/ITERATIVE 兜底解出（否则正对门丢位姿）
+# ---------------------------------------------------------------------------
+def test_degenerate_orientations(cams):
+    print("[6] 退化配置(正对/俯仰)必须仍能解出位姿")
+    rvs = [("正对", np.zeros(3)),
+           ("俯仰", np.array([0.0, 0.3, 0.0])),
+           ("微倾", np.array([0.02, -0.01, 0.0]))]
+    zs = (0.5, 0.9, 1.5, 2.5, 4.0, 5.0, 8.0)
+    for name, cam in cams:
+        # 任务实际跑 rectified 域(image.undistort: true)；raw 域仅粗校验：
+        # 强畸变(k1≈-0.5) + 大俯仰 + z=0.5(已小于过门阈值 0.7，任务不会在此要位姿)
+        # 属失真模型边缘组合，不作为判据
+        zs_use = zs if ("rect" in name or "pinhole" in name) else zs[1:]
+        bad = []
+        for rlabel, rv in rvs:
+            for z in zs_use:
+                tvec = np.array([0.0, 0.0, z]).reshape(3, 1)
+                uv = cam.project(object_points(), rv, tvec)
+                out = gate_pose(cam, object_points(), uv)
+                if out is None or \
+                        abs(float(out[1].ravel()[2]) - z) > 1e-3:
+                    bad.append("%s/z=%.1f" % (rlabel, z))
+        check("%s 退化组合全解出(%d 组)" % (name, len(rvs) * len(zs_use)),
+              not bad, bad[:5])
+    print()
+
+
 def rand_approach_pose(rng, cam, z_lo=1.2, z_hi=6.0, tries=200):
     """采样"进近段"随机位姿：门在机前、四角都在画面内。"""
     w, h = cam.width, cam.height
@@ -233,6 +271,7 @@ def main():
     test_roundtrip_full(cams)
     test_roundtrip_p3p(cams)
     test_plane_backproject(cams)
+    test_degenerate_orientations(cams)
     print("✅ test_gate_geometry 全部通过（%s 域）" % ", ".join(n for n, _ in cams))
 
 

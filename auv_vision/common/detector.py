@@ -449,6 +449,8 @@ class DetectorHub(object):
         self.mode = S.vision.model.mode
         self._mocks = {}
         self._real = None
+        self._real_built = False    # 惰性构造：首次用到才加载 model.path 权重
+        self._real_err = ""
         self._extra = {}            # 装配层注册的任务专用后端（如 gate keypoint/mock）
         self._extra_cache = {}      # {task: (frame, [Det])} 同帧只跑一次
         self._cache = []            # 最近一帧全量检测（供画框，避免二次推理）
@@ -460,11 +462,20 @@ class DetectorHub(object):
                     continue
                 if task in S.comm.tasks.enabled and _want_label(task):
                     self._mocks[task] = MockDetector(_want_label(task))
-        else:
-            try:
-                self._real = self._REAL[self.mode]()
-            except Exception as e:
-                print("[DET] 单权重模型未就绪(%s)：%s" % (self.mode, e))
+        # 非 mock：**不在此处加载** model.path。单独跑 gate 时无需 ball 权重，
+        # 首次真正用到（detect/detect_all/ready(ball)）时才构造，见 _ensure_real()。
+
+    def _ensure_real(self):
+        """惰性构造单权重检测器（失败只提示一次，返回 None）。"""
+        if self._real is not None or self._real_built:
+            return self._real
+        self._real_built = True
+        try:
+            self._real = self._REAL[self.mode]()
+        except Exception as e:
+            self._real_err = str(e)
+            print("[DET] 单权重模型未就绪(%s)：%s" % (self.mode, e))
+        return self._real
 
     def _gather(self, frame):
         """单帧全量检测（带缓存：同一帧对象只推理一次）。"""
@@ -475,7 +486,11 @@ class DetectorHub(object):
             for m in self._mocks.values():
                 dets.extend(m.detect(frame))
         else:
-            dets = self._real.detect(frame)
+            real = self._ensure_real()
+            if real is None:
+                dets = []
+            else:
+                dets = real.detect(frame)
         self._cache, self._cache_frame = list(dets), frame
         return self._cache
 
@@ -509,7 +524,7 @@ class DetectorHub(object):
             return self._extra[task] is not None
         if self.mode == "mock":
             return task in self._mocks
-        return self._real is not None and _want_label(task) is not None
+        return self._ensure_real() is not None and _want_label(task) is not None
 
     def detect(self, task, frame):
         """指令优先：只返回任务所需类别（want）中最高分的 Det。
