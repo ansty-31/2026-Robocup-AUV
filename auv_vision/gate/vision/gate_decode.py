@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""gate/gate_decode.py — keypoint 模型(门+4角)后端与解码脚手架
+"""gate/vision/gate_decode.py — keypoint 模型(门+4角)后端与解码脚手架
 
 状态说明（诚实标注）：
   真实 gate keypoint 权重尚未导出/量化，本模块提供：
@@ -17,7 +17,7 @@ import numpy as np
 import base.settings as S
 from common.detector import (Det, bgr_to_packed_nv12, bgr_to_packed_nv12_fast,
                       decode_yolo11_split, _nms)  # noqa: F401
-from gate.geometry import GATE_FRAME_W, GATE_FRAME_H
+from gate.vision.geometry import GATE_FRAME_W, GATE_FRAME_H
 
 _KPT_PER_PT = 3                       # (x, y, visible)
 
@@ -141,7 +141,7 @@ class GateKeypointBackend(object):
 
     def __init__(self, path, labels, kpt_order, camera,
                  kind="hbm_runtime", input_size=640):
-        from gate.geometry import CameraModel
+        from gate.vision.geometry import CameraModel
         assert isinstance(camera, CameraModel)
         self.labels = list(labels)
         self.kpt_order = list(kpt_order)          # ['TL','TR','BR','BL']

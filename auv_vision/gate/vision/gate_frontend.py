@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""gate/gate_frontend.py — keypoint→2D/3D 对应与 mode 判定（§4.3 前端适配层）
+"""gate/vision/gate_frontend.py — keypoint→2D/3D 对应与 mode 判定（§4.3 前端适配层）
 
 与几何内核解耦：本模块只负责把"一次检测（bbox + 4 角点 + 每点置信度）"翻译成
-下游可用的 (mode, img2, obj3) 或粗对准信息；位姿解算交给 gate.geometry。
+下游可用的 (mode, img2, obj3) 或粗对准信息；位姿解算交给 gate.vision.geometry。
 
 mode 定义（对应 §4.6 降级表 / §5.3 子状态）：
   full        4 角可见 → IPPE 全位姿

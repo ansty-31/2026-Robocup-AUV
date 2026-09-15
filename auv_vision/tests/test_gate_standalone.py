@@ -19,7 +19,7 @@ import numpy as np                          # noqa: E402
 
 import base.settings as S                        # noqa: E402
 from common.detector import DetectorHub, Det      # noqa: E402
-from gate.gate_decode import find_model_input     # noqa: E402
+from gate.vision.gate_decode import find_model_input     # noqa: E402
 
 PASS = []
 
@@ -205,7 +205,7 @@ def test_z_jump_guard():
     print("[7] 穿门保护：z 跳变弃帧 + 连续帧确认（防错解满速冲出去）")
     from gate.gate_task import GateTask, PH_THROUGH
     from gate.mock import MockGateBackend
-    from gate.gate_detector import board_camera
+    from gate.vision.gate_detector import board_camera
 
     cam = board_camera()
 
@@ -270,7 +270,7 @@ class _ScriptedGate(object):
         if item is None:
             return []
         z, x = item
-        from gate.geometry import object_points
+        from gate.vision.geometry import object_points
         obj3 = object_points()
         tvec = np.array([x, 0.0, z], np.float64).reshape(3, 1)
         uv = self.camera.project(obj3, np.zeros(3), tvec)
@@ -302,7 +302,7 @@ def _scripted_task(camera, script):
 
 def test_gate_motion_strategy():
     print("[8] 运动策略(对齐撞球)：两档限速 + 冲刺前/冲刺中微调 + 丢失轻微后退")
-    from gate.gate_detector import board_camera
+    from gate.vision.gate_detector import board_camera
     cam = board_camera()
     G = S.comm.gate
 
@@ -346,21 +346,28 @@ def test_gate_motion_strategy():
     check("(b) 冲刺速度=through", abs(t2.last_info["surge"] - G.surge.through) < 1e-6,
           t2.last_info["surge"])
 
-    # (c) 冲刺前微调 / 穿门直行：z≤cross 第一帧=只微调不前进；第二帧(确认够)=只前进不微调
-    t3 = _scripted_task(cam, [(0.9, 0.0)] * 12 + [(0.65, 0.15)] * 2)
+    # (c) 冲刺前微调 / 穿门直行：
+    #     注：角点记忆会把"阶跃"平滑几帧（真船是连续逼近，不会有阶跃），
+    #     所以这里按"序列"断言：先出现"只微调不前进"的帧，再进 THROUGH。
+    #     偏心取 0.03m（在 align.xy_m=0.05 内，满足对准判据；又能让 sway≠0）
+    t3 = _scripted_task(cam, [(0.9, 0.0)] * 12 + [(0.65, 0.03)] * 16)
     now = 0
     for _ in range(12):
         now += 100
         t3.process(nf(), now)
     check("(c) 已进近", t3.phase == "APPROACH", t3.phase)
-    now += 100
-    t3.process(nf(), now)                      # 冲刺前最后一帧（偏 0.15m）
+    center_seen = None
+    for _ in range(16):
+        now += 100
+        t3.process(nf(), now)
+        li = t3.last_info
+        if li["action"] == "center" and abs(li["surge"]) < 1e-9:
+            center_seen = dict(li)
+        if t3.phase == "THROUGH":
+            break
     check("(c) 冲刺前: 不前进只微调",
-          t3.last_info["action"] == "center" and abs(t3.last_info["surge"]) < 1e-9
-          and abs(t3.last_info["sway"]) > 0,
-          (t3.last_info["action"], t3.last_info["surge"], t3.last_info["sway"]))
-    now += 100
-    t3.process(nf(), now)                      # 确认够 → 穿门
+          center_seen is not None and abs(center_seen["sway"]) > 0,
+          center_seen)
     check("(c) 进入 THROUGH", t3.phase == "THROUGH", t3.phase)
     check("(c) 穿门只前进不微调",
           abs(t3.last_info["surge"] - G.surge.through) < 1e-6
@@ -381,6 +388,159 @@ def test_gate_motion_strategy():
     print()
 
 
+# ---------------------------------------------------------------- 9) 倒影稳定化(A+B)
+class _CornerGate(object):
+    """可控门后端：z(→框占比) / x 偏移 / 每角点置信度（模拟倒影污染角点）。"""
+
+    def __init__(self, camera, script):
+        self.camera = camera
+        self.script = list(script)
+        self._f = 0
+
+    def detect(self, frame):
+        i = self._f
+        self._f += 1
+        item = self.script[i] if i < len(self.script) else self.script[-1]
+        if item is None:
+            return []
+        from gate.vision.geometry import object_points
+        z, x, confs = item[0], item[1], item[2]
+        obj3 = object_points()
+        uv = self.camera.project(obj3, np.zeros(3),
+                                 np.array([x, 0.0, z], np.float64).reshape(3, 1))
+        d = Det("gate", 0.9, int(uv[:, 0].min()), int(uv[:, 1].min()),
+                int(uv[:, 0].max() - uv[:, 0].min()),
+                int(uv[:, 1].max() - uv[:, 1].min()),
+                kpts=uv, kpt_conf=np.array(confs, np.float32))
+        if len(item) > 3 and item[3] is not None:      # 同帧多门（倒影成第二个框）
+            d2 = item[3]
+            return [d, d2]
+        return [d]
+
+
+class _U(object):
+    estop_active = False
+
+    def send_dof(self, *a):
+        pass
+
+    def set_motion(self, n):
+        pass
+
+    def neutral(self):
+        pass
+
+
+def _gate_task(camera, backend):
+    from gate.gate_task import GateTask
+    hub = DetectorHub()
+    hub.register("gate", backend)
+    return GateTask(_U(), hub, int(camera.width), int(camera.height))
+
+
+def test_reflection_stabilization():
+    print("[9] 倒影稳定化：REACQUIRE 闭环后退 / 次数上限 / 选门优先角点 / 诊断量")
+    from gate.vision.gate_detector import board_camera
+    from gate.gate_task import PH_ALIGN, SUB_HOLD, SUB_REACQUIRE
+    from gate.vision.geometry import object_points
+    cam = board_camera()
+    G = S.comm.gate
+    no_kpt = (0.0, 0.0, 0.0, 0.0)          # 4 角全无效（倒影把角点打飞）
+
+    def nf():
+        # 每帧新对象：hub 按帧身份缓存，复用同一对象后端只会被调用一次
+        return np.zeros((int(cam.height), int(cam.width), 3), np.uint8)
+
+    ok_kpt = (0.9, 0.9, 0.9, 0.9)
+
+    # (a) 闭环后退：先 z=0.6(框占比 > near_ratio → 立即 REACQUIRE)，再拉到
+    #     z=1.0(框变小到进入时的 75% 以下) → 应当立刻停住不再退
+    task = _gate_task(cam, _CornerGate(cam, [(0.6, 0.0, no_kpt),
+                                             (0.6, 0.0, no_kpt),
+                                             (1.0, 0.0, no_kpt)]))
+    now = 0
+    back_frames = 0
+    went_reacquire = False
+    for _ in range(60):
+        now += 33
+        task.process(nf(), now)
+        if task.last_info["action"] == "reacquire":
+            went_reacquire = True
+            back_frames += 1
+            check("REACQUIRE 是后退", task.last_info["surge"] < 0,
+                  task.last_info["surge"])
+        elif went_reacquire:
+            break
+    check("(a) 进过 REACQUIRE", went_reacquire, task.last_info)
+    check("(a) 退够就停(未退满 max_ms)",
+          back_frames < int(G.reacquire.max_ms) / 33,
+          "后退帧数=%d 上限=%d" % (back_frames, int(G.reacquire.max_ms) / 33))
+    check("(a) 停下后是 HOLD 且不后退",
+          task.last_info["action"] == "hold"
+          and abs(task.last_info["surge"]) < 1e-9
+          and task.last_info["substate"] in (SUB_HOLD, ""),
+          task.last_info)
+
+    # (b) 次数上限：框一直很大且角点一直无效 → 退 max_times 次后放弃后退
+    big_z = 0.6                            # ratio 明显 > near_ratio（每次都会立刻 REACQUIRE）
+    task2 = _gate_task(cam, _CornerGate(cam, [(big_z, 0.0, no_kpt)]))
+    now = 0
+    back2 = 0
+    run = 0
+    longest = 0
+    max_cnt = 0
+    give_up_holds = 0
+    max_times = int(G.reacquire.get("max_times", 2))
+    for _ in range(400):
+        now += 33
+        task2.process(nf(), now)
+        max_cnt = max(max_cnt, task2._reacquire_cnt)
+        if task2.last_info["action"] == "reacquire":
+            back2 += 1
+            run += 1
+            longest = max(longest, run)
+        else:
+            run = 0
+            if task2.last_info["action"] == "hold" and \
+                    task2._reacquire_cnt > max_times:
+                give_up_holds += 1
+    # 关键性质：单次连续后退不得超过 max_ms 对应的帧数（不会无限后退）
+    limit = int(G.reacquire.max_ms) / 33.0 + 2
+    check("(b) 单次连续后退 <= max_ms",
+          longest <= limit,
+          "最长连续后退=%d 帧 上限=%.0f" % (longest, limit))
+    check("(b) 反复触发时后退占比受限",
+          back2 < 0.6 * 400,
+          "后退帧数=%d/400 计数峰值=%d" % (back2, max_cnt))
+    check("(b) 超限后确实改为原地 HOLD",
+          give_up_holds > 0,
+          "放弃后的 HOLD 帧数=%d 计数峰值=%d" % (give_up_holds, max_cnt))
+    check("(b) 计数只按真实后退次数累加",
+          max_cnt <= max_times + 1,
+          "计数峰值=%d max_times=%d" % (max_cnt, max_times))
+
+    # (c) 同帧两个门（倒影成第二个框）：选角点更全的那个，而不是 score 更高的
+    uv = cam.project(object_points(), np.zeros(3),
+                     np.array([0.0, 0.0, 2.0], np.float64).reshape(3, 1))
+    ghost = Det("gate", 0.99, 10, 10, 400, 200,      # score 更高但只有 2 个角
+                kpts=uv, kpt_conf=np.array([0.9, 0.9, 0.0, 0.0], np.float32))
+    task3 = _gate_task(cam, _CornerGate(cam, [(2.0, 0.0, ok_kpt, ghost)]))
+    now += 33
+    task3.process(nf(), now)
+    check("(c) 选角点更全的门", task3._dbg_kpt == 4, task3._dbg_kpt)
+    check("(c) 无角点的框排最后",
+          task3.mode == "full", task3.mode)
+
+    # (d) 诊断量：last_info 带 ratio（框占比）与 kpt（有效角点数）
+    check("(d) last_info 有 ratio", "ratio" in task3.last_info,
+          sorted(task3.last_info.keys()))
+    check("(d) ratio ≈ 框宽/屏宽",
+          0.15 < task3.last_info["ratio"] < 0.35, task3.last_info["ratio"])
+    check("(d) coarse 帧也报 kpt",
+          task.last_info["kpt"] == 0, task.last_info["kpt"])
+    print()
+
+
 def main():
     test_hub_lazy_real()
     test_gate_only_never_loads_ball()
@@ -390,6 +550,7 @@ def main():
     test_run_gate_script()
     test_z_jump_guard()
     test_gate_motion_strategy()
+    test_reflection_stabilization()
     print("\n全部通过 %d 项" % len(PASS))
 
 

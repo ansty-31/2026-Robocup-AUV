@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
-"""test_ball_search.py — 搜索→切入行为：
-   - 搜索脉冲中出现目标 → 立刻切出(search 立即结束)
-   - 目标在画面边缘 → 用 yaw 转向球(而非无效的横移)
-   - 短暂看到后丢失 → 进入 hold(暂停搜索脉冲)，而不是马上继续转/停
+"""test_ball_search.py — 搜索 / 居中 / 丢目标 行为（融合版运动链）
+
+覆盖：
+  1. 无目标 → 搜索脉冲（+ 周期性前进探测）；出现目标 → 立刻进 CENTER
+  2. CENTER：只用 yaw(转向) + heave(升降)，**surge 恒 0、sway 恒 0**
+  3. 边缘球 → yaw 转向球（dx>0 → 右转），不做横移
+  4. 连续居中达标 → APPROACH：**仅 sway** 修水平（yaw=0、heave=0），surge>0
+  5. 丢目标阶梯：短时 hold（不前进）→ hold 窗口 → 回 SEARCH
 """
 import math
 import os
@@ -13,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np                     # noqa: E402
 import base.settings as S              # noqa: E402
 from common.detector import Det        # noqa: E402
-from task1_2.ball import BallTask      # noqa: E402
+from task1_2.ball import BallTask, PH_CENTER, PH_APPROACH   # noqa: E402
 
 PASS = []
 
@@ -65,68 +69,110 @@ def det(cx, cy=H / 2.0, side=200):
                side, side)
 
 
-def test_entry_look_then_search_then_detect():
+def det_ratio(ratio, cx=W / 2.0, cy=H / 2.0):
+    side = int(round(math.sqrt(ratio * W * H)))
+    return Det("red_ball", 0.9, int(cx - side / 2), int(cy - side / 2),
+               side, side)
+
+
+# ---------------------------------------------------------------- 1) 搜索→居中
+def test_search_then_detect_centers():
     u, h = FakeUart(), FakeHub()
     t = BallTask(u, h, W, H)
     h.t = None
     t.process(FRAME, 0)
-    check("entry_look_first", t.last_info["action"] == "look",
+    check("no_target_search", t.last_info["action"] in ("search", "search_advance"),
           t.last_info["action"])
-    t.process(FRAME, 300)                  # 入场窗口内：继续只识别不动作
-    check("still_look", t.last_info["action"] == "look", t.last_info["action"])
-    t.process(FRAME, 1000)                 # 过了入场窗口仍无球 → 搜索
-    check("search_after_look", t.last_info["action"] == "search",
+    check("search_phase", t.last_info["phase"] == "SEARCH", t.last_info["phase"])
+    h.t = det(W / 2.0 + 420)               # 边缘球出现
+    t.process(FRAME, 100)
+    check("detect_enters_center", t.last_info["action"] == "center",
           t.last_info["action"])
-    h.t = det(W / 2.0)                     # 出现目标
-    t.process(FRAME, 1100)
-    check("detect_switches_out_of_search",
-          t.last_info["action"] != "search", t.last_info["action"])
+    check("center_phase", t.last_info["phase"] == PH_CENTER, t.last_info["phase"])
 
 
-def test_entry_detect_immediately_centers():
+# ---------------------------------------------------------------- 2) 居中不前进
+def test_center_never_advances():
     u, h = FakeUart(), FakeHub()
     t = BallTask(u, h, W, H)
-    h.t = det(W / 2.0 + 420)               # 一入场就看到边缘球
-    t.process(FRAME, 0)
-    check("entry_detect_center", t.last_info["action"] == "center",
-          t.last_info["action"])
-    check("entry_no_motion_until_detect", u.dof[-1][3] > 0, u.dof[-1])
+    h.t = det(W / 2.0 + 420)               # 偏右很多，需持续转向
+    now = 0
+    for _ in range(30):
+        now += 33
+        t.process(FRAME, now)
+        assert t.last_info["phase"] == PH_CENTER, t.last_info
+        check_surge = t.last_info["surge"]
+        if check_surge != 0.0:
+            raise AssertionError("FAIL: center 阶段出现了前进 %s" % check_surge)
+    check("center_never_advances", True)
+    check("center_no_sway", all(abs(d[1]) < 1e-9
+                                for d in u.dof if len(d) == 4), u.dof[-1])
+    check("center_uses_yaw", t.last_info["yaw"] > 0, t.last_info["yaw"])
+    check("center_uses_heave_channel", abs(t.last_info["heave"]) >= 0.0)
 
 
+# ---------------------------------------------------------------- 3) 边缘球用 yaw
 def test_edge_ball_uses_yaw():
     u, h = FakeUart(), FakeHub()
     t = BallTask(u, h, W, H)
-    h.t = det(W / 2.0 + 420)               # 球在画面右侧边缘(dx≈0.66)
+    h.t = det(W / 2.0 + 420)               # dx≈0.66
     t.process(FRAME, 0)
-    check("edge_label_center", t.last_info["action"] == "center",
-          t.last_info["action"])
     surge, sway, heave, yaw = u.dof[-1]
     check("edge_yaw_to_ball", yaw > 0, yaw)          # dx>0 → 右转
     check("edge_no_sway", abs(sway) < 1e-9, sway)
+    check("edge_no_surge", abs(surge) < 1e-9, surge)
 
 
-def test_brief_detect_holds_not_search():
+# ---------------------------------------------------------------- 4) 进近仅 sway
+def test_center_done_then_approach_sway_only():
     u, h = FakeUart(), FakeHub()
     t = BallTask(u, h, W, H)
-    h.t = det(W / 2.0)
-    t.process(FRAME, 0)                    # 看到一帧 → 设置切入保持窗口
+    # 球略微偏右但已在 center_eps 内 → 连续 center_confirm_frames 帧后进 APPROACH
+    h.t = det_ratio(0.02, cx=W / 2.0 + 80)
+    now = 0
+    for _ in range(S.comm.ball.center_confirm_frames + 2):
+        now += 33
+        t.process(FRAME, now)
+    check("approach_phase", t.last_info["phase"] == PH_APPROACH,
+          (t.last_info["phase"], t.last_info["action"]))
+    check("approach_forwards", t.last_info["surge"] > 0, t.last_info["surge"])
+    check("approach_uses_sway", t.last_info["sway"] < -1e-6, t.last_info["sway"])
+    check("approach_no_yaw", abs(t.last_info["yaw"]) < 1e-9, t.last_info["yaw"])
+    check("approach_no_heave", abs(t.last_info["heave"]) < 1e-9,
+          t.last_info["heave"])
+
+
+# ---------------------------------------------------------------- 5) 丢目标阶梯
+def test_lost_ladder_hold_then_search():
+    u, h = FakeUart(), FakeHub()
+    t = BallTask(u, h, W, H)
+    h.t = det(W / 2.0 + 420)
+    t.process(FRAME, 0)                    # 看到一帧 → CENTER
+    dof_before = len(u.dof)
     h.t = None
-    now = 100
+    now = 300
     labels = []
     for _ in range(40):
-        t.process(FRAME, now); now += 100
+        t.process(FRAME, now)
+        now += 100
         labels.append(t.last_info["action"])
-    check("hold_present", "hold" in labels, labels[:25])
+        if t.last_info["action"] == "hold":
+            check("hold_no_forward", u.dof[-1][0] == 0.0, u.dof[-1])
+    check("hold_present", "hold" in labels, labels[:20])
+    check("lost_before_search", "search" in labels, labels[-6:])
+    check("lost_did_not_advance_in_center",
+          all(d[0] <= 1e-9 for d in u.dof[dof_before:] if len(d) == 4),
+          u.dof[dof_before:dof_before + 3])
     idx = labels.index("search") if "search" in labels else None
-    # 保持窗口(engage_hold_s=2s)内不应回到 search
-    check("search_not_immediate", idx is None or idx >= 19, idx)
+    check("search_after_hold_window", idx is not None and idx > 0, idx)
 
 
 def main():
-    test_entry_look_then_search_then_detect()
-    test_entry_detect_immediately_centers()
+    test_search_then_detect_centers()
+    test_center_never_advances()
     test_edge_ball_uses_yaw()
-    test_brief_detect_holds_not_search()
+    test_center_done_then_approach_sway_only()
+    test_lost_ladder_hold_then_search()
     print("\n全部通过 %d 项" % len(PASS))
 
 

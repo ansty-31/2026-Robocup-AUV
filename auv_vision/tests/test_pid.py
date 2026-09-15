@@ -64,42 +64,59 @@ class _FakeHub(object):
 
 
 def test_ball_centering():
+    """CENTER 用 yaw+heave（不横移不前进）；APPROACH 只用 sway（不转不升降）。"""
     saved = (S.comm.ball.align_x, S.comm.ball.align_y, S.DEBUG,
              S.comm.ball.pid.kp, S.comm.ball.pid.ki, S.comm.ball.pid.kd)
     S.DEBUG = False
     S.comm.ball.pid.kp, S.comm.ball.pid.ki, S.comm.ball.pid.kd = 0.9, 0.05, 0.15
     try:
-        uart = UartController(sim=True)
-        hub = _FakeHub(cx_ratio=0.62)            # 球心偏右 → yaw 右转(正)
-        task = BallTask(uart, hub, 640, 360)
         import numpy as np
+        from task1_2.ball import PH_CENTER, PH_APPROACH
         frame = np.zeros((360, 640, 3), dtype=np.uint8)
-        # 撞球居中改为“仅 yaw 旋转”，不再左右平移
+
+        # (a) 球远离中心（dx=+0.5 > center_eps）→ 一直停在 CENTER，只用 yaw 右转
+        uart = UartController(sim=True)
+        hub = _FakeHub(cx_ratio=0.75)
+        task = BallTask(uart, hub, 640, 360)
         now = 1000
-        yaw_seen, sway_seen = [], []
-        for i in range(80):
+        yaws, surges = [], []
+        for _ in range(60):
             now += 33
             task.process(frame, now)
-            yaw_seen.append(task.last_info.get("yaw", 0.0))
-            sway_seen.append(task.last_info["sway"])
-        pos = [y for y in yaw_seen[10:] if y > 0.02]
-        check("centering_yaw_right", len(pos) > 0, yaw_seen[-3:])
-        check("centering_no_sway", all(abs(s) < 1e-9 for s in sway_seen[5:]),
-              sway_seen[-3:])
-        # 球回到画面中心 → yaw 收敛到死区附近（积分清零）
-        hub.set_center(0.5, 0.5)
-        for i in range(40):
-            now += 33
-            task.process(frame, now)
-        check("centering_converge", abs(task.last_info["yaw"]) <= 0.05,
-              task.last_info["yaw"])
-        # 偏差方向相反 → 转向方向相反
-        hub.set_center(0.38, 0.5)
-        for i in range(30):
+            assert task.last_info["phase"] == PH_CENTER, task.last_info
+            yaws.append(task.last_info["yaw"])
+            surges.append(task.last_info["surge"])
+        check("centering_yaw_right", any(y > 0.02 for y in yaws[5:]), yaws[-3:])
+        check("centering_no_sway", task.last_info["sway"] == 0.0,
+              task.last_info["sway"])
+        check("centering_never_advances", all(abs(s) < 1e-9 for s in surges),
+              surges[-3:])
+        # 球跑到左边（dx=-0.5）→ 转向反向
+        hub.set_center(0.25, 0.5)
+        for _ in range(30):
             now += 33
             task.process(frame, now)
         check("centering_yaw_left", task.last_info["yaw"] < -0.02,
               task.last_info["yaw"])
+
+        # (b) 球在 eps 内（dx=+0.12）→ 居中确认后进 APPROACH：仅 sway 修正
+        uart2 = UartController(sim=True)
+        hub2 = _FakeHub(cx_ratio=0.56)
+        task2 = BallTask(uart2, hub2, 640, 360)
+        now2 = 1000
+        for _ in range(S.comm.ball.center_confirm_frames + 3):
+            now2 += 33
+            task2.process(frame, now2)
+        check("approach_phase_reached", task2.last_info["phase"] == PH_APPROACH,
+              (task2.last_info["phase"], task2.last_info["action"]))
+        check("approach_sway_left", task2.last_info["sway"] < -1e-6,
+              task2.last_info["sway"])
+        check("approach_no_yaw", abs(task2.last_info["yaw"]) < 1e-9,
+              task2.last_info["yaw"])
+        check("approach_no_heave", abs(task2.last_info["heave"]) < 1e-9,
+              task2.last_info["heave"])
+        check("approach_advances", task2.last_info["surge"] > 0,
+              task2.last_info["surge"])
     finally:
         (S.comm.ball.align_x, S.comm.ball.align_y, S.DEBUG,
          S.comm.ball.pid.kp, S.comm.ball.pid.ki, S.comm.ball.pid.kd) = saved

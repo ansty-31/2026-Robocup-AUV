@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
-"""test_ball_hit.py — 撞球命中判定新逻辑：
-   - 近距消失 → 后退(不再算命中)
-   - 连续近距(stop)达阈值 → 最后一次冲刺(居中+前进) → 冲刺完成才算 hit
+"""test_ball_hit.py — 冲刺(DASH)与停稳(STOP)：**不再检测有没有撞到**
+
+覆盖：
+  1. 面积(EMA) ≥ dash_ratio 连续 dash_confirm_frames 帧 → 进 DASH，速度 = 分级最高速
+  2. DASH 持续 dash_dur_s（不检测目标；冲刺中丢目标也照冲到底）
+  3. DASH 结束 → STOP：全 0 保持 stop_hold_s（稳定停住）→ DONE("hit")
+  4. 全程不会出现后退（没有"近距消失→后退"那套判定）
 """
 import math
 import os
@@ -12,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np                     # noqa: E402
 import base.settings as S              # noqa: E402
 from common.detector import Det        # noqa: E402
-from task1_2.ball import BallTask      # noqa: E402
+from task1_2.ball import BallTask, PH_DASH, PH_STOP        # noqa: E402
 
 PASS = []
 
@@ -65,71 +69,110 @@ def det_ratio(ratio, cx=W / 2.0, cy=H / 2.0):
                side, side)
 
 
-def test_near_loss_backward():
-    u, h = FakeUart(), FakeHub()
-    t = BallTask(u, h, W, H)
-    # 0.46：< r_hit(0.50) 不算命中；丢球瞬间 ema≈0.7*0.46=0.32 ≥ r_near(0.30) → 应后退
-    h.t = det_ratio(0.46)
+def _run_to_approach(task, hub, ratio=0.02, dt=33, n=12):
+    """喂若干帧"已居中的小球"，让任务从 CENTER 进到 APPROACH。"""
+    hub.t = det_ratio(ratio)
     now = 0
-    for _ in range(10):
-        t.process(FRAME, now); now += 100
-    h.t = None                               # 近距消失
-    t.process(FRAME, now)
-    check("near_loss_action_backward", t.last_info["action"] == "backward",
-          t.last_info["action"])
-    check("near_loss_surge_negative", t.last_info["surge"] < 0,
-          t.last_info["surge"])
-    check("near_loss_not_done", t.last_info["status"] != S.STATUS_DONE)
+    for _ in range(n):
+        now += dt
+        task.process(FRAME, now)
+    return now
 
 
-def test_stop_then_dash_then_hit():
-    u, h = FakeUart(), FakeHub()
-    t = BallTask(u, h, W, H)
-    h.t = det_ratio(0.90)                    # >= r_hit(0.75)
-    now = 0
-    # 先居中所需帧
-    for _ in range(S.comm.ball.center_confirm_frames + 1):
-        t.process(FRAME, now); now += 100
-    check("first_stop_not_done", t.last_info["status"] != S.STATUS_DONE,
-          (t.last_info["action"], t.last_info["status"]))
-    # 注：hit_confirm_frames=1 时，贴近第一帧即触发 dash（没有单独的 stop 帧）
-    # 继续喂近距帧 → 达 hit_confirm_frames 应触发 dash
-    dash_seen = False
-    done = False
-    for _ in range(40):
-        t.process(FRAME, now); now += 100
-        if t.last_info["action"] == "dash":
-            dash_seen = True
-            if t.last_info["surge"] <= 0:
-                raise AssertionError("dash surge 应>0: %s" % t.last_info)
-        if t.last_info["status"] == S.STATUS_DONE:
-            done = True
+def _run_until_dash(task, hub, now, ratio=None, dt=33, max_frames=60):
+    """持续喂"面积已达标"的球（EMA 需要几帧收敛），直到进 DASH。"""
+    ratio = S.comm.ball.dash_ratio + 0.05 if ratio is None else ratio
+    hub.t = det_ratio(ratio)
+    for _ in range(max_frames):
+        now += dt
+        task.process(FRAME, now)
+        if task.last_info["phase"] == PH_DASH:
             break
-    check("dash_triggered", dash_seen)
-    check("dash_then_hit_done", done and t.last_info["reason"] == "hit",
-          (t.last_info["status"], t.last_info["reason"]))
+    return now
 
 
-def test_hit_cnt_reset_when_far():
+# ---------------------------------------------------------------- 1) 面积触发冲刺
+def test_area_triggers_dash():
     u, h = FakeUart(), FakeHub()
     t = BallTask(u, h, W, H)
-    h.t = det_ratio(0.90)
-    now = 0
-    for _ in range(S.comm.ball.center_confirm_frames + 1):
-        t.process(FRAME, now); now += 100
-    check("hit_cnt_started", t._hit_cnt >= 1, t._hit_cnt)
-    h.t = det_ratio(0.40)                    # 变远(<r_hit)：EMA 回落后应清零
-    for _ in range(12):
-        t.process(FRAME, now); now += 100
-        if t._hit_cnt == 0:
-            break
-    check("hit_cnt_reset", t._hit_cnt == 0, t._hit_cnt)
+    now = _run_to_approach(t, h)
+    check("可进近", t.last_info["phase"] == "APPROACH", t.last_info["phase"])
+    now = _run_until_dash(t, h, now)
+    check("面积达标进入 DASH", t.last_info["phase"] == PH_DASH,
+          (t.last_info["phase"], t.last_info["action"]))
+    check("冲刺速度=分级最高速",
+          abs(t.last_info["surge"] - S.comm.ball.surge_fast) < 1e-9,
+          (t.last_info["surge"], S.comm.ball.surge_fast))
+    check("冲刺只用前进", abs(t.last_info["sway"]) < 1e-9
+          and abs(t.last_info["yaw"]) < 1e-9 and abs(t.last_info["heave"]) < 1e-9,
+          t.last_info)
+
+
+# ---------------------------------------------------------------- 2) 冲刺时长/盲冲
+def test_dash_duration_and_blind():
+    u, h = FakeUart(), FakeHub()
+    t = BallTask(u, h, W, H)
+    now = _run_to_approach(t, h)
+    now = _run_until_dash(t, h, now)
+    t0 = now
+    h.t = None                              # 冲刺中丢目标：必须照冲到底
+    while t.last_info["phase"] == PH_DASH and now - t0 < 5000:
+        now += 33
+        t.process(FRAME, now)
+    dur = (now - t0) / 1000.0
+    check("冲刺时长≈dash_dur_s",
+          abs(dur - S.comm.ball.dash_dur_s) <= 0.2,
+          "dur=%.2f 期望=%.2f" % (dur, S.comm.ball.dash_dur_s))
+    check("冲刺后进 STOP", t.last_info["phase"] == PH_STOP, t.last_info["phase"])
+
+
+# ---------------------------------------------------------------- 3) 停稳后 DONE
+def test_stop_holds_then_done():
+    u, h = FakeUart(), FakeHub()
+    t = BallTask(u, h, W, H)
+    now = _run_to_approach(t, h)
+    now = _run_until_dash(t, h, now)
+    h.t = None
+    stop_t0 = None
+    zeros = 0
+    while t.last_info["status"] != S.STATUS_DONE and now < 20000:
+        now += 33
+        t.process(FRAME, now)
+        if t.last_info["phase"] == PH_STOP:
+            if stop_t0 is None:
+                stop_t0 = now
+            if len(u.dof[-1]) == 4 and all(abs(v) < 1e-9 for v in u.dof[-1]):
+                zeros += 1
+    check("DONE 理由 hit", t.last_info["reason"] == "hit", t.last_info)
+    hold = (now - stop_t0) / 1000.0
+    check("STOP 保持≈stop_hold_s",
+          stop_t0 is not None and abs(hold - S.comm.ball.stop_hold_s) <= 0.2,
+          "hold=%.2f 期望=%.2f" % (hold, S.comm.ball.stop_hold_s))
+    check("STOP 期间持续发全 0", zeros >= 5, "zeros=%d" % zeros)
+    check("命中后已回中位", ("neutral",) in u.dof, u.dof[-2:])
+
+
+# ---------------------------------------------------------------- 4) 不会后退
+def test_never_backward():
+    u, h = FakeUart(), FakeHub()
+    t = BallTask(u, h, W, H)
+    now = _run_to_approach(t, h)
+    now = _run_until_dash(t, h, now)        # 面积达标 → 触发冲刺
+    h.t = None
+    while t.last_info["status"] != S.STATUS_DONE and now < 20000:
+        now += 33
+        t.process(FRAME, now)
+    surges = [d[0] for d in u.dof if len(d) == 4]
+    check("全程无后退", all(s >= 0 for s in surges),
+          [s for s in surges if s < 0][:5])
+    check("结束时 DONE(hit)", t.last_info["reason"] == "hit", t.last_info)
 
 
 def main():
-    test_near_loss_backward()
-    test_stop_then_dash_then_hit()
-    test_hit_cnt_reset_when_far()
+    test_area_triggers_dash()
+    test_dash_duration_and_blind()
+    test_stop_holds_then_done()
+    test_never_backward()
     print("\n全部通过 %d 项" % len(PASS))
 
 

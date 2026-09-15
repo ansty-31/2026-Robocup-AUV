@@ -20,11 +20,11 @@ import numpy as np                          # noqa: E402
 
 import base.settings as S                        # noqa: E402
 from common.detector import DetectorHub, Det       # noqa: E402
-from gate.gate_frontend import (            # noqa: E402
+from gate.vision.gate_frontend import (            # noqa: E402
     parse_kpt_mode, width_range_depth, MODE_FULL, MODE_P3P,
     MODE_WIDTH, MODE_COARSE)
-from gate.gate_decode import decode_yolo11_kpt   # noqa: E402
-from gate.gate_detector import board_camera      # noqa: E402
+from gate.vision.gate_decode import decode_yolo11_kpt   # noqa: E402
+from gate.vision.gate_detector import board_camera      # noqa: E402
 from gate.mock import MockGateBackend            # noqa: E402
 from gate.gate_task import GateTask, PH_APPROACH, PH_THROUGH, SUB_REACQUIRE  # noqa: E402
 

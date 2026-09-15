@@ -1,4 +1,10 @@
-# gate 任务 YOLO-Keypoint(门框四角) + PnP/反投影位姿策略 — 移植方案 v1.1
+# gate 任务 YOLO-Keypoint(门框四角) + PnP/反投影位姿策略 — 移植方案 v1.2
+
+> **v1.2 变更**：新增「角点逐点融合滤波」层（§4.8，代码 `gate/data/kpt_memory.py`）——
+> 识别不动，只在**每个特征点自身的数据**上做鲁棒自适应融合，抑制水面倒影引起的
+> 小漂移 / 短消失 / 偶发鬼点，避免状态机在 full↔p3p↔coarse 之间抖动、进而误触发
+> REACQUIRE 后退。专项说明见 **`doc/算法说明-gate-角点逐点融合滤波.md`**。
+> 同时按已落地代码校订 §4.6 REACQUIRE 的限幅/闭环、§5.3 相位机与近距过门判据、§5.4 参数表。
 
 > 目标：把当前 gate 策略（"整门 bbox 面积估算距离 + bbox 框心对中 + 大框消失计数"）
 > 升级为 BumblebeeAS（NUS 水下机器人）思路：
@@ -120,6 +126,10 @@ def object_points(W_m, H_m, from_front=True):
 ```
 前视帧 ──(undistort+enhance)──► [gate keypoint 模型] ──► 门检测 + 4 角点(px + conf)
                                                                  │
+                       §4.8 角点逐点融合滤波 (gate/data/kpt_memory.py)
+                       置信度加权 + 历史分布定半径 + α-β 平均 + 短消失回忆
+                       输出: 融合后的 4 角点 + 连续置信度（接口不变）
+                                                                 ▼
                        §4.3 keypoint 解析: 同域全尺寸坐标, conf 门限, 排序
                                                                  ▼
                     img2 (N,2)  ↔  obj3 (N,3)  (§3 同序查表)
@@ -157,6 +167,8 @@ def keypoints_to_img_pts(det, w, h, kpt_conf_thr, order=("TL","TR","BR","BL")):
         return det.kpts[idx[:2]], "width_range"  # 宽度测距(§4.6)
     return None, "coarse"                       # 角不足 → 用检测框粗对准
 ```
+- **进本函数之前**，`kpts/kpt_conf` 先过 §4.8 的逐点融合滤波（默认开启，
+  `vision.gate.kpt_mem.enable=false` 可整体关掉回到"单帧直用"）；
 - **顺序由训练固定**，运行时不需要 match；只做一次"四角围成凸四边形"合理性校验（防回归乱序）；
 - keypoint 坐标从模型域还原到全尺寸帧时与 bbox 同一缩放（§4.2）；
 - 建议质量闸门：`四角重投影面积/检测框面积` 合理性 + `score` 门限。
@@ -224,7 +236,9 @@ R = cv2.Rodrigues(rvec)[0]
   else: coarse → 按"缺角仲裁"分档运动（见下）
   穿过计数 ≥ pass_target → DONE
 ```
-> 帧间连续：本帧失败/丢目标用上帧位姿保持 N 帧（防抖），N 超限才回 search。
+> 帧间连续：本帧**丢目标**用上帧位姿保持 `pose_hold_frames` 帧（防抖），超限才回 search；
+> 单帧"解算失败"目前仍会落 coarse（§8 待办：加 pose-hold）。
+> 另外 §4.8 的逐点融合已把绝大多数"单帧角点抖动/短消失"消除在解析之前。
 
 **缺角时的运动仲裁（对准阶段禁止盲目前进）**：只有两件事值得"前进"——① 远距小框，需要
 靠近让角点可辨（靠近本身=信息增益）；② `Z < Z_pass`，已进入穿门窗口。其余一律不前进；
@@ -239,11 +253,12 @@ R = cv2.Rodrigues(rvec)[0]
 ├ 近(占比大, 角出画/画面装不下): surge=0 → 直接 REACQUIRE(前进只会更糟)
 └ search(无整框):            旋转扫描(既有逻辑)
 
-REACQUIRE(信息重取): 短时后退(surge<0, 限幅+限时) 或 朝"可见侧"小幅转向
+REACQUIRE(信息重取): 短时后退(surge<0, 限幅+限时)
   · 目的: 拉大距离 → 整门重进画面 → 4 角重现 → 回 RANGE_ALIGN
-  · 若只能看到"一侧柱/对向 2 角": 转向应朝向可见侧(把它拉回画面中心)，
-    不要无信息旋转(那会把仅有的目标转丢)
-  · 超时/后退超限 → 回 search; 全程保持心跳与急停语义
+  · **闭环**: 退到 框占比 ≤ 进入时 × `reacquire.stop_ratio` 就停（不再固定退满）
+  · **限幅**: 单次 ≤ `reacquire.max_ms`；同段内连续 > `max_times` 次仍拿不到角点
+    → 放弃后退、原地 HOLD `reset_after_ms`，窗口过后才允许再试（防"退-进-退"震荡）
+  · 超时 → 回 search; 全程保持心跳与急停语义
 
 穿过例外: 一旦 Z < Z_pass(已进入穿门窗口), 上述一切让位于"保持姿态直行穿越"。
 ```
@@ -280,6 +295,44 @@ REACQUIRE(信息重取): 短时后退(surge<0, 限幅+限时) 或 朝"可见侧"
 keypoint 前端的对应关系见 §4.6 降级表；随着前端（训练/推理）成熟，若发现"某模式长期用不到/某模式常触发"，
 只改 `keypoints_to_img_pts` 这一个 adapter 的判据，几何内核（§4.4/§4.5）与 GateTask 相位机不动。
 
+### 4.8 角点逐点融合滤波（v1.2 新增；代码 `gate/data/kpt_memory.py`）
+
+**为什么要有这一层**：实船水池测试发现，门框上端靠近水面时会出现倒影，导致
+① 角点小范围漂移、② 角点短时消失、③ 偶发角点"打到倒影上"。识别本身（肉眼）是够用的，
+但这些**小误差**会让"当帧有效角点数"在 4/3/2 之间反复跳：
+
+```
+角点抖动 → parse_kpt_mode 判出的 mode 在 full↔p3p↔coarse 抖动
+        → 位姿时有时无 → 状态机在 GOLDEN/HOLD 之间抖
+        → coarse 且门框占比 > coarse.near_ratio → 触发 REACQUIRE → 看到"明显后退"
+```
+即：**触发后退的直接原因是"点不全"，而"点不全"的根因是倒影**。所以修在点的数据层，
+而不是去压制后退（那会扼制运动逻辑本身）。
+
+**这一层做什么**（识别/mode/PnP 判定**一行未改**，只在 kpts/kpt_conf 上做处理）：
+
+| 环节 | 做法 | 对应术语 |
+|---|---|---|
+| 融合 | 每点按 `w = conf × w_geo` 加权做 α-β 递推（位置+速度） | 置信度加权 α-β / g-h 滤波（稳态卡尔曼等价） |
+| 权重 | `w_geo = 1/(1+(d/R)²)`，d=当帧偏差、R=该点范围圆半径 | 柯西(Cauchy/Lorentzian)鲁棒权重（M 估计/IRLS） |
+| 半径 | `R = clip(k_sigma × σ, r_min_px, r_max_px)`，σ 为该点残差分布的慢跟踪 | 由创新/残差尺度估计出的**验证门**（gating） |
+| 短消失 | 没打到但近期见过 → 用融合状态外推，置信度保持 `recall_conf` | 只预测不更新的**滑行**(coasting) |
+| 长丢失 | 超 `max_missing_frames`/`valid_ms` → 置信度按 `conf_decay` 衰减 | 航迹质量分衰减 → 交还原判定逻辑降级 |
+| 关键取舍 | **不做"有效/无效"硬判**，始终输出融合状态 + 连续置信度 | 软融合替代硬门限，避免把信息量本就不多的点滤没 |
+
+**性质**（实测，见 `tests/test_gate_kpt_memory.py` 与专项文档）：
+- 抑制抖动（σ 6.0px → 2.4px）、**零滞后**（匀速下 −0.54px，不拖过门判据）；
+- 一帧鬼点(300px)对融合点影响 **0.11px**，且**该点仍然有效**（状态不丢）；
+- 半径随该点历史分布自适应（安静 10px / 大漂移 80px），世界真变了能自愈跟上；
+- 端到端：同样的角点抖动/丢点条件下，**mode 的 full↔非 full 翻转次数降一个数量级**
+  （51→5 / 69→0 / 85→3）。
+
+**接口**：`KptMemory.update(kpts, kpt_conf, now_ms) → (kpts', kpt_conf')`，
+直接替换原 `det.kpts / det.kpt_conf` 后进入 §4.3；`vision.gate.kpt_mem.enable=false` 即回到原始行为。
+**边界**：这是**逐点独立**的滤波（不联合 4 点、不是位姿滤波器）；不含 §4.6 的几何结构约束
+（宽高比/平行度等本次刻意不加，避免过严滤除）。专项说明见
+`doc/算法说明-gate-角点逐点融合滤波.md`。
+
 ## 5. 代码框架整理
 
 ### 5.0 代码架构原则（ball / gate 完全解耦，公共只留"地基"）
@@ -291,11 +344,27 @@ auv_vision/
 ├── main.py            # 状态机装配：按 comm.tasks.enabled 注册 ball/gate 任务对象
 ├── ball/              # ball 专属：沿用现状，原则"gate 改动不碰 ball"
 │   └── task1_2/ball.py  # 任务一撞球（现居 task1_2/ball.py）
-├── gate/              # gate 专属（本次新建，全部新代码收在这里）
-│   ├── gate_decode.py   # keypoint 头解码（§5.1）
-│   ├── gate_frontend.py # keypoints_to_img_pts / mode 判定（§4.3，adapter）
-│   ├── geometry.py      # CameraModel / object_points / gate_pose / 平面·反投影（§4.2/4.4/4.5）
-│   └── gate_task.py     # GateTask 相位机（已落地）
+├── common/            # 跨任务共用件（不掺任务逻辑）
+│   ├── streak.py        # 双条件确认：时间 + 帧数（local/板端对齐用）
+│   └── frame_stamp.py   # 唯一帧 / 帧龄 / 采集断点（两分法：可估计≠可确认）
+├── gate/              # gate 专属（v1.4 分三层，依赖单向 data ← vision ← motion ← 顶层）
+│   ├── gate_task.py     # GateTask 相位机骨架：装配 + 帧守卫 + 选路 + 对准档（唯一入口）
+│   ├── mock.py          # MockGateBackend 仿真后端（脚本化进近/穿门）
+│   ├── README.md        # 目录分层 / 参数配置指南 / 实验待测项 / 排查
+│   ├── vision/          # 视觉处理（像素→几何量）
+│   │   ├── gate_decode.py   # keypoint 头解码（§5.1）
+│   │   ├── gate_detector.py # board_camera() / build_gate_backend()（组合根）
+│   │   ├── gate_frontend.py # keypoints_to_img_pts / mode 判定（§4.3，adapter）
+│   │   ├── geometry.py      # CameraModel / object_points / gate_pose / 平面·反投影（§4.2/4.4/4.5）
+│   │   └── perception.py    # 感知半场：检测→先验→融合→mode→线索→位姿→后验 ⇒ Sighting
+│   ├── data/            # 数据处理（量 → 干净且带质量标签的数据）
+│   │   ├── kpt_memory.py    # 角点逐点软融合（§4.8）——质量分先验在这里进权重
+│   │   ├── quality.py       # 质量分 Q：先验→融合权重/增益；后验→谨慎度/q_mem
+│   │   └── cues.py          # 恢复线索 + 线索↔位姿互相自检
+│   └── motion/          # 运动决策（数据 → DOF）
+│       ├── phases.py        # 相位/子状态常量（骨架与相位段共用一份）
+│       ├── phase_degrade.py # 相位段：width / coarse / REACQUIRE 闭环
+│       └── phase_recover.py # 相位段：搜索脉冲 / 丢目标 / 穿门收尾 / 线索接管
 └── tests/
     ├── test_geometry.py   # 合成往返、反投影、from_front（§6）
     └── test_gate_logic.py # mock 场景状态机
@@ -318,7 +387,7 @@ model:
 ```
 - `DetectorHub._models: {task: 实例}`（注册表只负责"任务→后端"，无任务逻辑）；
   `_cache` 按 task 分开（同帧两模型各一次前向；任务顺序执行，同一时刻只有一个模型热）；
-- **keypoint 解码放 `gate/gate_decode.py`**（§5.0 结构）：X5 OE 的 pose 头输出张量与 reg/cls
+- **keypoint 解码放 `gate/vision/gate_decode.py`**（§5.0 结构）：X5 OE 的 pose 头输出张量与 reg/cls
   分裂头不同，新增 `decode_yolo11_kpt`：按检测框聚合 keypoint、缩放到全尺寸帧、附每点置信度；
   `ball` 路径不引用它，球侧零回归；模型导出前核对 kpt 张量坐标基准（相对输入/相对框/归一化方式），
   用 §6 合成测试反查；
@@ -340,6 +409,10 @@ ema_pose()                # 可选(平移 EMA + 四元数平均, Bumblebee pose_
 
 ### 5.3 gate/gate_task.py — GateTask（已落地：相位机 + 位姿闭环 + 缺角仲裁）
 
+> v1.4 起本文件**只留骨架**（装配 / 帧守卫 / 相位选路 / 位姿·像素对准档），按功能拆成
+> `perception.py`（看：感知半场）与 `phase_degrade.py` / `phase_recover.py`（做：相位段 mixin，
+> 方法体与原实现逐行一致）。分层与"质量分两条去向"见文末 §v1.4。
+
 ```
 SEARCH ─(见门整框)──► RANGE_ALIGN ──(4/3角 golden window 对准达标, Z 进档)──► APPROACH
    ▲                      │  ▲                                                    │
@@ -357,25 +430,52 @@ RANGE_ALIGN 内部按"前端 mode"分 4 个子状态（状态 = 档位，逐帧�
 |---|---|---|---|
 | **GOLDEN** | full / p3p | sway/heave/yaw PID 对准（按位姿误差）；**surge=0** | 偏差与偏航进死区、连续 N 帧 → APPROACH |
 | **COARSE_FAR** | coarse 且框占比小 | 限量 creep（慢速 surge）+ 框心对中 | 靠近让 4 角可辨 → GOLDEN |
-| **COARSE_HOLD** | coarse 中/近 / width_range | surge=0；框心/两角中点/上帧位姿保持对中 | 连续 ≥K 帧无进展 → REACQUIRE |
+| **COARSE_HOLD** | coarse 中/近 / width_range | surge=0；框心/两角中点/上帧位姿保持对中 | 连续 ≥`hold.max_frames` 帧无进展 → REACQUIRE |
 | **REACQUIRE** | 见左 | 短后退(surge<0, 限幅限时)或朝可见侧小幅转向 | 拉距重取整门 → 恢复 full/p3p/width_range 即回 GOLDEN/对应档 |
 
 - 门无朝向/对准要求：GOLDEN/APPROACH 里 yaw 修正可放宽（大死区/低速），核心 = 对准开口中心后直穿；
 - APPROACH：按 `Z=t.z` 分档前进 + 姿态保持（对准误差持续 PID）；`Z < Z_pass` → THROUGH；
-- THROUGH（机身过门，穿过例外）：**忽略角丢失**（缺角=已过门正常现象），保持直行到
-  `Z ≤ -body_center_offset` 判机身过门（无 odom 时用"穿越事件 + 消失确认"双保险，§4.5），计数+1 后复位；
+- **过门判据（两条，任一成立即 THROUGH，忽略角丢失直行）**：
+  ① 位姿可信且 `Z ≤ z.cross` **连续 `cross_confirm_frames` 帧**（防单帧 PnP 错解直接冲出去）；
+  ② 进近中已到近距（`Z ≤ z.near_lost_m`）后**整门丢失**（门占满视野/机身入门框）——
+     这是实船上最常见的过门路径；
+- THROUGH 内再按 `through.confirm_frames` 帧确认 → 计数 +1（达 `pass_target` → DONE(pass)），
+  并按 `body_center_offset` 语义直行穿越；THROUGH 阶段**只前进、不做横向微调**；
+- **位姿跳变保护**：帧间 `Z` 突变 > `pnp.max_z_jump_m` 的帧判为错解弃帧（退化 coarse），
+  防平面 PnP 偶发解直接触发 THROUGH 满速冲门；同时把上帧位姿用于所有模式的消歧（不只在 p3p）；
+- **下水前自检**：标定分辨率 ≠ 实际帧尺寸时打印告警（PnP 深度会整体缩放错）；
 - 帧间防抖：任何档位丢目标/位姿校验失败，用上帧姿态保持 ≤N 帧，超限才回 SEARCH/REACQUIRE；
 - 复用现有 `PID`；yaw 通道走 `uart.send_dof(surge, sway, heave, yaw)`（接口已支持）；
-- `last_info` 增加 `z / yaw / phase / substate / mode / reproj_rms / kpt_ok` 便于调参；
+- `last_info` 提供 `phase / substate / mode / action / z / dx / dy / sway / heave / surge /
+  yaw / kpt(融合后有效角点数) / kpt_raw(当帧原始有效角点数) / ratio(门框宽/屏宽) / pass`
+  便于调参（`main._draw` 叠加里直接可见：`kpt` 远小于 `kpt_raw` 说明正在靠融合/回忆撑住）；
 - 计数沿用 `pass_target` 语义（每轮一门）。
 
 ### 5.4 参数（cfg/comm.yaml + cfg/vision.yaml）
 ```
-comm.gate:    相位/距离阈值(Z_align/Z_pass/Z_min)、PID(sway/heave/yaw)、
-              pass_confirm_frames、timeout、降级开关
-vision.gate:  geometry(§3)、keypoint(kpt_conf_thr)、pnp(reproj_px, z_bounds)
-vision.model: task_models(§5.1)
+comm.gate:     timeout_ms / pass_target
+               pid{kp,ki,kd,out_max,deadzone}            # 横向对准(sway/heave)
+               align{xy_m, confirm_frames}               # 对准判据与确认帧数
+               z{align_max, fast_max, slow_max, cross, cross_confirm_frames, near_lost_m}
+               surge{fast, slow, creep, lost_backward, reacquire, through}
+               coarse{far_ratio, near_ratio, align_x, align_y}
+               hold{max_frames}
+               reacquire{max_ms, max_times, stop_ratio, reset_after_ms}
+               through{confirm_frames}
+               search{spin_s, pause_s, yaw} / pose_hold_frames
+               quality{...}                              # v1.4 质量分（先验/后验两用）
+               cues{enable, record_only, speed, ...}     # v1.3 恢复线索 + 互检
+               stamp{max_age_s, max_gap_s, adaptive_gap, future_tol_s}
+vision.gate:   geometry(§3)
+               keypoint{conf_thr}
+               kpt_mem{enable, alpha, beta, valid_ms, k_sigma, r_min_px, r_max_px,
+                       sigma_init_px, sigma_lambda, w_min, conf_floor, recall_conf,
+                       conf_decay, max_missing_frames, min_frames,
+                       q_gain_floor}   # §4.8 逐点融合 + 质量分帧级增益下限
+               pnp{reproj_px, z_min, z_max, refine, max_z_jump_m}
+vision.model:  task_models(§5.1)   # gate 权重 + kpt_order
 ```
+> 详细含义/调参方向见 `doc/算法说明-gate-角点逐点融合滤波.md` 与 `cfg/*.yaml` 内注释。
 
 ## 6. 测试与验证（先无硬件闭环）
 
@@ -423,3 +523,63 @@ vision.model: task_models(§5.1)
 ⑤ **`body_center_offset` 已定 = 0.0**（相机≈机身中心；穿越判据=相机过平面即判过门；相机若在机头再改）。
 
 1. 特征匹配（纹理目标）暂不实现，仅留 §2.4 备忘。
+
+### v1.2 追加
+
+✅ 已做：
+⑥ **角点逐点融合滤波**（§4.8 / `gate/data/kpt_memory.py`）落地并单测（`tests/test_gate_kpt_memory.py`）：
+  抑制倒影引起的小漂移/短消失/偶发鬼点，mode 抖动与假 REACQUIRE 显著下降；
+⑦ **REACQUIRE 限幅与闭环**（§4.6）：单次 `max_ms`、同段 `max_times`、退够即停 `stop_ratio`、
+  失败后 HOLD `reset_after_ms`；后退速度 `surge.reacquire` 降为 0.25；
+⑧ **过门判据完善**（§5.3）：`z.cross` 连续确认帧、`z.near_lost_m` 近距丢失判过门、
+  THROUGH 阶段不做横向微调、`pnp.max_z_jump_m` 位姿跳变保护、全程用上帧位姿消歧；
+⑨ **下水前自检**：标定分辨率 ≠ 实际帧尺寸时告警（PnP 深度整体缩放风险）。
+
+⬜ 待办（需真机数据或另行确认）：
+1. **近距单帧"解算失败"仍落 coarse** → 建议加 `pose_fail_hold_frames`（内点≥3 时保持上帧位姿），
+   这是目前 trace 到的最后一处假 REACQUIRE 来源（属"识别之后"逻辑，待确认后再改）；
+2. **`kpt_mem` 参数标定**：`k_sigma / r_min_px / recall_conf / conf_decay` 目前是保守默认值，
+   建议先给 `preview_detect.py --gate-kpt` 加 `--dump kpt.jsonl` 存真机逐帧角点，离线回放标定；
+3. **几何结构约束（可选）**：宽高比/平行度/凸性等，本次**刻意未加**（信息量少、怕过严）；
+   若日后要加，会做成"可关、可调、宽松"的项，且只做**软权重**不做硬剔除。
+
+
+### v1.3 就地升级（借鉴 gate_pnp 思路，**架构不变**）
+
+✅ 已做（全部落在 `gate/` 内；未改原相位机/子状态/方法名与配置风格）：
+⑩ **帧有效性** `gate/frame_stamp.py`：唯一帧（frame_id 递增）、帧龄与采集断点；
+   过期帧"可估计、不计确认"，重复/乱序帧忽略（沿用上一帧指令，保持连续）。
+   `GateTask.process(frame, now_ms, frame_id=None, captured_at=None)`：不传时按旧方式（每次调用=一帧）。
+⑪ **双条件确认** `gate/streak.py`：确认 = 时间 + 帧数；默认秒数取"升级前帧数在 30fps 的等效值"，
+   因此 ≤30fps 由帧数主导（与升级前行为一致），仅在更高帧率时秒数下限生效（防确认被过快满足）。
+⑫ **质量分→谨慎度** `gate/data/quality.py`：q_kpt/q_pnp/q_box/q_time → Q → c；
+   低质量时降速（有下限）、放宽死区；**不放大确认时长**（`confirm_max_scale` 默认 1.0）。
+   其中 `q_box`（位姿投影框 vs 检测框 IoU）就是"位姿链↔线索链互相自检"。
+⑬ **恢复线索** `gate/data/cues.py`：位姿连续不可用 ≥ `cue_after_frames` 且处于 SEARCH/ALIGN 时，
+   按可见性给低速方向动作（上边→降 / 下边→升 / 左列→右转 / 右列→左转 / 贴边→后退，其余不猜）；
+   `cue_conflicts()` 做线索↔位姿冲突检查（线索判"太近"但 z 仍大 → 不驱动）。
+   `cues.record_only:true` 先只自检、确认方向后再开驱动。
+⑭ **域自证脚本** `gate/check_pipeline_identity.py`（移植后跑，不入运行时）：
+   校验声明项 + `CameraModel(rectified).K == getOptimalNewCameraMatrix` +
+   `A⁻¹(A·new_K)==K_full` + decode 逆缩放 == 1/resize 缩放。
+
+参数（可选覆盖；不写则用代码默认）：`comm.gate.stamp`、`comm.gate.confirm`、
+`comm.gate.quality`、`comm.gate.cues`。
+
+测试：`tests/test_gate_enhance.py`（43 项）；既有 gate 套件全部保持通过（行为不变）。
+备份：`bak/gate_before_enhance_<ts>/`。
+
+⚠️ 待真机确认：线索方向符号（先用 `preview_detect.py --gate-kpt` 的可见性日志核对，
+与相机安装/池深有关）；`q_lo/q_hi` 与 `cue_after_frames` 用倒影实测数据标定。
+
+### v1.4 分层重构 + 质量分的两条去向（**只动策略层与文件组织，运动逻辑不动**）
+
+本次更新已单独成文，**请看 `doc/算法说明-gate-v1.4-分层与质量分.md`**（分层与依赖规则、
+质量分先验/后验的公式与因果、软耦合验证、`gate_pnp` 借鉴边界、以及本次暴露的两个工程坑）。
+参数逐项说明与实验待测项清单见 `gate/README.md`。
+
+一句话摘要：`gate/` 分三层（`vision/` 视觉处理 · `data/` 数据处理 · `motion/` 运动决策），
+顶层只留 `gate_task.py`（相位机骨架，800→426 行）与 `mock.py`；质量分 Q 从"只调运动谨慎度"
+改为**两条去向**——①先验（原始 conf × 帧龄 → `kpt_memory` 逐点权重 + 帧级增益）
+②后验（RMS/框 IoU + 线索互检 → 谨慎度 + `q_mem`）；Q 仍不参与过门判定，
+`confirm_max_scale=1.0` 仍不改确认时长。

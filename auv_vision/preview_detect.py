@@ -92,7 +92,7 @@ def main():
     model_desc = S.vision.model.path
     if a.gate_kpt:
         try:
-            from gate.gate_detector import build_gate_backend
+            from gate.vision.gate_detector import build_gate_backend
         except ImportError:
             from auv_vision.gate.gate_detector import build_gate_backend
         backend = build_gate_backend()
@@ -122,7 +122,7 @@ def main():
     if backend is not None:
         hub.register("gate", backend)         # 复用门任务后端(独立权重)
         try:
-            from gate.gate_frontend import parse_kpt_mode
+            from gate.vision.gate_frontend import parse_kpt_mode
         except ImportError:
             from auv_vision.gate.gate_frontend import parse_kpt_mode
 

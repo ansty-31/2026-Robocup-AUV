@@ -20,8 +20,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from gate import geometry as G                      # noqa: E402
-from gate.geometry import (                         # noqa: E402
+from gate.vision import geometry as G               # noqa: E402
+from gate.vision.geometry import (                         # noqa: E402
     CameraModel, object_points, gate_pose,
     plane_from_pose, backproject_to_plane,
 )

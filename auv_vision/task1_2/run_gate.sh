@@ -1,8 +1,8 @@
 #!/bin/bash
 # run_gate.sh — 过门(gate)单任务下水编排：权重自检 → 待机 → (可选下潜/前进) → main.py --task gate
 #
-# 与 run_ball_forward.sh / run_ball_return.sh 的关系：这三个脚本都是**单任务**编排，
-# 互不干扰。本脚本只跑 gate，不会加载 ball 权重（DetectorHub 惰性加载）。
+# 与 run_ball_return.sh 的关系：都是**单任务**编排，互不干扰。
+# 本脚本只跑 gate，不会加载 ball 权重（DetectorHub 惰性加载）。
 #
 # 关键点（为什么能单独测 gate）：
 #   - main.py --task gate 只装配 gate 专用后端（vision.model.task_models.gate.path），

@@ -88,5 +88,26 @@ gate:                         # 过门（§3 几何 / keypoint / PnP 参数）
   geometry: {frame_w: 0.70, frame_h: 0.50, bar_width: 0.05,
              sym_bars: true, body_center_offset: 0.0}
   keypoint: {conf_thr: 0.5}
+  kpt_mem: {enable: true, alpha: 0.4, beta: 0.1, valid_ms: 800,
+            k_sigma: 3.0, r_min_px: 10.0, r_max_px: 80.0,
+            sigma_init_px: 8.0, sigma_lambda: 0.15,
+            w_min: 0.0, conf_floor: 0.05, recall_conf: 0.55, conf_decay: 0.35,
+            max_missing_frames: 5, min_frames: 2, q_gain_floor: 0.35}
+            # 门角点"逐点数据处理"（识别不动，只融合每个点自身的信息）：
+            #   置信度加权 ：每帧按 w = w_prior × w_geo 融合, w_geo=1/(1+(d/R)²)
+            #                → 一帧鬼点(w≈0)几乎不影响融合, 但**该点仍有效**、状态不丢
+            #   质量分先验 ：w_prior 由 gate/data/quality.py 给出 = 原始角点 conf × 帧新鲜度
+            #                （不传质量分时退化为原来的 conf，行为与升级前一致）
+            #   帧级增益   ：gain = q_gain_floor + (1-q_gain_floor) × q_mem（历史位姿证据）
+            #                同时乘在 α/β 上：位姿链最近不可信 → 更信历史、更平滑
+            #   半径来自历史：R = clip(k_sigma × σ, r_min_px, r_max_px),
+            #                σ 是该点残差分布的慢跟踪(sigma_lambda) → 点安静则半径小、
+            #                快速逼近则自动放大、世界真变了也能自愈跟上
+            #   α-β 平均   ：alpha=融合增益, beta=匀速补偿(稳态滞后≈0, 不拖速度)
+            #   短消失回忆 ：没打到但近期见过 → 用融合状态外推, conf 保持 recall_conf
+            #   长丢失衰减 ：超 max_missing_frames / valid_ms → conf 按 conf_decay 衰减,
+            #                自然低于 keypoint.conf_thr 后由原判定逻辑降级(不瞎编)
+            #   w_min>0    ：把权重低于它的帧彻底忽略(默认 0 = 纯软融合, 不硬关)
+            # enable=false ：恢复"单帧直用"的原始行为
   pnp: {reproj_px: 8.0, z_min: 0.2, z_max: 15.0, refine: true,
         max_z_jump_m: 0.8}       # 帧间 z 突变>该值视为错解弃帧(防满速冲门)

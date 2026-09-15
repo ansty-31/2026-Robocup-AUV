@@ -29,16 +29,13 @@ from base.camera import create_camera
 from base.uart import UartController, install_signal_handlers
 from common.detector import DetectorHub
 from task1_2.ball import BallTask
-from task1_2.ball_forward import BallForwardTask
 from gate.gate_task import GateTask
-from gate.gate_detector import build_gate_backend
+from gate.vision.gate_detector import build_gate_backend
 
-TASK_CLASS = {"ball": BallTask, "ball_fwd": BallForwardTask, "gate": GateTask}
-TASK_CAM = {"ball": "front", "ball_fwd": "front", "gate": "front"}
-STATE_TASK = {S.STATE_BALL: "ball", S.STATE_BALL_FWD: "ball_fwd",
-              S.STATE_GATE: "gate"}
-TASK_STATE = {"ball": S.STATE_BALL, "ball_fwd": S.STATE_BALL_FWD,
-              "gate": S.STATE_GATE}
+TASK_CLASS = {"ball": BallTask, "gate": GateTask}
+TASK_CAM = {"ball": "front", "gate": "front"}
+STATE_TASK = {S.STATE_BALL: "ball", S.STATE_GATE: "gate"}
+TASK_STATE = {"ball": S.STATE_BALL, "gate": S.STATE_GATE}
 
 
 class AppController(object):
@@ -63,6 +60,7 @@ class AppController(object):
         self.queue = [TASK_STATE[n] for n in (tasks or S.comm.tasks.enabled)]
         self._state_start = None
         self.frames = 0
+        self._frame_seq = 0          # 采集序号（v1.3：gate 唯一帧/帧龄检查用）
         self._log_t = time.time()
         self._video_on = self._init_video()
 
@@ -148,7 +146,10 @@ class AppController(object):
                      if isinstance(v, (int, float, str)) and
                      k in ("action", "ratio", "growth", "dx", "dy", "sway",
                            "heave", "surge", "phase", "substate", "mode", "z",
-                           "area", "pass", "kpt", "reason")]
+                           "area", "pass", "kpt", "kpt_raw",
+                           "Q", "Qmem", "gain", "caution", "cue", "cue_w",
+                           "cue_mode", "visible", "source", "frame_kind",
+                           "reason")]
             lines.append(" ".join(parts))
         y = 20
         for ln in lines:
@@ -189,7 +190,14 @@ class AppController(object):
             else:
                 frame = self.cams[TASK_CAM[STATE_TASK[self.state]]].read()
                 if frame is not None:
-                    task.process(frame, now_ms)
+                    self._frame_seq += 1
+                    # 帧标识：每次采集一帧 → 序号自增；采集时刻用同一 now_ms（秒域）。
+                    # 仅支持帧标识的任务（gate v1.3）才传，其余任务保持旧调用方式。
+                    if getattr(task, "supports_frame_stamp", False):
+                        task.process(frame, now_ms, self._frame_seq,
+                                     now_ms / 1000.0)
+                    else:
+                        task.process(frame, now_ms)
                     if self._video_on:
                         self._draw(frame, getattr(task, "last_dets", None) or [])
                     if task.last_info["status"] == S.STATUS_DONE:
@@ -238,7 +246,7 @@ class AppController(object):
     def _model_desc(self):
         """本次运行实际会加载的权重（一眼确认没走错模型）。"""
         parts = []
-        if any(n in self.tasks for n in ("ball", "ball_fwd")):
+        if "ball" in self.tasks:
             parts.append("ball=%s" % os.path.basename(str(S.vision.model.path)))
         if "gate" in self.tasks:
             gc = S.get("vision.model.task_models.gate", None) or {}
@@ -260,6 +268,16 @@ class AppController(object):
                     print("[MAIN] E-STOP，退出")
                     break
                 time.sleep(period)
+            # 任务全部结束：再持续发 stop 保持 done_hold_ms，确保"稳定保持停止"后才退出
+            # （撞球命中后不会刚停就关串口；DASH 后的 STOP 相位已在任务内保持）
+            hold_ms = int(S.get("comm.tasks.done_hold_ms", 0) or 0)
+            if self.state == S.STATE_DONE and hold_ms > 0 \
+                    and not self.uart.estop_active:
+                print("[MAIN] DONE：保持停止 %.0f ms" % hold_ms)
+                t_end = time.time() + hold_ms / 1000.0
+                while time.time() < t_end:
+                    self.uart.set_motion("stop")
+                    time.sleep(period)
         except KeyboardInterrupt:
             print("[MAIN] 手动中断")
         finally:
@@ -273,12 +291,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--task", default="all",
-                    help="本次任务: all|ball|ball_fwd|gate（默认 all=comm.yaml enabled）")
+                    help="本次任务: all|ball|gate（默认 all=comm.yaml enabled）")
     args = ap.parse_args()
     tasks = list(S.comm.tasks.enabled) if args.task == "all" else [args.task]
     for t in tasks:
         if t not in TASK_CLASS:
-            print("未知任务: %s（可选 all|ball|ball_fwd|gate）" % t)
+            print("未知任务: %s（可选 all|ball|gate）" % t)
             sys.exit(2)
     ctrl = AppController(tasks)
     # 单任务运行（下水前）自检：后端/权重不可用就直接拒绝启动，避免入水后空跑

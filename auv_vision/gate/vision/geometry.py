@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""gate/geometry.py — 门框位姿几何内核（纯函数，前端无关）
+"""gate/vision/geometry.py — 门框位姿几何内核（纯函数，前端无关）
 
 移植自 BumblebeeAS pose_estimator（NUS 水下机器人）：
   - utils/PinholeCamera.py        → CameraModel（raw / rectified 双域）
@@ -39,7 +39,7 @@ REPROJ_THR_PX = 20.0
 
 def _need_cv2():
     if not HAS_CV2:
-        raise RuntimeError("gate/geometry.py 需要 opencv：pip install opencv-python"
+        raise RuntimeError("gate/vision/geometry.py 需要 opencv：pip install opencv-python"
                            "（板端: sudo apt install python3-opencv）")
 
 

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""gate/gate_task.py — 任务三 过门（GateTask，§5.3 相位机）
+"""gate/gate_task.py — 任务三 过门（GateTask，§5.3 相位机骨架）
 
 门 = 对称平面矩形门框(0.70×0.50 m)，悬空，无朝向要求；任务 = 机身穿过开口。
 
@@ -16,8 +16,18 @@ RANGE_ALIGN 子状态（按前端 mode 与门框占屏比仲裁）：
   位姿跳变保护：pnp.max_z_jump_m 内的帧间变化才可信，突变帧弃帧退化 coarse，
   防平面 PnP 错解(尤其偶发 z≤cross)把船直接推出去。
 
-依赖：gate.geometry（位姿）、gate.gate_frontend（mode）、common.PID。
-参数：cfg/vision.yaml gate.* 与 cfg/comm.yaml gate.*。
+**分层**（v1.4，只搬文件不改运动）：
+    quality.py        质量分 Q 的两条去向：先验→kpt_memory 权重/增益；后验→谨慎度
+    perception.py     感知半场：选目标→先验→融合→mode→线索→位姿→后验 ⇒ Sighting
+    phase_degrade.py  降级路径相位段（width / coarse / REACQUIRE 闭环）
+    phase_recover.py  搜索 / 丢目标 / 穿门收尾 与 线索接管
+    gate_task.py      本文件：装配 + 帧守卫 + 相位选路 + 位姿/像素对准档 + 复位/诊断
+本文件只保留"决策与动作"：一帧的"看到什么"全在 `perception.GatePerception`。
+
+依赖：gate.vision.geometry（位姿）、gate.vision.perception（感知半场）、gate.motion.phases（相位常量）、
+      gate.data.quality / gate.data.cues（质量分与线索）、common.streak / common.frame_stamp（共用件）、
+      common.PID。参数：cfg/vision.yaml gate.* 与 cfg/comm.yaml gate.*
+      （策略件默认在代码内，可用 gate.data.quality / gate.data.cues / gate.kpt_mem 覆盖，无需改代码）。
 """
 from __future__ import annotations
 
@@ -25,20 +35,18 @@ import numpy as np
 
 import base.settings as S
 from common.PID import PID
-from gate.gate_detector import board_camera
-from gate.gate_frontend import (parse_kpt_mode, width_range_depth, bbox_center,
-                                MODE_FULL, MODE_P3P, MODE_WIDTH, MODE_COARSE)
-from gate.geometry import object_points, gate_pose, GATE_FRAME_W, GATE_FRAME_H
-
-PH_SEARCH = "SEARCH"
-PH_ALIGN = "ALIGN"
-PH_APPROACH = "APPROACH"
-PH_THROUGH = "THROUGH"
-
-SUB_GOLDEN = "GOLDEN"
-SUB_CREEP = "CREEP"
-SUB_HOLD = "HOLD"
-SUB_REACQUIRE = "REACQUIRE"
+from gate.vision.gate_detector import board_camera
+from gate.vision.gate_frontend import MODE_FULL, MODE_P3P, MODE_WIDTH, MODE_COARSE
+from gate.vision.geometry import object_points, GATE_FRAME_W, GATE_FRAME_H
+from gate.vision.perception import GatePerception, pick_gate       # 感知半场（含质量分）
+from gate.data.quality import caution_from_q                     # 质量分后验 → 谨慎度
+from gate.data.cues import (cue_dof, blend_dof, cue_mode)         # 线索动作 + 主导权混合
+from gate.motion.phases import (PH_SEARCH, PH_ALIGN, PH_APPROACH, PH_THROUGH,  # noqa: F401
+                         SUB_GOLDEN, SUB_HOLD, SUB_CUE, SUB_REACQUIRE)
+from gate.motion.phase_degrade import DegradeTicks                 # 降级路径相位段
+from gate.motion.phase_recover import RecoverTicks                 # 搜索/丢失/穿门/线索
+from common.streak import Streak                            # 共用：双条件确认
+from common.frame_stamp import FrameStamp, FrameValidator, StampCfg  # 共用：唯一帧
 
 _ALIGN_SCALE = 0.5        # 位置误差归一化标尺(m)：±0.5m 满量程 → DOF ±1
 
@@ -47,8 +55,11 @@ def _dof_clip(v):
     return float(max(-1.0, min(1.0, v)))
 
 
-class GateTask(object):
+class GateTask(DegradeTicks, RecoverTicks):
+    """过门相位机。相位段实现见 phase_degrade.py / phase_recover.py（同一份状态）。"""
+
     name = "gate"
+    supports_frame_stamp = True     # process() 接受 (frame_id, captured_at)（v1.3）
 
     def __init__(self, uart, hub, frame_w, frame_h):
         self.uart = uart
@@ -65,6 +76,36 @@ class GateTask(object):
         self.body_center_offset = float(geo.get("body_center_offset", 0.0))
         self.obj3 = object_points(self.frame_w_m, self.frame_h_m)
         self.camera = board_camera()
+
+        # 感知半场：选目标→质量先验→逐点软融合→mode→线索→位姿→质量后验（gate/vision/perception.py）
+        order = S.get("vision.model.task_models.gate.kpt_order", None) or \
+            V.keypoint.get("kpt_order") or [0, 1, 2, 3]
+        self._per = GatePerception.from_settings(S, self.camera, self.obj3,
+                                                 (self.w, self.h),
+                                                 n_kpt=len(order) or 4)
+        self._kpt_mem = self._per.kpt_mem     # 兼容旧引用（诊断/测试）
+        self._kpt_s = None            # 本帧平滑后的角点（供 _on_width 等复用）
+        self._kconf_s = None
+
+        # ===== v1.3 策略升级件（不改底层运动：相位机/速度阶梯/确认计数保持原样）=====
+        # 共用件：帧有效性（唯一帧/帧龄/断点）与双条件确认放在 common/ 下，供全项目复用。
+        self._stamp_cfg = StampCfg.from_settings(S)
+        self._qcfg = self._per.tracker.cfg if self._per.tracker is not None else None
+        self._cuecfg = self._per.cue_cfg
+        self._validator = FrameValidator(self._stamp_cfg)
+        self._st_cue = Streak()        # 线索动作确认（新策略，用共用 Streak）
+        self._auto_id = 0              # 未传 frame_id 时的自增序号
+        self._last_dof = (0.0, 0.0, 0.0, 0.0)
+        self._q = None                 # 本帧质量分（诊断）
+        self._caution = 1.0            # 本帧谨慎度（0=最谨慎，1=正常）
+        self._sp = 1.0                 # 速度缩放 = speed_scale(caution)
+        self._dz = 1.0                 # 死区/对准阈值缩放 = deadzone_scale(caution)
+        self._cue = None               # 本帧线索动作
+        self._cue_reason = ""
+        self._pose_gap = 0             # 位姿连续不可用帧数（线索接管门槛）
+        self._age = 0.0
+        self._frame_kind = "ok"
+        self._countable = True         # 本帧是否可计入确认（过期帧只估计、不计确认）
         # 下水前自检：标定分辨率必须与实际帧一致，否则 PnP 深度整体缩放错
         if (self.camera.width, self.camera.height) != (self.w, self.h):
             print("[GATE] ⚠️ 标定尺寸 %dx%d ≠ 实际帧 %dx%d：PnP 距离会系统性偏差，"
@@ -86,8 +127,14 @@ class GateTask(object):
         self.last_info = {"phase": PH_SEARCH, "substate": "", "mode": "",
                           "action": "stop", "z": 0.0, "dx": 0.0, "dy": 0.0,
                           "sway": 0.0, "heave": 0.0, "surge": 0.0, "yaw": 0.0,
-                          "pass": 0, "kpt": 0, "status": S.STATUS_RUNNING,
-                          "reason": ""}
+                          "pass": 0, "kpt": 0, "kpt_raw": 0, "ratio": 0.0,
+                          # v1.3/v1.4 策略诊断量
+                          "Q": 0.0, "Qmem": 0.0, "gain": 1.0, "caution": 0.0,
+                          "cue": "", "cue_w": 0.0, "cue_mode": "",
+                          "visible": "", "source": "",
+                          "frame_kind": "ok", "age": 0.0, "rms": 0.0,
+                          "agree": "",
+                          "status": S.STATUS_RUNNING, "reason": ""}
         self.reset_state()
 
     # ------------------------------------------------------------ 状态复位
@@ -106,11 +153,31 @@ class GateTask(object):
         self._cross_cnt = 0              # 连续 z≤cross 帧数（穿门确认，防单帧错解）
         self._through_frames = 0
         self._reacquire_start = None
+        self._reacquire_ratio0 = None    # 进入 REACQUIRE 时的框占比（闭环后退基准）
+        self._reacquire_cnt = 0          # 连续 REACQUIRE 次数（超限不再后退）
+        self._reacquire_last_ms = None   # 上次真正后退的时刻（时间窗重置计数）
+        self._give_up_until_ms = None    # 放弃后退后的 HOLD 窗口截止
+        self._dbg_ratio = 0.0            # 本帧门框宽/屏宽（诊断+叠加）
+        self._dbg_kpt = 0                # 本帧有效角点数（**记忆后**，用于判 mode）
+        self._dbg_kpt_raw = 0            # 本帧原始有效角点数（诊断：看倒影污染程度）
         self._search_entry_ms = None
         self._pass_cnt = 0
         self._finished = False
         self._reason = ""
         self.last_dets = []               # 本帧门检测（供 main._draw 画角点）
+        # v1.3：帧有效性 / 线索确认 / 诊断量
+        self._validator.reset()
+        self._st_cue.reset()
+        self._per.reset()
+        self._pose_gap = 0
+        self._q = None
+        self._caution = 1.0
+        self._sp = self._dz = 1.0
+        self._cue = None
+        self._cue_reason = ""
+        self._age = 0.0
+        self._frame_kind = "ok"
+        self._countable = True
 
     @property
     def ready(self):
@@ -124,7 +191,7 @@ class GateTask(object):
 
     def _set_info(self, action, mode="", substate="",
                   z=None, dx=0.0, dy=0.0, sway=0.0, heave=0.0,
-                  surge=0.0, yaw=0.0, kpt=0):
+                  surge=0.0, yaw=0.0, kpt=0, ratio=None, kpt_raw=None):
         self.last_info.update({
             "phase": self.phase, "substate": substate or self.substate,
             "mode": mode or self.mode, "action": action,
@@ -132,9 +199,32 @@ class GateTask(object):
             "dx": round(float(dx), 3), "dy": round(float(dy), 3),
             "sway": round(float(sway), 3), "heave": round(float(heave), 3),
             "surge": round(float(surge), 3), "yaw": round(float(yaw), 3),
-            "pass": self._pass_cnt, "kpt": int(kpt)})
-        self.uart.send_dof(_dof_clip(surge), _dof_clip(sway),
-                           _dof_clip(heave), _dof_clip(yaw))
+            "pass": self._pass_cnt, "kpt": int(kpt),
+            "kpt_raw": int(self._dbg_kpt_raw if kpt_raw is None else kpt_raw),
+            "ratio": round(float(self._dbg_ratio if ratio is None else ratio), 3)})
+        self._last_dof = (_dof_clip(surge), _dof_clip(sway),
+                          _dof_clip(heave), _dof_clip(yaw))
+        self.uart.send_dof(*self._last_dof)
+
+    def _set_quality_info(self, sight):
+        """本帧质量/线索诊断量（只写 last_info，不改变下发 DOF）。
+
+        Q/Qmem/gain 分别是：后验质量分、喂下一帧先验的历史证据、kpt_memory 实际
+        用到的帧级增益（gain<1 ⇔ 质量分真的压了这一帧的融合增益）。
+        """
+        q = sight.quality
+        mem = self._per.kpt_mem
+        self.last_info.update({
+            "Q": round(float(q.total), 3) if q is not None else 0.0,
+            "Qmem": round(float(self._per.tracker.q_mem), 3)
+            if self._per.tracker is not None else 0.0,
+            "gain": round(float(mem.gain), 3) if mem is not None else 1.0,
+            "caution": round(float(sight.caution), 3),
+            "cue": sight.cue or "",
+            "cue_mode": cue_mode(self._cuecfg),
+            "visible": "".join("1" if v else "0" for v in sight.mask),
+            "rms": round(float(sight.rms), 2) if sight.rms is not None else 0.0,
+            "agree": "" if sight.agree is None else bool(sight.agree)})
 
     def _start_through(self):
         self.phase = PH_THROUGH
@@ -154,18 +244,14 @@ class GateTask(object):
         self._cross_cnt = 0
         self._lost_cnt = 0
         self._hold_cnt = 0
-
-    def _search_yaw_pulse(self, now_ms):
-        """SEARCH：原地旋转脉冲（转 spin_s → 停 pause_s）。"""
-        spin = self._G.search.spin_s * 1000
-        pause = self._G.search.pause_s * 1000
-        if self._search_entry_ms is None:
-            self._search_entry_ms = now_ms
-        ph = (now_ms - self._search_entry_ms) % (spin + pause)
-        return self._G.search.yaw if ph <= spin else 0.0
+        if self._kpt_mem is not None:
+            self._kpt_mem.reset()
 
     # ------------------------------------------------------------ 主入口
-    def process(self, frame, now_ms):
+    def process(self, frame, now_ms, frame_id=None, captured_at=None):
+        """单帧推进。frame_id/captured_at 可选（v1.3）：
+        * 不传：按"每次调用=一帧"（旧调用方式完全兼容，行为不变）；
+        * 传了：启用唯一帧/帧龄/断点守卫（重复帧不计数、过期帧只估计不计确认）。"""
         self.frames += 1
         if self._start_ms is None:
             self._start_ms = now_ms
@@ -180,22 +266,47 @@ class GateTask(object):
                                    "reason": self._reason})
             return S.STATUS_DONE
 
+        stamp = self._make_stamp(now_ms, frame_id, captured_at)
+        verdict = self._validator.validate(stamp, float(now_ms) / 1000.0)
+        self._age, self._frame_kind = verdict.age, verdict.kind
+        self._countable = bool(verdict.countable)   # 过期帧 usable=True 但 countable=False
+        self.last_info.update({"age": round(verdict.age, 3),
+                               "frame_kind": verdict.kind})
+        if not verdict.usable:
+            # 重复/乱序/非法帧：不估计、不计数；沿用上一帧指令保持连续
+            self.uart.send_dof(*self._last_dof)
+            self.last_info["action"] = "hold_frame(%s)" % verdict.kind
+            return self._tail(now_ms)
+        if verdict.discontinuity:
+            # 采集断点：只重置"正在累计的确认"（不动相位、不动速度/阶梯）
+            self._center_cnt = 0
+            self._cross_cnt = 0
+            self._hold_cnt = 0
+            self._st_cue.reset()
+
         dets = self.hub.detect_list(self.name, frame)
         self.last_dets = dets
-        det = None
-        for d in dets:
-            if d.kind == "gate" and (det is None or d.score > det.score):
-                det = d
-        self._step(det, now_ms)
+        det = pick_gate(dets, self._per.conf_thr)
+        self._step(det, now_ms, verdict)
 
+        return self._tail(now_ms)
+
+    def _tail(self, now_ms):
         if (self._start_ms is not None and
                 now_ms - self._start_ms >= self._G.timeout_ms):
             self._finish("timeout")
-        elif self._finished:
-            pass
         self.last_info["status"] = S.STATUS_DONE if self._finished \
             else S.STATUS_RUNNING
         return self.last_info["status"]
+
+    def _make_stamp(self, now_ms, frame_id, captured_at):
+        """帧标识：不传时按"每次调用一帧"自增（后向兼容）。"""
+        if frame_id is None:
+            self._auto_id += 1
+            frame_id = self._auto_id
+        if captured_at is None:
+            captured_at = float(now_ms) / 1000.0
+        return FrameStamp(int(frame_id), float(captured_at))
 
     def _finish(self, reason):
         self._finished = True
@@ -208,8 +319,8 @@ class GateTask(object):
                                                           self.frames))
 
     # ------------------------------------------------------------ 单帧逻辑
-    def _step(self, det, now_ms):
-        G = self._G
+    def _step(self, det, now_ms, verdict):
+        """相位选路：THROUGH 直行 / 无目标 / 有目标 → 感知半场 → 位姿档或降级档。"""
         if self.phase == PH_THROUGH:
             self._tick_through(now_ms)      # 穿门=直行，不做横向微调
             return
@@ -217,85 +328,76 @@ class GateTask(object):
             self._tick_lost(now_ms)
             return
         self._lost_cnt = 0
+        # 诊断量：本帧框占比 + 原始有效角点数（进叠加与 REACQUIRE 日志）
+        self._dbg_ratio = float(det.w) / float(self.w)
+        # 感知半场（含质量先验→融合、mode、线索、位姿、质量后验）
+        sight = self._per.observe(det, now_ms, age=verdict.age,
+                                  prev_pose=self._last_pose,
+                                  z_guard=self._z_guard, prev_z=self._z_last)
+        self._dbg_kpt_raw = sight.kpt_raw
+        self._dbg_kpt = int((np.asarray(sight.kconf) >= self._per.conf_thr).sum()) \
+            if sight.kconf is not None else 0
+        self._kpt_s, self._kconf_s = sight.kpts, sight.kconf
+        self._q, self._caution = sight.quality, sight.caution
+        self._sp, self._dz = sight.sp, sight.dz
+        self._cue, self._cue_reason = sight.cue, sight.cue_reason
+        self._set_quality_info(sight)
+        self.last_info["source"] = "pose" if sight.pose is not None else "degrade"
 
-        # 前端 → mode
-        V = self._V
-        conf_thr = V.keypoint.get("conf_thr", 0.5)
-        if det.kpts is not None and det.kpts.shape[0] >= 4 and \
-                det.kpt_conf is not None:
-            mode, ids = parse_kpt_mode(det.kpts, det.kpt_conf, conf_thr)
-            n = len(ids)
-        else:
-            mode, ids, n = MODE_COARSE, [], 0
-
-        if mode in (MODE_FULL, MODE_P3P) and n >= 3:
-            obj3s = self.obj3[ids]
-            img2s = np.asarray(det.kpts)[ids]
-            pnp = V.pnp
-            # 有上帧位姿就用于消歧（平面 IPPE 双解在远距/小目标时 RMS 接近，
-            # 纯靠 RMS 会帧间来回跳；上帧距离惩罚把解锁在连续分支上）
-            prev = self._last_pose
-            res = gate_pose(self.camera, obj3s, img2s, prev=prev,
-                            reproj_thr=pnp.get("reproj_px", 8.0),
-                            z_bounds=(pnp.get("z_min", 0.2),
-                                      pnp.get("z_max", 15.0)),
-                            refine=pnp.get("refine", True))
-            if res is not None:
-                # z 跳变保护：上一帧也有可信位姿时，z 突变视为错解弃帧
-                # （错解若给出 z ≤ z.cross 会直接触发 THROUGH → 满速冲出去）
-                max_jump = float(pnp.get("max_z_jump_m", 0.8))
-                if self._z_guard and self._z_last is not None and max_jump > 0:
-                    z_new = float(res[1].ravel()[2])
-                    if abs(z_new - self._z_last) > max_jump:
-                        if S.DEBUG:
-                            print("[GATE] 弃帧: z 跳变 %.2f→%.2f m (>%.2f)"
-                                  % (self._z_last, z_new, max_jump))
-                        res = None
-            if res is not None:
-                self._z_guard = True
-                self._on_pose(det, res, now_ms, mode=mode, kpt=n)
-                return
-            mode = MODE_COARSE          # 位姿校验失败/跳变 → 退化 coarse
+        if sight.pose is not None:
+            self._z_guard = True
+            self._z_last = sight.z
+            self._on_pose(det, sight, now_ms)
+            return
         # 本帧没有可用位姿：解除跳变判据，下个位姿重新建立基准（防“卡死”）；
         # 同时清零穿门确认计数 → 只有“连续帧”都判就近才算过门
         self._z_guard = False
         self._cross_cnt = 0
-        if mode == MODE_WIDTH:
-            self._on_width(det, now_ms, ids)
+        self._pose_gap += 1
+        if self._maybe_cue(sight, now_ms):      # 位姿长期不可用 → 线索接管
             return
-        self._on_coarse(det, now_ms)    # coarse / 其它退化
-        _ = G
+        if sight.mode == MODE_WIDTH:
+            self._on_width(det, now_ms, sight.ids)
+            return
+        self._on_coarse(det, now_ms)            # coarse / 其它退化
 
-    # ---------------- full/p3p 位姿可用 ----------------
-    def _on_pose(self, det, pose, now_ms, mode, kpt):
+    # ---------------- full/p3p 位姿可用：对准 / 进近 ----------------
+    def _on_pose(self, det, sight, now_ms):
         G = self._G
-        rvec, tvec = pose
-        self._last_pose = pose
+        mode, kpt = sight.mode, sight.n
+        tvec = sight.pose[1]
+        self._last_pose = sight.pose
+        self._reacquire_cnt = 0          # 拿到可信位姿 → 后退重取计数清零
+        self._pose_gap = 0               # v1.3：位姿恢复 → 线索接管门槛清零
         self.mode = mode
-        z = float(tvec.ravel()[2])
-        self._z_last = z
-        t = tvec.ravel()
-        dx_m, dy_m = float(t[0]), float(t[1])
-        # 横向微调（位姿档 PID，统一量纲：t_x/0.5 → ±1）
+        z = float(sight.z)
+        dx_m, dy_m = float(tvec.ravel()[0]), float(tvec.ravel()[1])
+        # 横向微调（位姿档 PID，统一量纲：t_x/0.5 → ±1）；速度受质量分【谨慎度】缩放
         sway = -_dof_clip(self._pid_sway_pose.update(
-            max(-1, min(1, dx_m / _ALIGN_SCALE)), now_ms))
+            max(-1, min(1, dx_m / _ALIGN_SCALE)), now_ms) * self._sp)
         heave = -_dof_clip(self._pid_heave_pose.update(
-            max(-1, min(1, dy_m / _ALIGN_SCALE)), now_ms))
-        aligned = abs(dx_m) <= G.align.xy_m and abs(dy_m) <= G.align.xy_m
+            max(-1, min(1, dy_m / _ALIGN_SCALE)), now_ms) * self._sp)
+        aligned = abs(dx_m) <= G.align.xy_m * self._dz and \
+            abs(dy_m) <= G.align.xy_m * self._dz
         if z <= G.z.cross:
             # 穿门确认：单帧就近不冲（平面 PnP 偶发错解若给出 z≤cross，
             # 直接 THROUGH 会让船满速冲出去），连续 n 帧才判过门
-            self._cross_cnt += 1
+            if self._countable:
+                self._cross_cnt += 1
             need = int(G.z.get("cross_confirm_frames", 2))
             if self._cross_cnt >= max(1, need):
-                # 冲刺：只前进，不带横向微调（微调已在上一帧做完）
+                # 冲刺：只前进，不带横向微调（微调已在上一帧做完）；
+                # 线索**不掺和**穿门帧（已判定过门，直行穿越）
+                self.last_info["cue_w"] = 0.0
                 self._start_through()
-                self._set_info("through", mode=mode, z=z, surge=G.surge.through,
+                self._set_info("through", mode=mode, z=z,
+                               surge=G.surge.through * self._sp,
                                dx=dx_m, dy=dy_m, kpt=kpt)
             else:
-                # 冲刺前最后一帧：不前进，只做横向微调对准
+                # 冲刺前最后一帧：不前进，只做横向微调对准（可掺线索）
                 self._set_info("center", mode=mode, z=z, dx=dx_m, dy=dy_m,
-                               sway=sway, heave=heave, kpt=kpt)
+                               kpt=kpt,
+                               **self._pose_dof(sight, now_ms, 0.0, sway, heave))
             return
         self._cross_cnt = 0
 
@@ -306,190 +408,44 @@ class GateTask(object):
         if self.phase == PH_ALIGN:
             self.substate = SUB_GOLDEN
             if aligned:
-                self._center_cnt += 1
+                if self._countable:
+                    self._center_cnt += 1
                 if self._center_cnt >= G.align.confirm_frames:
                     self.phase = PH_APPROACH
                     self.substate = ""
             else:
                 self._center_cnt = 0
             self._set_info("center", mode=mode, z=z, dx=dx_m, dy=dy_m,
-                           sway=sway, heave=heave, kpt=kpt)
+                           kpt=kpt,
+                           **self._pose_dof(sight, now_ms, 0.0, sway, heave))
         elif self.phase == PH_APPROACH:
             # 进近两档（远→快 / 近→慢）；分档点 = z.slow_max
             # 注：z.fast_max 暂未分档（如需三档在此加中间档）
             if z > G.z.slow_max:
-                surge = G.surge.fast
+                surge = G.surge.fast * self._sp
             else:
-                surge = G.surge.slow
+                surge = G.surge.slow * self._sp
             self._set_info("forward_%s" % ("fast" if surge > G.surge.slow else "slow"),
-                           mode=mode, z=z, dx=dx_m, dy=dy_m,
-                           sway=sway, heave=heave, surge=surge, kpt=kpt)
+                           mode=mode, z=z, dx=dx_m, dy=dy_m, kpt=kpt,
+                           **self._pose_dof(sight, now_ms, surge, sway, heave))
         else:
             self._set_info("center", mode=mode, z=z, dx=dx_m, dy=dy_m,
-                           kpt=kpt)
+                           kpt=kpt,
+                           **self._pose_dof(sight, now_ms, 0.0, sway, heave))
 
-    # ---------------- width（对向 2 角：测距+中点对中，可慢 creep） ----------------
-    def _on_width(self, det, now_ms, ids):
-        G = self._G
-        self.mode = MODE_WIDTH
-        u1, v1 = det.kpts[ids[0]]
-        u2, v2 = det.kpts[ids[1]]
-        z = width_range_depth(u1, u2, float(self.camera.fx), self.frame_w_m)
-        if z is None:
-            self._on_coarse(det, now_ms)
-            return
-        z = float(np.clip(z, 0.2, 15.0))
-        self._z_last = z
-        aim_x = (u1 + u2) / 2.0
-        cx, cy = bbox_center(det)
-        dxn = (aim_x - self.w / 2.0) / (self.w / 2.0)
-        dyn = (cy - self.h / 2.0) / (self.h / 2.0)
-        sway = -_dof_clip(self._pid_sway_px.update(dxn, now_ms))
-        heave = -_dof_clip(self._pid_heave_px.update(dyn, now_ms))
-        aligned = abs(dxn) <= G.align.xy_m and abs(dyn) <= G.align.xy_m
-        if self.phase == PH_SEARCH:
-            self.phase = PH_ALIGN
-            self._center_cnt = 0
-        if self.phase == PH_ALIGN:
-            # 距门仍远且对中 → 允许慢 creep（有限信息下安全推进）
-            if aligned and z > G.z.cross + 0.4:
-                self.substate = SUB_CREEP
-                self._center_cnt += 1
-                surge = G.surge.creep
-                if self._center_cnt >= G.align.confirm_frames:
-                    self.phase = PH_APPROACH
-                    self.substate = ""
-            else:
-                self.substate = SUB_HOLD
-                surge = 0.0
-            self._set_info("creep" if surge > 0 else "hold", mode=MODE_WIDTH,
-                           z=z, dx=dxn, dy=dyn, sway=sway, heave=heave,
-                           surge=surge)
-            return
-        self._set_info("center", mode=MODE_WIDTH, z=z, dx=dxn, dy=dyn,
-                       sway=sway, heave=heave)
+    # ---------------- 位姿档 DOF 与线索的主导权混合（v1.5） ----------------
+    def _pose_dof(self, sight, now_ms, surge, sway, heave, yaw=0.0):
+        """位姿档 DOF；主导档（`cues.mode` = auto/cue）按权重与线索动作逐通道混合。
 
-    # ---------------- coarse（整门框可信/角不足）：三层仲裁 ----------------
-    def _on_coarse(self, det, now_ms):
-        G = self._G
-        self.mode = MODE_COARSE
-        # 已在 REACQUIRE：持续后退直到 角点/位姿 恢复 或 超时回 search
-        if self.phase == PH_ALIGN and self.substate == SUB_REACQUIRE:
-            self._tick_reacquire(now_ms)
-            return
-        ratio = float(det.w) / float(self.w)
-        cx, cy = bbox_center(det)
-        dxn = (cx - self.w / 2.0) / (self.w / 2.0)
-        dyn = (cy - self.h / 2.0) / (self.h / 2.0)
-        sway = -_dof_clip(self._pid_sway_px.update(dxn, now_ms))
-        heave = -_dof_clip(self._pid_heave_px.update(dyn, now_ms))
-        aligned = abs(dxn) <= G.coarse.get("align_x", 0.05) and \
-            abs(dyn) <= G.coarse.get("align_y", 0.10)
-
-        if self.phase == PH_SEARCH:
-            self.phase = PH_ALIGN
-            self._hold_cnt = 0
-        if self.phase == PH_APPROACH:
-            # 进近中角全失 → 保守降回 ALIGN 仲裁（避免盲冲）
-            self.phase = PH_ALIGN
-            self._hold_cnt = 0
-
-        if self.phase != PH_ALIGN:
-            self._set_info("hold", z=self._z_last, dx=dxn, dy=dyn,
-                           sway=sway, heave=heave)
-            return
-
-        if ratio < G.coarse.far_ratio:               # 远距小框 → creep 换取角点
-            self.substate = SUB_CREEP
-            surge = G.surge.creep if aligned else 0.0
-            self._set_info("creep" if surge > 0 else "center",
-                           z=self._z_last, dx=dxn, dy=dyn,
-                           sway=sway, heave=heave, surge=surge)
-        elif ratio <= G.coarse.near_ratio:           # 中距 → HOLD（无位姿即无进展）
-            self.substate = SUB_HOLD
-            self._hold_cnt += 1
-            if self._hold_cnt >= G.hold.max_frames:
-                self._enter_reacquire(now_ms)
-            else:
-                self._set_info("hold", z=self._z_last, dx=dxn, dy=dyn,
-                               sway=sway, heave=heave)
-        else:                                        # 近距装不下 → 直接后退重取
-            self._enter_reacquire(now_ms)
-
-    def _enter_reacquire(self, now_ms):
-        self.substate = SUB_REACQUIRE
-        self._reacquire_start = now_ms
+        返回 4 通道字典（供 `_set_info(**dof)`），并把本帧线索权重写进诊断 `cue_w`。
+        `pose` 档下 `_cue_lead` 恒返回 (None, 0) → 与升级前逐位一致。
+        """
+        pose = {"surge": surge, "sway": sway, "heave": heave, "yaw": yaw}
+        act, wc = self._cue_lead(sight, now_ms)
+        self.last_info["cue_w"] = round(float(wc), 3)
+        if act is None or wc <= 0.0:
+            return pose
         if S.DEBUG:
-            print("[GATE] REACQUIRE: 角不足/过近, 后退重取")
-
-    def _tick_reacquire(self, now_ms):
-        G = self._G
-        dur = now_ms - (self._reacquire_start or now_ms)
-        if dur >= G.reacquire.max_ms:
-            self._start_search()
-            self._set_info("search")
-            return
-        # 后退方向/量可配（dof sign 需水池实测；负 surge = 后退）
-        surge = -float(G.surge.reacquire)
-        self._set_info("reacquire", substate=SUB_REACQUIRE, surge=surge)
-
-    # ---------------- 丢目标 / 穿门 ----------------
-    def _tick_lost(self, now_ms):
-        G = self._G
-        self._lost_cnt += 1
-        self._z_guard = False             # 丢目标→解除 z 跳变基准
-        self._cross_cnt = 0
-        if self.phase in (PH_ALIGN,) and self.substate == SUB_REACQUIRE:
-            self._tick_reacquire(now_ms)
-            return
-        if self.phase == PH_ALIGN:
-            if self._lost_cnt <= G.pose_hold_frames:
-                # 帧间防抖：沿用上一帧对中保持
-                self._set_info("hold", z=self._z_last)
-            else:
-                self._start_search()
-                self._set_info("search")
-            return
-        if self.phase == PH_APPROACH:
-            near_lost_m = float(G.z.get("near_lost_m", 1.0))
-            if self._z_last is not None and self._z_last <= near_lost_m:
-                # 进近已到近距(z≤near_lost_m)却整门丢失：门已占满视野/机身进入门框，
-                # 这是**真过门**的典型现象 → 直接判过门并直行穿越（不等防抖、不后退）；
-                # 否则只会退回 SEARCH，永远数不到过门（旧版这里靠 PnP 错解偶然给出
-                # z≤cross 才“过门”）
-                if S.DEBUG:
-                    print("[GATE] 近距丢失(z=%.2f≤%.2f) → 判过门"
-                          % (self._z_last, near_lost_m))
-                self._start_through()
-                self._set_info("through", surge=G.surge.through)
-            elif self._lost_cnt <= G.pose_hold_frames and self._z_last is not None:
-                # 还在远处、只是短暂丢失：**轻微后退**（学撞球：丢目标时不带速度盲冲，
-                # 退一点换取重新锁定/更大视野），退满防抖窗口仍无目标 → 转 SEARCH
-                self._set_info("backward_slow", z=self._z_last,
-                               surge=-float(G.surge.lost_backward))
-            else:
-                self._start_search()
-                self._set_info("search")
-            return
-        # SEARCH
-        yaw = self._search_yaw_pulse(now_ms)
-        self._set_info("search", yaw=yaw)
-
-    def _tick_through(self, now_ms):
-        """穿门：**只前进、不微调**（横向修正全部留在冲刺前完成）。"""
-        G = self._G
-        self._through_frames += 1
-        if self._lost_cnt is not None:
-            self._lost_cnt += 1
-        # 已过 Z_pass：直行穿越；目标消失 ≥confirm → 判机身过门
-        if self._lost_cnt >= G.through.confirm_frames:
-            self._pass_cnt += 1
-            if S.DEBUG:
-                print("[GATE] 通过第 %d/%d 门" % (self._pass_cnt, G.pass_target))
-            if self._pass_cnt >= G.pass_target:
-                self._finish("pass")
-            else:
-                self._start_search()
-                self._set_info("search")
-            return
-        self._set_info("through", surge=G.surge.through)
+            print("[GATE] 线索主导 wc=%.2f %s（位姿 Q=%.2f）"
+                  % (wc, act, sight.quality.total if sight.quality else -1.0))
+        return blend_dof(pose, cue_dof(act, self._cue_speed()), wc)

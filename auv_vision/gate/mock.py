@@ -13,14 +13,14 @@ from __future__ import annotations
 import numpy as np
 
 from common.detector import Det
-from gate.geometry import object_points
+from gate.vision.geometry import object_points
 
 
 class MockGateBackend(object):
     """每 detect() 前进一帧；pose_fn(f) -> (rvec, tvec) 或 None(=目标消失)。"""
 
     def __init__(self, camera, frame_w=None, frame_h=None,
-                 z0=5.5, step=0.06, cross_z=0.7,
+                 z0=5.5, step=0.02, cross_z=0.7,   # 0.02m/帧@33ms ≈ 0.6m/s（贴近真船）
                  lat_bias=0.18, align_frames=50,
                  score=0.92, conf_ok=0.92,
                  pose_fn=None,

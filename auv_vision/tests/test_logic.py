@@ -5,7 +5,7 @@ test_logic.py — 无硬件全流程逻辑测试（任务一撞球；记忆返�
 运行：cd auv_vision && python3 tests/test_logic.py
 
 覆盖：
-  1. ball：搜索 → 远/中/近 分级调速 → 越球判定 hit → DONE
+  1. ball：搜索 → 居中(yaw+heave) → 接近(分级+仅sway) → 面积达标冲刺 → 停稳 DONE
   2. 主状态机：IDLE → BALL → DONE（顺序迁移）
   3. 任务超时兜底；E-STOP 状态锁
   （返回出发区 = 记忆返回：tests/test_return_by_memory.py；gate：tests/test_gate_*.py）
@@ -96,11 +96,14 @@ def test_ball_full_stages():
     if info["reason"] != "hit":
         print("ball info:", info)
     check("ball_reason_hit", info["reason"] == "hit")
-    check("ball_actions", {"forward_fast", "forward_slow", "stop"} <= actions,
+    # 融合后的运动链：居中 → 接近(分级) → 冲刺 → 停稳
+    check("ball_actions", {"center", "dash", "stop"} <= actions, actions)
+    check("ball_approach_graded",
+          bool(actions & {"approach_fast", "approach_slow"}), actions)
+    check("ball_entry_state", bool(actions & {"search", "search_advance", "hold"}),
           actions)
-    check("ball_entry_state", bool(actions & {"look", "search"}), actions)
-    # 命中由“最后一次冲刺”确认：DONE 时球已被撞飞，故看过程峰值而非终值
-    check("ball_peak_ratio", peak > 0.5, "peak=%.3f" % peak)
+    check("ball_peak_ratio", peak > S.comm.ball.dash_ratio,
+          "peak=%.3f" % peak)
 
 
 # ---- 2) 状态机：单任务顺序 -------------------------------------------------

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""gate/gate_detector.py — 板端相机模型 + gate 后端装配（组合根用，非纯函数）
+"""gate/vision/gate_detector.py — 板端相机模型 + gate 后端装配（组合根用，非纯函数）
 
 - board_camera()：按 settings 构造与"检测坐标域"一致的 CameraModel（§4.2）
 - build_gate_backend()：按 model.mode 选择 Mock 或真实 keypoint 后端；
@@ -10,7 +10,22 @@ from __future__ import annotations
 import os
 
 import base.settings as S
-from gate.geometry import CameraModel
+from gate.vision.geometry import CameraModel
+
+
+def _project_root():
+    """项目根 = 往上找到含 `cfg/` 的那一层。
+
+    **别写死 `dirname(dirname(__file__))`**：本文件从 `gate/` 挪到 `gate/vision/`
+    后深度变了，写死会让标定回退路径指到 `gate/cfg/…`，于是静默退化成"近似针孔"，
+    位姿/像素域整体偏移（单测会立刻发现版位不一致）。
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(5):
+        if os.path.isdir(os.path.join(here, "cfg")):
+            return here
+        here = os.path.dirname(here)
+    return os.path.dirname(os.path.dirname(os.path.abspath(S.__file__)))
 
 
 def board_camera():
@@ -20,7 +35,7 @@ def board_camera():
     rectified = bool(S.vision.image.undistort)
     candidates = [path]
     if path:
-        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        here = _project_root()
         candidates.append(os.path.join(here, "cfg", os.path.basename(path)))
     for p in candidates:
         if p and os.path.exists(p):
@@ -52,7 +67,7 @@ def build_gate_backend():
         print("[GATE] 权重缺失 %s → gate 跳过（就绪后配置 vision.yaml 再启用）"
               % (path or "<空>"))
         return None
-    from gate.gate_decode import GateKeypointBackend
+    from gate.vision.gate_decode import GateKeypointBackend
     return GateKeypointBackend(
         path=path,
         labels=list(task_cfg.get("labels", ["gate"])),

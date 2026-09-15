@@ -3,7 +3,7 @@
 RoboCup AUV 赛事视觉代码。平台：**RDK X5（3.5.0）**，前视 USB + 下视 IMX415(MIPI)（下视保留，用于录素材/未来任务）。
 识别：YOLO 蓝/红球 + gate（**keypoint 四角 + PnP** 新前端）；串口 11B 帧向 STM32 下发 DOF。
 
-> 先读：`README.md`（用法）→ `doc/算法说明.md`（总体）→ `doc/算法说明-gate-PnP移植方案.md`（gate 设计与移植）。
+> 先读：`README.md`（用法）→ `doc/算法说明.md`（总体）→ `doc/算法说明-gate-PnP移植方案.md`（gate 设计与移植）→ `doc/算法说明-gate-角点逐点融合滤波.md`（角点逐点数据处理）。
 
 ## 目录分区（英文分区命名）
 
@@ -16,13 +16,21 @@ auv_vision/
 ├── manual/              # 手动模式三件套：udp_server.py(遥控桥) · recorder.py(录像) · stream.py(推流/接收库)
 ├── base/                # 基础部件：settings.py(配置) · camera.py(前视/下视/mipi) · uart.py
 ├── common/              # 通用功能：PID.py · preprocess.py(图像链路) · detector.py(检测)
+│                        #   streak.py(时间+帧数双条件确认) · frame_stamp.py(唯一帧/帧龄/断点)
 ├── task1_2/             # 任务一（撞球）+ 记忆返回工具：
 │   ├── ball.py          #   任务一 撞球 BallTask
 │   ├── return_by_memory.py  #   记忆返回（撞球后，不依赖视觉）
 │   └── run_*.sh         #   编排：待机→下潜→前进→撞球(记轨迹)→记忆返回→回退
-├── gate/                # 任务三 过门（keypoint+PnP；geometry/frontend/decode/task/…）
+├── gate/                # 任务三 过门（keypoint+PnP；细则/参数/待测项见 gate/README.md）
+│   ├── gate_task.py     #   相位机骨架（唯一入口）·  mock.py 仿真后端 ·  README.md
+│   ├── vision/          #   视觉处理：gate_decode · gate_detector · gate_frontend
+│   │                    #             geometry(PnP) · perception(感知半场⇒Sighting)
+│   ├── data/            #   数据处理：kpt_memory(逐点融合) · quality(Q 两条去向) · cues
+│   └── motion/          #   运动决策：phases(常量) · phase_degrade · phase_recover
 ├── cfg/                 # vision.yaml · comm.yaml（参数唯一来源）
-├── doc/                 # 算法说明.md · 算法说明-gate-PnP移植方案.md
+├── doc/                 # 算法说明.md · 算法说明-gate-PnP移植方案.md（移植总体方案）
+│                        # 算法说明-gate-v1.4-分层与质量分.md（本次更新：分层 + Q 两条去向）
+│                        # 算法说明-gate-角点逐点融合滤波.md（kpt_memory 的数据处理）
 ├── models/ · tests/     # 权重(.bin) · 无硬件测试
 ```
 
@@ -37,6 +45,10 @@ python3 tests/test_pid.py / test_logic.py / test_detector.py / test_preprocess.p
 python3 tests/test_gate_geometry.py     # gate PnP 合成往返
 python3 tests/test_gate_flow.py         # gate 相位机（进近→穿门/REACQUIRE，mock）
 python3 tests/test_gate_standalone.py   # gate 单任务接线（用门权重/不加载 ball/拒绝空跑）
+python3 tests/test_gate_enhance.py      # v1.3 策略件：帧守卫/双条件/质量分/线索/端到端
+python3 tests/test_gate_layers.py       # v1.4 分层（vision/data/motion）+ 质量分两条去向
+python3 tests/test_gate_cue_lead.py     # v1.5 主导权三档位（auto 自动分配 / pose / cue）
+python3 check_pipeline_identity.py      # 域自证：预处理/坐标域/标定一致
 python3 main.py --task ball             # 只跑撞球（SIM/mock）
 python3 main.py --task gate             # 试跑过门（cfg model.mode: mock）
 ```
@@ -64,9 +76,13 @@ python3 preview_detect.py --gate-kpt         # 下水前：门框 + 4 角点 + �
 
 ## 任务算法速览
 
-- **任务一 撞球**（task1_2/ball.py）：面积占比分级调速 + 视觉居中 PID + 智能搜索；
+- **任务一 撞球**（task1_2/ball.py）：**SEARCH→CENTER→APPROACH→DASH→STOP** 运动链
+  （运动逻辑融合自独立实验 `task1_2/ball_hit_standalone`：居中=仅 yaw+heave；接近=分级前进+仅 sway；
+  面积(EMA)≥`dash_ratio` → 以分级最高速 `surge_fast` 冲刺 `dash_dur_s`；不检测是否撞到；
+  冲刺后 STOP 全 0 保持 `stop_hold_s` → DONE(hit)，总时限 20s）；
 - **记忆返回**（task1_2/return_by_memory.py）：轨迹反向回放（`--extra-sec` 保险余量）；
-- **任务三 过门**（gate/gate_task.py）：keypoint 四角 → IPPE 6-DoF，深度 `Z=tvec.z`；
+- **任务三 过门**（`gate/gate_task.py` 骨架；视觉/数据/运动三层见 `gate/README.md`）：
+  keypoint 四角 → IPPE 6-DoF，深度 `Z=tvec.z`；
   RANGE_ALIGN 子状态 GOLDEN/CREEP/HOLD/REACQUIRE → APPROACH → THROUGH（机身过门判据）。
   门 = 闭合矩形框(红 PVC，0.70×0.50 m，悬空，对称无朝向要求)。
 

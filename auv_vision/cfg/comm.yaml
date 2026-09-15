@@ -53,46 +53,39 @@ tasks:
   idle_ms: 1000
   done_hold_ms: 500
 
-ball:                      # 面积占比分级（视觉量 → 运动决策）
-  ema_alpha: 0.3
-  lost_grace_frames: 15
-  r_slow: 0.12
-  r_near: 0.30
-  r_hit: 0.50
-  hit_confirm_frames: 1
-  growth_eps: 0.002
-  surge_fast: 0.35          # 远/需加速时的前进速度
-  surge_slow: 0.15          # 接近目标时的前进速度(减速, 防“边前进边转向”把镜头带过头)
-  align_x: true            # 视觉居中：x → yaw(旋转；撞球不做左右平移)
-  align_y: true            # 视觉居中：y → heave
-  timeout_ms: 300000
-  search_advance_after_s: 60        # 连续搜索无目标 60s → 慢速前进探测一次
-  search_advance_dur_s: 2           # 慢速前进持续 2s
-  search_advance_surge: 0.25        # 慢速前进速度（归一化 DOF）
-  search_total_stop_s: 180          # 总计 180s 仍未搜到 → 完全停止
-  search_spin_s: 0.5                # 搜索旋转时长(秒)：转0.5s
-  search_pause_s: 1.5               # 旋转后停顿(秒)：停1.5s
-  center_eps: 0.25                  # 球心居中判定阈值(放宽: 不必很精确, 更易进入前进)
-  center_confirm_frames: 3          # 连续居中帧数达标后才允许前进
-  entry_look_s: 0.8                 # 入场“看一眼”秒数：先原地保持只识别，有球→center，无球→再搜索
-  engage_hold_s: 2.0                # 看到球后“切入保持”秒数：期间不打搜索脉冲，原地保持等重新锁定
-  edge_dx: 0.5                      # 已不使用（居中改为纯 yaw；保留占位）
-  edge_yaw_kp: 0.3                  # 居中转向 P 增益(限幅收窄后同步加大, ~dx0.2 即到限幅)
-  edge_yaw_kd: 0.0                  # 居中转向 D 增益(阻尼: 防转过头)
-  edge_yaw_max: 0.15                 # 居中转向限幅(0.1~0.25 区间)
-  backward_surge: -0.35             # 近距丢失→低速后退(与 forward_slow 同速,负=后退)
-  dash_surge: 0.5                   # 命中确认后“最后一次冲刺”前进速度
-  dash_dur_s: 0.6                   # 最后一次冲刺时长(秒)
-  pid: {kp: 1.0, ki: 0.0, kd: 0.15, out_max: 0.7, deadzone: 0.04}   # 垂直(heave); ki=0, 动力略增
-
-ball_forward:              # 撞球简化版(无命中识别)：搜索→居中→恒速前进, 累计前进 total_s 即停
-  forward_surge: 0.5       # 恒定前进速度(保持不变; 归一化 DOF)
-  forward_total_s: 10      # 累计“前进时间”达到该秒数 → 任务停止
-  lost_grace_frames: 15    # 短时丢失: 保持前进的帧数
-  center_eps: 0.10         # 居中阈值(与 ball 一致)
-  center_confirm_frames: 3 # 连续居中帧数达标才允许前进
-  total_stop_s: 120        # 总时限：不管有没有撞到，至多跑这么久就停(防一直搜索像“卡死”)
-  timeout_ms: 300000       # 总超时兜底
+ball:                      # 任务一 撞球：运动链 SEARCH→CENTER→APPROACH→DASH→STOP
+  # ---- 视觉量 → 运动决策 ----
+  ema_alpha: 0.3            # 面积占比 EMA 平滑(判据与日志都用它, 抗单帧抖动)
+  lost_grace_frames: 15     # 丢目标后的"短时保持/惯性"帧数
+  r_slow: 0.12              # 面积分级: >=该值且增长缓慢 → 用 slow; 其余用 fast
+  growth_eps: 0.002         # 面积增长阈值: 增长快 → 用 fast(说明在快速接近)
+  surge_fast: 0.35          # 分级最高速(同时就是冲刺速度)
+  surge_slow: 0.15          # 分级慢速(接近段减速)
+  align_x: true             # 居中: x → yaw(旋转; 撞球不做左右平移)
+  align_y: true             # 居中: y → heave
+  timeout_ms: 20000         # 总时限 20s(DASH/STOP 期间不打断, 保证命中与停稳)
+  # ---- SEARCH: 脉冲旋转 + 周期性前进探测（沿用原方案）----
+  search_spin_s: 0.5        # 旋转时长(转0.5s)
+  search_pause_s: 1.5       # 旋转后停顿(停1.5s, 间隙检测更稳)
+  search_advance_after_s: 4 # 连续无目标这么久 → 慢速前进探测一次
+  search_advance_dur_s: 0.5 # 前进探测时长(阶段窗口, 不按总时限等比缩)
+  search_advance_surge: 0.25 # 前进探测速度
+  # ---- CENTER: yaw + heave, 不前进不横移 ----
+  center_eps: 0.25          # 水平+竖直居中判据(归一化偏差)
+  center_confirm_frames: 3  # 连续居中帧数达标 → APPROACH
+  edge_yaw_kp: 0.3          # 居中转向 P 增益
+  edge_yaw_kd: 0.0          # 居中转向 D 增益(阻尼: 防转过头)
+  edge_yaw_max: 0.15        # 居中转向限幅(0.1~0.25)
+  pid: {kp: 1.0, ki: 0.0, kd: 0.15, out_max: 0.7, deadzone: 0.04}   # 居中 heave(垂直)
+  # ---- APPROACH: 仅 sway 修水平(yaw=0/heave=0), 参数移植自独立实验 ----
+  approach_pid: {kp: 12.0, ki: 0.01, kd: 0.05, out_max: 0.45, deadzone: 0.05}
+  lost_inertia_surge: 0.25  # 接近中短时丢失的惯性前进速度(不在居中段生效)
+  # ---- DASH/STOP: 面积达标 → 冲刺 → 稳定停 ----
+  dash_ratio: 0.25          # 面积(EMA)达标阈值
+  dash_confirm_frames: 2    # 连续达标帧数(防单帧误检直接结束任务)
+  dash_dur_s: 2.0           # 冲刺时长(不检测是否撞到)
+  stop_hold_s: 1.0          # 命中后全 0 保持时长(稳定停住)
+  engage_hold_s: 0.8        # 丢目标后原地 hold 窗口, 过完回 SEARCH
 
 handover:                  # 返回出发区策略B：视觉居中 → 交下位机接管握手 → 收权 → 后退
   header: 170              # 0xAA 交接帧头：以该帧头发帧表示“暂时交给下位机接管”
@@ -130,17 +123,84 @@ gate:                      # 过门（§5.3 相位机：SEARCH→RANGE_ALIGN→A
   z: {align_max: 4.0, fast_max: 3.0, slow_max: 1.3, cross: 0.7,
       cross_confirm_frames: 2,   # 连续 z≤cross 帧数才判过门(防单帧 PnP 错解冲出去)
       near_lost_m: 1.0}          # 进近中已到该近距后整门丢失 → 判过门(门占满视野)
-  surge: {fast: 0.35, slow: 0.15, creep: 0.12, lost_backward: 0.12, reacquire: 0.5, through: 0.5}
+  surge: {fast: 0.35, slow: 0.15, creep: 0.12, lost_backward: 0.12, reacquire: 0.25, through: 0.5}
          # fast/slow = 进近两档(远 z>slow_max 用 fast / 近用 slow)；
          # creep=coarse/width 慢蠕进；lost_backward=远处短暂丢失的轻微后退(代码取负)；
          # reacquire=后退重取；through=穿门冲刺
   coarse: {far_ratio: 0.18, near_ratio: 0.55, align_x: 0.05, align_y: 0.10}
          # far/near_ratio=门框宽/屏宽 远近判定；align_x/y=整框对中阈值(归一化)
-  hold: {max_frames: 20}      # HOLD 无进展帧数 → REACQUIRE
-  reacquire: {max_ms: 2000}   # 后退重取上限
+  hold: {max_frames: 20}      # HOLD 无进展帧数 → REACQUIRE(触发门槛保持原值)
+  reacquire: {max_ms: 800,        # 单次后退上限(原 2000 → "明显后退"的主因)
+              max_times: 2,       # 连续这么多次仍拿不到角点 → 放弃后退, 改原地 HOLD
+              stop_ratio: 0.75,   # 闭环后退: 框占比退到进入时的 75% 就停
+              reset_after_ms: 3000}
+              # reset_after_ms: 距上次后退超过这么久 → 重新允许 max_times 次后退
   through: {confirm_frames: 8} # 过 Z_pass 后目标消失确认帧数 → 判过门
   search: {spin_s: 2.0, pause_s: 1.0, yaw: 0.35}
   pose_hold_frames: 10        # 帧间防抖：丢姿态时的保持帧数
+
+  # ---- 质量分 Q（v1.4）：一帧证据质量，去**两个**地方，都不参与过门判定 ----
+  #   ① 先验(prior)    ：原始角点 conf × 帧新鲜度 → 逐点权重 w_prior，
+  #                      连同 q_mem(历史位姿证据) 的帧级增益进 kpt_memory 融合权重
+  #   ② 后验(posterior)：重投影 RMS + 位姿投影框 IoU（含线索↔位姿互检）
+  #                      → 运动谨慎度 c → 速度缩放 / 死区缩放
+  #   confirm_max_scale=1.0 表示**不改确认时长**，只改"给多少权重 / 开多快"
+  quality:
+    w_kpt: 1.0               # 分量权重：角点可见数+平均置信度
+    w_pnp: 1.0               #           重投影 RMS
+    w_box: 0.8               #           位姿投影框 vs 检测框 IoU（两链互检那条）
+    w_time: 0.5              #           帧新鲜度
+    rms_ref_px: 5.0          # RMS 参考尺度（该值处 q_pnp≈0.5）
+    q_no_pose: 0.25          # 无位姿时的 q_pnp
+    box_iou_floor: 0.4       # IoU ≤ 它 → q_box=0；≥0.9 → 1
+    q_lo: 0.35               # Q≤q_lo → 谨慎度 0（最谨慎）；Q≥q_hi → 1（正常）
+    q_hi: 0.75
+    speed_min_scale: 0.4     # 最谨慎时速度保留比例（下限，不会停死）
+    confirm_max_scale: 1.0   # 1.0 = 质量分**不影响**确认时长
+    deadzone_max_scale: 1.6  # 最谨慎时对准死区/阈值最多放大到几倍
+    prior_conf_pow: 1.0      # 先验里原始置信度的幂（<1 更宽容）
+    q_time_floor: 0.2        # 帧新鲜度下限（过期帧照常估计，只是权重低）
+    mem_lambda: 0.3          # q_mem(历史位姿证据) EMA 速率 → 喂下一帧先验
+
+  # ---- 恢复线索 + 线索↔位姿互相自检（v1.3；方向符号需水池实测）----
+  cues:
+    enable: true
+    record_only: false       # true=只记录不驱动（下水前先这样核对方向符号）
+    speed: 0.15              # 线索动作统一低速（仍会乘质量分速度缩放）
+    too_close_height_ratio: 0.9
+    boundary_margin_ratio: 0.02
+    turn_right_on_left_column: true     # 仅 TL,BL 可见 → 右转
+    turn_left_on_right_column: true     # 仅 TR,BR 可见 → 左转
+    descend_on_top_edge: true           # 仅 TL,TR 可见 → 下降
+    ascend_on_bottom_edge: true         # 仅 BR,BL 可见 → 上升
+    backward_on_too_close: true         # 框上下贴边 → 后退
+    backward_agree_z_m: 1.5  # 线索判"太近"但位姿 z 仍 > 它 → 冲突（质量分打折）
+    agree_bonus: 0.15        # 线索与位姿一致 → 质量分加成（封顶 1.0）
+    conflict_penalty: 0.5    # 冲突 → 质量分打折（只降权，不驱动）
+    cue_after_frames: 15     # 位姿连续不可用多少帧后线索才接管
+    cue_confirm_s: 0.10      # 线索动作确认：时长（秒）
+    cue_confirm_frames: 3    #               帧数（双条件，common/streak.py）
+
+    # ---- 主导权三档位：线索链 vs 位姿链（v1.5）----
+    #   auto  依据质量自动分配（**默认**）：位姿 Q 高 → 位姿主导；Q 低 → 线索份额上升
+    #   pose  位姿主导：位姿在位时线索一律不驱动，只在位姿不可用时兜底（等于 v1.4 行为）
+    #   cue   线索主导：相位允许且有明确线索动作 → 整帧听线索（不看 Q）
+    #   （旧名仍接受：pose_first→pose，blend→auto，cue_first→cue）
+    # 三档都会：① 位姿不可用时兜底接管（≥ cue_after_frames 帧）
+    #          ② 过动作确认（cue_confirm_*）③ THROUGH 相位永不介入
+    mode: auto
+    allow_approach: false    # 线索是否允许在 APPROACH 生效（想更主导就 true）
+    cue_pose_share: 0.0      # 仅 cue 档：给位姿保留的份额（0=完全接管，≤0.5）
+    speed_lead: 0.30         # 主导档（auto/cue）线索速度（pose 档仍用上面的 speed）
+    speed_uses_caution: false # 仅主导档：线索速度是否再乘谨慎度（默认不乘）
+    lead_q: 0.35             # auto 档：位姿后验 Q 低于它 → 线索权重开始 > 0
+    lead_full_q: 0.20        # auto 档：位姿 Q 低于它 → 线索权重 = 1（完全主导）
+    conflict_w: 1.0          # auto/cue 档：冲突时线索的权重下限（0=冲突仍听位姿）
+    lead_min_w: 0.25         # 权重小于它就不掺和（防两链各出一半力来回抖）
+
+  # ---- 帧守卫（v1.3，共用件 common/frame_stamp.py）----
+  # 唯一帧/单调时间/帧龄/采集断点；过期帧**仍用于估计**但不计入确认（两分法）
+  stamp: {max_age_s: 0.9, max_gap_s: 0.35, adaptive_gap: true, future_tol_s: 0.005}
 
 debug:                     # 通信调试
   tx_frame_hex: true        # 终端打印每次发出的 11B 运动帧（真串口下）
