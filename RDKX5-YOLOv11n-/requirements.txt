@@ -1,0 +1,20 @@
+# RDKX5-YOLOv11n- Python依赖
+# 用于Ubuntu主机上的模型转换和工具脚本
+
+# YOLOv11核心库
+ultralytics>=8.3.0
+
+# 图像处理
+opencv-python>=4.8.0
+Pillow>=10.0.0
+
+# 数组计算
+numpy>=1.24.0
+
+# ONNX相关
+onnx>=1.15.0
+onnxruntime>=1.16.0
+
+# 其他工具
+tqdm>=4.66.0
+PyYAML>=6.0.0

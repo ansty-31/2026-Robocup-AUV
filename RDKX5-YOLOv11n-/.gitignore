@@ -1,0 +1,86 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+env/
+ENV/
+yolo_env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 模型文件（太大，不上传）
+*.pt
+*.pth
+*.onnx
+*.bin
+*.tar.gz
+
+# 数据集（太大，不上传）
+calibration_data/
+calibration_data_detect/
+calibration_data_backup_*/
+coco/
+datasets/
+
+# 量化输出
+output/
+output_*/
+
+# Docker镜像
+docker_images/
+*.tar.gz
+
+# 地平线工具链
+horizon_x5_open_explorer_*/
+D-Robotics_x5_open_explorer_*/
+
+# 日志和缓存
+*.log
+*_log.txt
+logs/
+.cache/
+
+# 临时文件
+tmp/
+temp/
+*.tmp
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# 测试覆盖率
+.coverage
+htmlcov/
+.pytest_cache/
+
+# 训练输出与本地数据集
+runs/
+data/

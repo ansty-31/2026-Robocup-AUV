@@ -1,0 +1,69 @@
+# ============================================
+# YOLOv11n RDK X5 高性能PTQ量化配置
+# 核心：解决Softmax性能瓶颈，实现高FPS
+# ============================================
+model_parameters:
+  # ONNX模型路径（Docker内路径，对应项目根目录的 yolo11n.onnx）
+  onnx_model: '/data/weights/yolo11n.onnx'
+
+  # 目标平台：RDK X5使用bayes-e架构
+  march: 'bayes-e'
+
+  # 输出目录和文件前缀
+  working_dir: '/data/output'
+  output_model_file_prefix: 'yolo11n_detect_bayese_640x640_nv12'
+
+  # ============================================
+  # 【核心配置】解决Softmax性能瓶颈
+  # ============================================
+  # 将C2PSA注意力模块中的Softmax算子指定到BPU运行
+  # 使用int16精度（Softmax不支持int8，但支持int16）
+  node_info: {
+    "/model.10/m/m.0/attn/Softmax": {
+      'ON': 'BPU',
+      'InputType': 'int16',
+      'OutputType': 'int16'
+    }
+  }
+
+# ============================================
+# 输入参数配置
+# ============================================
+input_parameters:
+  # 【关键】运行时输入格式：nv12
+  # RDK X5的BPU原生支持nv12格式，无需CPU转换
+  input_type_rt: 'nv12'
+
+  # 训练时输入格式：rgb（YOLO模型训练使用RGB）
+  input_type_train: 'rgb'
+
+  # 输入数据布局：NCHW（PyTorch/ONNX默认）
+  input_layout_train: 'NCHW'
+
+  # 归一化类型：data_scale，系数1/255
+  norm_type: 'data_scale'
+  scale_value: 0.003921568627451
+
+# ============================================
+# 校准参数配置
+# ============================================
+calibration_parameters:
+  # 校准数据目录（★ detect 专用，与 pose 的 calibration_data/ 分开，
+  #   否则两个任务会互相覆盖对方的校准分布）
+  cal_data_dir: '/data/calibration_data_detect'
+
+  # 校准数据类型：float32（.rgb 原始二进制文件）
+  cal_data_type: 'float32'
+
+  # 【关键】校准方法：default（自动搜索最佳量化策略）
+  calibration_type: 'default'
+
+# ============================================
+# 编译器参数配置
+# ============================================
+compiler_parameters:
+  # 编译模式：latency（最低延迟）
+  compile_mode: 'latency'
+
+  # 优化等级：O3（最高）
+  optimize_level: 'O3'
