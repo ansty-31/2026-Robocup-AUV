@@ -1,0 +1,120 @@
+{
+  "K": [
+    [
+      391.26832821931316,
+      0.0,
+      316.64756694306493
+    ],
+    [
+      0.0,
+      693.1449132246055,
+      343.8668584734207
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "distortion": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "image_size": [
+    640,
+    640
+  ],
+  "preprocessing_id": "undistort_alpha0_resize640_pixel_centers_v1",
+  "metadata": {
+    "original_size_wh": [
+      1280,
+      720
+    ],
+    "output_size_wh": [
+      640,
+      640
+    ],
+    "original_camera_matrix": [
+      [
+        782.5366564386263,
+        0.0,
+        633.79513388613
+      ],
+      [
+        0.0,
+        779.7880273776813,
+        386.91271578259824
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "original_distortion": [
+      -0.49135774794986464,
+      0.3784425130001467,
+      -0.009114782507739115,
+      0.003969766417293812,
+      -0.22618736504492779
+    ],
+    "new_camera_matrix": [
+      [
+        782.5366564386263,
+        0.0,
+        633.7951338861299
+      ],
+      [
+        0.0,
+        779.7880273776813,
+        386.91271578259824
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "undistort_alpha": 0,
+    "center_principal_point": false,
+    "crop_applied": false,
+    "unused_roi_xywh": [
+      0,
+      0,
+      1279,
+      719
+    ],
+    "resize_mode": "stretch",
+    "resize_pixel_convention": "opencv_half_pixel",
+    "pixel_transform": [
+      [
+        0.5,
+        0.0,
+        -0.25
+      ],
+      [
+        0.0,
+        0.8888888888888888,
+        -0.05555555555555558
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "opencv_version": "5.0.0",
+    "calibration_sha256": "0ba4daa8580cbe29cc2eb9a5e232e9486ffb81c917d24b551bfae7f7a4ac76a5",
+    "vision_sha256": "0ea79b4f24ac9b1f5f7165007871453a2203b2b573fb9689a37879e65c45bff8",
+    "calibration_rms_px": 0.705098151409108,
+    "chessboard_inner_corners": [
+      11,
+      8
+    ],
+    "chessboard_square_m": 0.02,
+    "calibration_medium": "underwater_with_actual_housing_user_confirmed"
+  }
+}
