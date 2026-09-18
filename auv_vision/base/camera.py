@@ -210,5 +210,40 @@ def create_camera(which, fallback_sim=None):
     except Exception as e:
         if fallback:
             print("[CAM] %s 相机(%s)不可用：%s；软回退 sim" % (which, typ, e))
+            dev = str(getattr(cfg, "device", "") or "")
+            hold = _camera_holders(dev)
+            if hold:
+                print("[CAM] !! %s 正被占用：%s" % (dev or "相机", hold))
+                print("[CAM]    相机是独占设备：手动模式(manual/udp_server.py + manual.stream)"
+                      " 与预览/任务不能同时开。")
+                print("[CAM]    先停手动模式（在它的终端 Ctrl-C，或 kill 上面这些 PID），"
+                      "再跑预览/任务；测完要用手动模式时重新 bash manual.sh。")
+            elif dev:
+                print("[CAM]    %s 无进程占用 -> 检查线缆/USB 供电，或换 device 索引"
+                      "（cfg/vision.yaml -> camera.front.device）" % dev)
             return SimCamera(which)
         raise
+
+def _camera_holders(dev):
+    """谁占着这个视频设备（相机是独占的，手动推流会抢走它）。
+
+    返回 ["PID(命令)", ...]；`dev` 支持 "0" 与 "/dev/video0" 两种写法；没装 fuser 时返回 []。
+    """
+    if not dev:
+        return []
+    path = dev if str(dev).startswith("/dev/") else "/dev/video%s" % dev
+    try:
+        import subprocess
+        r = subprocess.run(["fuser", path], capture_output=True, text=True, timeout=2)
+        pids = [p for p in r.stdout.split() if p.isdigit()]
+    except Exception:
+        return []
+    out = []
+    for pid in pids:
+        try:
+            with open("/proc/%s/cmdline" % pid, "rb") as fh:
+                cmd = fh.read().replace(b"\x00", b" ").decode(errors="replace").strip()
+        except Exception:
+            cmd = "?"
+        out.append("%s(%s)" % (pid, cmd[:60]))
+    return out

@@ -624,7 +624,7 @@ ffprobe -v error -select_streams v -show_entries packet=size -of csv=p=0 probe.m
 | 板端 | RDK X5，`3.5.0`，内核 6.1.83，`ssh sunrise@192.168.137.10`，工作区 `~/AUV` |
 | 相机 | `0c45:6368 Microdia USB 2.0 Camera`（Bus 001，USB 2.0），`/dev/video0` |
 | 网络 | `eth0 1000Mb/s Full`，PC `192.168.137.2`，RTT 0.16 ms |
-| PC 侧 | 本机 Ubuntu 22.04 + cv2（`stream_view.py`）/ ffplay |
+| PC 侧 | 本机 Ubuntu 22.04 + cv2（现为 `manual/stream.py` 的接收/显示，PC 入口 `pc/pc.sh`）/ ffplay |
 
 相机能力（`v4l2-ctl -d /dev/video0 --list-formats-ext`）：
 
@@ -665,9 +665,10 @@ ffprobe -v error -select_streams v -show_entries packet=size -of csv=p=0 probe.m
    （camera 钩子顺带完成）；参数 `--host/--port/--stream-fps/--out/--seconds/--sim/--no-udp/--no-record`；
    Ctrl-C 先停录像写完文件，再停遥控桥。
 5. **板端工作区整理**：`~/AUV` 已与本机 `auv_vision/auv_vision` 对齐为包结构 —— 扁平旧模块
-   （`camera.py`/`settings.py`/`uart.py`/`tasks.py`/`detector.py`/`preprocess.py`/`return_by_memory.py` 等）
-   已归档到 `~/AUV/bak/flat_legacy_<日期>/`；入口脚本 `udp_server.py`、`run_ball_return*.sh` 保留原位但导入改为包路径
-   （`base.settings`/`base.uart`/`task1_2/return_by_memory.py`）；板端专属的 `base/settings.py`（`SIM_MODE=False`）**未改动**；
+   （`camera.py`/`settings.py`/`uart.py`/`tasks.py`/`detector.py`/`preprocess.py` 等）
+   已归档到 `~/AUV/bak/flat_legacy_<日期>/`；入口脚本 `udp_server.py`、`task1_2/run_ball_reverse.sh`
+   保留原位但导入改为包路径（`base.settings`/`base.uart`/`task1_2/ball.py`）；板端专属的
+   `base/settings.py`（`SIM_MODE=False`）**未改动**；
    整目录备份 `~/auv_workspace_backup_<日期>.tgz`。
 
 ### 17.4 用法（当前板端已可直接用）

@@ -5,16 +5,17 @@
 
 任务分工（按目录分区）：
   - 任务一 撞球          task1_2/ball.py（BallTask）—— 前视相机
-  - 记忆返回（撞球后）   task1_2/return_by_memory.py + run_ball_return.sh 编排
-                         （不依赖视觉：待机/下潜/前进 → 撞球记轨迹 → 反向回放 → 回退）
   - 任务三 过门          gate/（keypoint 四角 + PnP，相位机见 gate/gate_task.py）
 
 用法：
     python3 main.py --task all          # 按 comm.yaml tasks.enabled 顺序执行
-    python3 main.py --task gate         # 本次只执行撞球（ball 同理）
+    python3 main.py --task gate         # 本次只执行过门（ball 同理）
 """
 import argparse
+import json
 import os
+
+import numpy as np
 import sys
 import time
 
@@ -30,7 +31,7 @@ from base.uart import UartController, install_signal_handlers
 from common.detector import DetectorHub
 from task1_2.ball import BallTask
 from gate.gate_task import GateTask
-from gate.vision.gate_detector import build_gate_backend
+from gate.gate_detector import build_gate_backend
 
 TASK_CLASS = {"ball": BallTask, "gate": GateTask}
 TASK_CAM = {"ball": "front", "gate": "front"}
@@ -63,6 +64,10 @@ class AppController(object):
         self._frame_seq = 0          # 采集序号（v1.3：gate 唯一帧/帧龄检查用）
         self._log_t = time.time()
         self._video_on = self._init_video()
+        # 任务逐帧日志（AUV_TASK_LOG=<path>）：把 last_info 每帧存一行 JSON，
+        # 供离线核对 phase/action/Q/caution/cue_w/z... 默认不开，不影响运行
+        self._task_log_path = os.environ.get("AUV_TASK_LOG")
+        self._task_log_fh = None
 
     def check_ready(self, tasks):
         """返回不可用任务名列表（下水前自检：避免设备已入水却空跑）。"""
@@ -101,6 +106,21 @@ class AppController(object):
         except Exception as e:
             print("[MAIN] 画面窗口不可用：%s" % e)
             return False
+
+    def _uart_status(self):
+        """画面监控行：下位机深度遥测 + 限深保护（无遥测显示 n/a）。
+
+        深度来自下位机 14B 遥测帧（base/telemetry.py）；`guard` 用 comm.depth_guard：
+        开启且当前深度 ≤ min_depth_m 时禁止上浮（base/uart.py::_apply_depth_guard）。
+        """
+        d = getattr(self.uart, "depth_m", None)
+        lim = float(S.get("comm.depth_guard.min_depth_m", 0.3) or 0.0)
+        on = bool(S.get("comm.depth_guard.enable", True))
+        return ("depth=%s guard=%s min=%.2fm%s"
+                % ("n/a" if d is None else "%.2fm" % d,
+                   "on" if on else "off", lim,
+                   " [限深保护]" if getattr(self.uart, "guard_active", False)
+                   else ""))
 
     def _draw(self, frame, dets):
         """叠加 识别框/角点/中心线 + 状态信息 后显示。
@@ -151,6 +171,7 @@ class AppController(object):
                            "cue_mode", "visible", "source", "frame_kind",
                            "reason")]
             lines.append(" ".join(parts))
+        lines.append(self._uart_status())
         y = 20
         for ln in lines:
             cv2.putText(img, ln, (10, y), cv2.FONT_HERSHEY_SIMPLEX,
@@ -190,14 +211,9 @@ class AppController(object):
             else:
                 frame = self.cams[TASK_CAM[STATE_TASK[self.state]]].read()
                 if frame is not None:
-                    self._frame_seq += 1
-                    # 帧标识：每次采集一帧 → 序号自增；采集时刻用同一 now_ms（秒域）。
-                    # 仅支持帧标识的任务（gate v1.3）才传，其余任务保持旧调用方式。
-                    if getattr(task, "supports_frame_stamp", False):
-                        task.process(frame, now_ms, self._frame_seq,
-                                     now_ms / 1000.0)
-                    else:
-                        task.process(frame, now_ms)
+                    self._frame_seq += 1          # 采集序号（只用于日志/叠加）
+                    task.process(frame, now_ms)
+                    self._log_task_frame(task, now_ms)
                     if self._video_on:
                         self._draw(frame, getattr(task, "last_dets", None) or [])
                     if task.last_info["status"] == S.STATUS_DONE:
@@ -213,6 +229,26 @@ class AppController(object):
                                                          self.frames))
         return self.state
 
+    def _log_task_frame(self, task, now_ms):
+        """把本帧 last_info（含 phase/action/Q/caution/cue_w/z/...）写一行 JSON。"""
+        if not self._task_log_path:
+            return
+        try:
+            if self._task_log_fh is None:
+                self._task_log_fh = open(self._task_log_path, "w",
+                                         encoding="utf-8", buffering=1)
+                print("[MAIN] 任务日志 -> %s" % self._task_log_path)
+            info = task.last_info
+            rec = {"t": round(now_ms / 1000.0, 3), "frame": self._frame_seq,
+                   "state": self.state, "task": task.name}
+            for k, v in info.items():
+                if isinstance(v, bool) or v is None or isinstance(v, (int, float, str)):
+                    rec[k] = v
+            self._task_log_fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception as e:
+            print("[MAIN] 任务日志写入失败：%s" % e)
+            self._task_log_path = None
+
     def _advance(self, now_ms, reason):
         nxt = self.queue[0] if self.queue else S.STATE_DONE
         print("[MAIN] %s -> %s (%s)" % (self.state, nxt, reason))
@@ -223,6 +259,12 @@ class AppController(object):
         self._state_start = now_ms
 
     def close(self):
+        if getattr(self, "_task_log_fh", None) is not None:
+            try:
+                self._task_log_fh.close()
+            except Exception:
+                pass
+            self._task_log_fh = None
         """收尾：关闭推流 + 相机 + 串口，避免残留占用（相机/串口被占会导致下次像“锁死”）。"""
         try:
             from base.camera import get_stream_pusher

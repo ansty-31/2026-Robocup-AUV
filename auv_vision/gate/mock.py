@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 
 from common.detector import Det
-from gate.vision.geometry import object_points
+from gate.geometry import object_points
 
 
 class MockGateBackend(object):

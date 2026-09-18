@@ -27,9 +27,36 @@ heartbeat:
 estop:
   repeat_ms: 30            # 急停连发中性帧间隔
 ramp:
-  speed_per_s: 220.0       # 轴字节平滑速率（0=关闭）
-  dof_per_s: 1.0           # DOF 级线性斜坡：归一化速度/秒（0=关闭）
+  speed_per_s: 220.0       # 轴字节平滑速率（字节/秒；0=关闭，直接跳到目标）
                            #   模拟人手推杆：速度连续变化到目标，而不是直接激增
+
+depth_guard:               # 限深保护：下位机回传深度(14B 0xAA55 遥测，见 base/telemetry.py)
+  enable: true             #   → 上浮时不允许机身越过水面（heave>0 被压掉，其余通道不动）
+  min_depth_m: 0.55        # 深度下限(m)：当前深度 ≤ 它 → **本帧禁止上浮**(heave 清零)
+                           # ⚠️ **2026-09-18 用户定死 = 0.55，不准改**（有不变量用例守着）。
+                           #    本地曾长期写 0.3，整文件覆盖板端配置时把板端的 0.55 冲掉过两次
+                           #    → 本文件已与板端对齐，**别再整文件覆盖板端 cfg**。
+                           #   只压上浮，不管下潜/前进/转向（别让保护破坏对准）
+                           #   ⚠️ 符号约定：depth 正 = 水面**以下**（下位机 depth_cm/100）；
+                           #     若遥测打出来是负值(-0.22 表示水下 0.22m)，那是符号反了：
+                           #     去下位机/协议侧统一，别在这里填负数阈值
+  stale_ms: 500            # 遥测超过这么久没更新 → 视为没有深度（见 stale_action）
+                           #   ⚠️ 板上若长时间打"没有新鲜深度遥测"告警 = 下位机没在回传，保护形同虚设
+  stale_action: pass       # 没有新鲜深度时怎么办：pass=放行(默认，台架/仿真友好)
+                           #   | block_up=连"盲上浮"也不许（更安全，但要求下位机**持续**回传：
+                           #     断链后会一直压着不让上浮）；SIM/无串口始终放行，免得台架被锁死
+  snap: true               # 触发时 heave 轴**当帧直接回中**（不走 ramp 平滑），防惯性继续上浮
+  log_ms: 1000             # 触发告警打印节流(ms；0=每帧都打)
+
+dof_comp:                  # **底层共用：单独调"下潜"这一路的动力**（gate/ball 都吃）
+  enable: true             #   实现：base/uart.py::_apply_dive_boost —— 只对 heave<0 生效
+  dive_scale: 2.0          # 下潜指令 × 它，再夹到 [-1, 0]；1.0 = 不放大（原样）
+                           #   为什么需要：DOF→字节→下位机 RC_Matching*（映射值 ≤35 直接返回 0）
+                           #   使实际推力远小于 DOF 数字（0.20→20%、0.30→30%、0.60→60%，见 §1.1）
+                           #   怎么调：还不够 → 3.0/4.0；冲过头 → 1.5。上浮/悬停/平移/转向**不受影响**
+                           #   注：很小的指令（如 -0.05）即使放大也可能仍在死区(<0.138)内，
+                           #   要连它都有效，scale 得给足（≈3~4）
+                           #   两套任务（撞球/过门）的运动决策可以不同，但**共用这一套底层修正**
 
 motion:                    # 动作/速度预设（归一化 DOF：surge,sway,heave,yaw）
   search_yaw: 0.3          # 无目标时原地旋转搜索（30% 转速，右转）
@@ -63,7 +90,7 @@ ball:                      # 任务一 撞球：运动链 SEARCH→CENTER→APPR
   surge_slow: 0.15          # 分级慢速(接近段减速)
   align_x: true             # 居中: x → yaw(旋转; 撞球不做左右平移)
   align_y: true             # 居中: y → heave
-  timeout_ms: 20000         # 总时限 20s(DASH/STOP 期间不打断, 保证命中与停稳)
+  timeout_ms: 30000         # 总时限 20s(DASH/STOP 期间不打断, 保证命中与停稳)
   # ---- SEARCH: 脉冲旋转 + 周期性前进探测（沿用原方案）----
   search_spin_s: 0.5        # 旋转时长(转0.5s)
   search_pause_s: 1.5       # 旋转后停顿(停1.5s, 间隙检测更稳)
@@ -72,136 +99,214 @@ ball:                      # 任务一 撞球：运动链 SEARCH→CENTER→APPR
   search_advance_surge: 0.25 # 前进探测速度
   # ---- CENTER: yaw + heave, 不前进不横移 ----
   center_eps: 0.25          # 水平+竖直居中判据(归一化偏差)
-  center_confirm_frames: 3  # 连续居中帧数达标 → APPROACH
+  center_confirm_frames: 5  # 连续居中帧数达标 → APPROACH
   edge_yaw_kp: 0.3          # 居中转向 P 增益
   edge_yaw_kd: 0.0          # 居中转向 D 增益(阻尼: 防转过头)
   edge_yaw_max: 0.15        # 居中转向限幅(0.1~0.25)
-  pid: {kp: 1.0, ki: 0.0, kd: 0.15, out_max: 0.7, deadzone: 0.04}   # 居中 heave(垂直)
+  pid: {kp: 1.0, ki: 0.0, kd: 0.15, out_max: 1.0, deadzone: 0.04}   # 居中 heave(垂直)
   # ---- APPROACH: 仅 sway 修水平(yaw=0/heave=0), 参数移植自独立实验 ----
-  approach_pid: {kp: 12.0, ki: 0.01, kd: 0.05, out_max: 0.45, deadzone: 0.05}
+  approach_pid: {kp: 8.0, ki: 0.01, kd: 0.05, out_max: 0.45, deadzone: 0.05}
   lost_inertia_surge: 0.25  # 接近中短时丢失的惯性前进速度(不在居中段生效)
   # ---- DASH/STOP: 面积达标 → 冲刺 → 稳定停 ----
-  dash_ratio: 0.25          # 面积(EMA)达标阈值
+  dash_ratio: 0.15          # 面积(EMA)达标阈值
   dash_confirm_frames: 2    # 连续达标帧数(防单帧误检直接结束任务)
-  dash_dur_s: 2.0           # 冲刺时长(不检测是否撞到)
+  dash_dur_s: 1.5           # 冲刺时长(不检测是否撞到)
   stop_hold_s: 1.0          # 命中后全 0 保持时长(稳定停住)
   engage_hold_s: 0.8        # 丢目标后原地 hold 窗口, 过完回 SEARCH
-
-handover:                  # 返回出发区策略B：视觉居中 → 交下位机接管握手 → 收权 → 后退
-  header: 170              # 0xAA 交接帧头：以该帧头发帧表示“暂时交给下位机接管”
-  resume_flag: ""          # 下位机回传的“特殊标志”(十六进制串, 如 "aa55ff")；空=不判定内容
-  resume_timeout_s: 0      # 0=一直等下位机标志；>0 超时则继续(仅联调用)
-  standby_neutral: true    # 待命期间持续以 header 发中性帧心跳(≥20Hz)
-  rev1_s: 1                # 撞球结束后先后退时长(秒)
-  rev2_s: 3                # 收权居中后直接后退时长(秒)
-  rev_speed: -0.35         # 后退速度(归一化; 负=后退)
-  yaw_kp: 0.8              # 原地居中: yaw 比例增益
-  yaw_max: 0.5             # yaw 限幅
-  yaw_sign: 1              # yaw 方向(装反改 -1)
-  sway_kp: 0.9             # 收权后: 仅左右平移居中的比例增益
-  sway_max: 0.6            # sway 限幅
-  sway_sign: -1            # sway 方向(与 ball 居中一致; 装反改 1)
-  y_align: false           # 原地居中是否也用 heave 修垂直(默认仅水平)
-  center_x_eps: 0.10       # 水平居中阈值(归一化偏差)
-  center_confirm_frames: 3 # 连续居中帧数达标
-  center_timeout_s: 20     # 每段居中阶段超时(秒)
-
-back:                      # 返回出发区（下视红线相位机）
-  timeout_ms: 300000
-  align_deadzone: 0.10
-  align_min_frames: 5
-  travel_correct_th: 0.22
-  line_lost_finish_frames: 25
 
 gate:                      # 过门（§5.3 相位机：SEARCH→RANGE_ALIGN→APPROACH→THROUGH）
   timeout_ms: 180000
   pass_target: 1            # 完成计数目标：单门 1；高低两门可设 2
-  pid: {kp: 1.0, ki: 0.0, kd: 0.15, out_max: 0.6, deadzone: 0.04}
-       # 横向 PID：对齐撞球那套(kp1.0/kd0.15/死区0.04)——慢一点、带阻尼、不易转过头
-  align: {xy_m: 0.05, confirm_frames: 6}   # 对准判据：|t_x|,|t_y|(m) 与确认帧数
+  # ---- 修正 PID：**共用小球那一套**（同船/同推进器，实船实测过）----
+  # 默认**不在这里写任何增益数字**，由 gate_task 直接取：
+  #   sway  ← `comm.ball.approach_pid`    heave ← `comm.ball.pid`
+  #   yaw   ← `comm.ball.edge_yaw_*`
+  # 于是"调小球"= 同时调过门，不会再出现两套参数各自漂移（启动日志会打印实际来源与数值）。
+  # 确实要给过门单独一套时，才在这里写 pid_sway / pid_heave（同键名同量纲：
+  # 归一化偏差 ±1），或写 align_yaw.{kp,kd,out_max,deadzone} 覆盖 yaw。
+  # surge 不走 PID（用下面的 surge.* 常量），所以这里不会让冲刺变快。
+  align: {confirm_frames: 4, px_x: 0.25, px_y: 0.26}
+       # **2026-09-18 起"居中成功"一律按像素算**（位姿档也一样）：位姿只提供深度 z 与
+       # "可信"这一事实，不再用 t_x/t_y(米) 做居中 —— 深度有 ~20% 尺度误差（实测），
+       # 用它做居中等于把尺度误差灌进控制回路；且米制/像素两套阈值+两套 PID 会让
+       # mode 在 full↔coarse 间跳时两套控制器交替工作 → 收敛不了。
+       # 于是：**一套阈值(px_x/px_y) + 一套 PID（像素档那对）** 覆盖全档位。
+       # px_x/px_y: "居中成功"的范围（归一化像素偏差，±1=半屏）。
+       #   **2026-09-18 演进：0.10/0.10 → 0.20/0.18 → 0.25/0.22 → 0.30/0.26 → 现 0.25/0.26**
+       #   （横向最后收回到 0.25 = 用户定；竖向维持 0.26，两轴门槛的比较要看**物理量**：
+       #     px_x=0.25 → 0.818·0.25 = 0.205·z 米；px_y=0.26 → 0.462·0.26 = 0.120·z 米
+       #     → 竖向允许的物理偏差仍只有横向的 59%，方向是对的。有不变量用例按物理量守。）
+       #   基准：小球那套实测判据 `ball.center_eps: 0.25`（`comm.yaml` ball 段；撞球要"正中命中"
+       #   都只用 0.25）。过门是穿过一个**比机身大得多**的开口 → 取比小球更松是合理的。
+       #   竖向 0.26 略紧于横向 0.30：竖向单边余量只有横向的一半，而 1 单位 dyn = 0.462*z 米
+       #   （横向 0.818*z）→ 同一物理余量对应的 dyn 门槛本就该更小（等比换算 dyn≈0.885·dxn）。
+       #   换算（fx=782.5, fy=779.8, 1280x720 → 1 单位偏差 = 0.818*z / 0.462*z 米）：
+       #     dxn=0.30 → z=1.0m ±24.5cm，z=0.7m(判过门距离) ±17.2cm，z=3.0m ±74cm
+       #     dyn=0.26 → z=1.0m ±12.0cm，z=0.7m ±8.4cm，z=3.0m ±36cm
+       #
+       # ---- 工作假设（2026-09-18 定，**当前无法实测距离，先按它跑通**）----
+       #   门：规则原文"约 70x50cm + 红色 PVC 管"（`.docwork_gate/rules.md:97`）→ 按**最保守**读法：
+       #       70x50 = **外轮廓**、管径 0.05（常见规格）→ **开口 0.60x0.40m**。
+       #       （若管径更细、或 70x50 其实是开口内缘 → 开口更大，余量更大，下面全是保守估计。）
+       #   机身：用户口述"**面积不到门框面积一半**"。门框 0.70x0.50=0.35m² → 机身 ≤0.175m²。
+       #       取**悲观端** 0.35x0.30m（=0.105m²，门框面积的 30%、开口面积的 44%）→
+       #       **单边余量 横向 12.5cm、竖向 5.0cm**。
+       #
+       #   于是"门槛 vs 余量"（都换算到判过门距离 z=0.7m）：
+       #     px_x=0.30 → 17.2cm vs 余量 12.5cm  → 门槛 > 余量（137%）
+       #     px_y=0.26 →  8.4cm vs 余量  5.0cm  → 门槛 > 余量（168%）
+       #   **这不是"设错了"，而是"门槛本来就不是穿越时的误差"**：0.30/0.26 只是"开始同时前进+修偏"
+       #   的起点误差，穿越瞬间的误差由 APPROACH 段连续的 sway/heave 闭环决定（流程本来就是
+       #   居中 → 前进 → 冲刺）。真正卡住竖向精度的是**死区**而不是这个门槛：
+       #     上浮侧有效死区 0.138 → 换算到 z=0.7m 就是 **4.5cm**，已经吃掉那 5.0cm 余量的 90%
+       #     （下潜侧被 `dof_comp.dive_scale` 放大 → 有效死区 ≈0.069 → 3.2cm）
+       #   ⇒ **竖向是这套假设下的真正瓶颈，而且加/减 `px_y` 都动不了它。**
+       #
+       # ---- 现场调参决策规则（撞了/卡了先看这条）----
+       #   卡在 HOLD 不动、迟迟不进 APPROACH  → 再放宽 px_x/px_y（或 `coarse.align_*`）
+       #   上下蹭杆（撞上/下横杆）           → 收紧 **px_y**（0.26 → 0.22 → 0.20），它是竖向主旋钮
+       #   左右蹭杆 / 撞门柱                 → 收紧 px_x（0.30 → 0.25）；顺带看 `align_yaw` 是否在抖
+       #   竖直总差几厘米上不去             → **不是门槛问题**：抬 `ball.pid.kp`（把输出顶出 0.138 死区）
+       #                                       或给上浮也加补偿（`dof_comp` 现只作用于 heave<0）
+       #   冲刺太快/太贴门                   → 降 `surge.through`(0.5) 或 `z.cross`(0.7)，与门槛无关
+       # 为什么敢放宽（不是拍脑袋）：
+       #   1) ALIGN 里 surge=0，不放宽就只能原地耗到 timeout_ms = 该门 0 分；
+       #   2) 对准判据只决定"什么时候开始同时前进+修偏"，APPROACH 里 sway/heave **继续闭环**；
+       #   3) **近距冲刺（出口①`z≤cross`）根本不看 aligned**（gate_task.py `_on_pose`），
+       #      所以收紧这里对"防撞"没有保护作用 —— 撞不撞由 `z.cross`(0.7) 与
+       #      `surge.through`(0.5) 决定，那两个本次一个都没动；
+       #   4) 评分规则：无接触 30 分/个、蹭到 10 分/个、卡住不动 0 分 → 期望值明确偏向"动"。
+       # z 偏置暂不处理：PnP 解出的 z 比框宽粗估大 ~20%（可能是"标注开口、标尺用外轮廓"），
+       #   但穿越判据是"居中→前进→冲刺"三段式、z 只决定冲刺触发点，方向偏保守
+       #   （z 高估 ⇒ 实际 ~0.6m 才触发，比 0.7m 更贴门），不阻塞当前调参。
+       # confirm_frames: 连续对准帧数（**没动，仍是 4**）。8~11fps 下 4 帧≈0.4s。
+       #   **别拿降帧数当"放宽"**——那是防抖，抖一下就要重数。
+       #   （对照：小球 `center_confirm_frames: 5`；这里 4 是低帧率下的折中。）
        # 横向微调只在冲刺前/对准阶段做；穿门(THROUGH)阶段直行不再修正
+  align_yaw:                 # 居中(ALIGN)阶段的**水平修正通道**选择（默认已改为以 sway 为主）
+    enable: true             # 总开关：false = 完全不用 yaw（含下面的 heading 通道）
+    in_px: false             # ★2026-09-18 由 true 改 false★ 像素档(width/coarse)不再用 yaw 居中。
+                             #   现场观察："coarse/width 往中间居中很费力"。原因算出来了：
+                             #     yaw 命令 = kp(0.3)·dxn，而执行器死区是 |DOF| ≥ 0.138
+                             #     ⇒ 只有 |dxn| > 0.46（近半个屏）才有推力；小误差时**一点推力都没有**，
+                             #       只能靠水流漂 → "很费力"。
+                             #     sway 命令 = kp(8.0)·dxn ⇒ |dxn| > 0.017 就能动（差 27 倍）。
+                             #   另外 width/coarse 本来**没有位姿** → 也测不出"机身正不正"（见下面 heading）。
+                             #   要重新启用：必须同时把 kp 抬到能过死区（≈ ≥1.0），否则用例会红。
+    in_pose: false           # full/p3p 用 sway 居中（进近保持航向；这条实船实测有效，别动）
+    # 增益**不在这里写**：默认共用 `comm.ball.edge_yaw_kp/kd/max`（=0.3/0.0/0.15，实测过）。
+    # 要覆盖才写 kp / kd / out_max / deadzone。
+    # ⚠️ **两条死区线都要查**（曾经只查了前一条，于是漏掉了上面的坑）：
+    #     ① PID 内死区 `deadzone` 必须 < 对准门槛（否则转到位前就停 → 永远判不了 aligned）；
+    #     ② **执行器死区 |DOF| ≥ 0.138**：`kp × 最小要修的误差` 必须 > 0.138，否则该通道是摆设。
+    # 注：底层的下潜补偿（`comm.dof_comp`）**只作用于 heave<0**，与 yaw/sway 无关 ——
+    #     yaw 就是小球的纯比例特性（末段误差靠惯性滑到位）。
+       # 只在居中(ALIGN)生效：APPROACH/THROUGH 一律 yaw=0（冲的时候不许转头）。
+       # 符号约定（与 sway 一致）：+yaw = 右转、+sway = 右移；目标偏右 → 两者都取正。
+    heading: {enable: false, ema_frames: 4, deadzone_deg: 6.0, bias_deg: 0.0}
+       # **航向通道**：只有位姿档(full/p3p)能做——用 PnP 的 rvec 算门法向
+       #   n = R·[0,0,1] → 航向误差 psi = atan2(n_x, n_z)（度；0 = 机身正对门）。
+       #   `dxn` 修的是**方位**（门在画面里偏多少 → 该平移）；psi 修的是**姿态**
+       #   （机身与门法向差多少度 → 该转向）。两路信号不同 ⇒ **可以同时发**（sway+yaw）。
+       # 为什么默认关：psi 里含**安装偏置**（相机相对机身轴的固定夹角）+场地偏置。
+       #   实测真实 dump（tools/analyze_heading.py）里 psi 中位数 +12.3° —— 分不清是
+       #   "场地里门真的歪了"还是"相机装歪了"。若带偏置直接闭环，会把机身转到**偏 12°**。
+       #   ⇒ 先标定：**把机身与门摆正（卷尺/激光对正），连跑几帧读日志里的 `hdg` 中位数，
+       #     把它写进 `bias_deg`**；然后 `enable: true`。不改代码，只改这一个数。
+       # 噪声（决定能不能用）：真实角点 dump 实测，帧间 |Δpsi| p50≈3°、p90≈10°；
+       #   EMA(ema_frames=4, ≈0.5s@8fps) 后噪声 ≈3°。所以只能做**慢速微调**，不能做快闭环；
+       #   `deadzone_deg=6.0` 把噪声挡在外面（<6° 一律不出手）。
+       # 即使 enable，它也只借用 yaw 那套增益（out_max 15% 推力），且**与 sway 并存**：
+       #   sway 继续消位置误差，yaw 慢慢把机身摆正 —— 这也是"歪的时候调不动"的解药之一。
+
+  loiter: {enable: true, timeout_ms: 3000, dx_max: 0.14, dy_max: 0.20}
+       # 「在门口超时兜底」（2026-09-18 用户选定的方案）：**不看档位**，只要
+       #   ①框占比 ≥ `z.near_lost_ratio`（= 与"丢门判过门"同一个"在门口"定义）
+       #   ②在安全带内（|dx|≤dx_max、|dy|≤dy_max，与 width/coarse 直冲同量纲）
+       #   ③以上连续持续 ≥ timeout_ms
+       # 就自己拍板：判过门 + 直冲（复用 exit② 的 _start_through）。
+       # 为什么需要（现场 log/gate_run1.jsonl）：coarse 档唯一能 commit 的出口④被
+       #   `coarse.dash:false` 关掉，而门在占比 0.97（≈0.5m）时**整框仍检测得到**
+       #   → 走不到"丢门"分支 → 船贴着门口以 creep(0.20) 爬了 **18.7 秒**，
+       #   最后只靠一次丢检补了 9 帧(1.3s) 的冲刺 → 停在门口。
+       # 调参：等太久 → 减小 timeout_ms（2000）；误判太多（没对准就冲）→ 收紧 dx_max/dy_max
+       #      或加大 timeout_ms；完全不要 → enable: false（回到旧行为）。
   z: {align_max: 4.0, fast_max: 3.0, slow_max: 1.3, cross: 0.7,
       cross_confirm_frames: 2,   # 连续 z≤cross 帧数才判过门(防单帧 PnP 错解冲出去)
-      near_lost_m: 1.0}          # 进近中已到该近距后整门丢失 → 判过门(门占满视野)
-  surge: {fast: 0.35, slow: 0.15, creep: 0.12, lost_backward: 0.12, reacquire: 0.25, through: 0.5}
+      near_lost_m: 1.0,          # 进近中已到该近距后整门丢失 → 判过门
+      near_lost_ratio: 0.60,
+      z_stale_ms: 1500}          # `_z_last` 的"保鲜期"：超过它未更新 → 不许参与穿门判定
+      # z_stale_ms（2026-09-18 新增，现场日志驱动）：coarse 档**没有测距**，`_z_last` 会一直
+      #   是上一次 width/位姿留下的值（实测留下过 9.25 的垃圾值一路带进穿门判定）。反向更危险：
+      #   陈旧的小 z（≤near_lost_m）会让"远处丢门"被误判成"已过门" → 满速盲冲。
+      #   ⇒ 判"够近"时 z 必须新鲜（coarse 档已把时间戳清空），另有框占比判据兜底。
+      # near_lost_ratio: **2026-09-18 新增**。"近距丢门=已过门"的第二判据（框宽/屏宽）。
+      #   为什么需要：`near_lost_m` 依赖 z，而 coarse 档**没有测距**（z 是上一次的陈旧值）；
+      #   框占比每帧都能算、跨档位可比。判过门取 **两者之一满足**（OR）。
+      #   ⚠️ 这条判据同时补上了 ALIGN 相位的漏洞：width/coarse 的 creep 会把船送到门口且
+      #   始终留在 ALIGN，原先在 ALIGN 丢门只会防抖后回 SEARCH（= 0 分 + 原地旋转），
+      #   现在按"门快装不下"判过门 → 直冲穿过。调小它 = 更早判过门（更冒险）。
+       # ⚠️ align_max / fast_max 当前**未参与运算**（Z 只分 slow_max 两档；留作三档扩展）
+       # ⚠️ 门在 1.0m 处只占屏宽 ~43%、0.7m 处 ~61%（fx=782.5@1280 实测）——"门占满视野"
+       #    的几何前提只在 z<0.43m 成立，故 near_lost_m 实际是"够近 + 丢检"的经验值，
+       #    改它前先做卷尺深度曲线核对（见 doc/算法说明-gate-PnP移植方案.md 待测项）
+  surge: {fast: 0.35, slow: 0.15, creep: 0.20, lost_backward: 0.20, reacquire: 0.25, through: 0.5}
          # fast/slow = 进近两档(远 z>slow_max 用 fast / 近用 slow)；
+         # ⚠️ **各档实际有效推力**（实测链路算法，满杆=244，死区 0.138）：
+         #     0.15→15%  0.20→20%  0.25→25%  0.30→30%  0.35→35%  0.50→50%  1.0→100%
+         #     **0.12 → 0%！**（creep/lost_backward 原来就是 0.12 = 完全没推力，已提到 0.20）
          # creep=coarse/width 慢蠕进；lost_backward=远处短暂丢失的轻微后退(代码取负)；
-         # reacquire=后退重取；through=穿门冲刺
-  coarse: {far_ratio: 0.18, near_ratio: 0.55, align_x: 0.05, align_y: 0.10}
-         # far/near_ratio=门框宽/屏宽 远近判定；align_x/y=整框对中阈值(归一化)
-  hold: {max_frames: 20}      # HOLD 无进展帧数 → REACQUIRE(触发门槛保持原值)
+         # reacquire=后退重取；through=穿门冲刺(位姿档 & 近距丢失判过门用)
+  width:                     # width 档（只对向 2 角）：**对准确认 → 直接冲**
+    dash: false              # 出口开关；false = 回到"远距 creep、近距一直 HOLD"（旧行为）
+                             # ⚠️ 2026-09-18 现场被你关掉（板端实测期间）→ 本文件与板端一致；
+                             #    要启用直冲出口③把它改 true（能力用例会显式打开它）。
+    dx_max: 0.14             # 直冲安全带=水平上限（归一化像素偏差；两角中点）
+                             #   2026-09-18 0.08→0.14（align.px_x 已放到 0.25，安全带仍更严：
+                             #   "能动"与"敢冲"分开，安全带是防撞杆的那道）
+    dy_max: 0.18             # 直冲安全带=竖直上限（框心）——**防上下撞杆的主旋钮**
+                             #   2026-09-18 0.12→0.18（align.px_y 现 0.22）
+                             #   与 align.px_x/px_y 职责分离：px_* 决定 creep/HOLD(较严)，
+                             #   dx_max/dy_max 决定"敢不敢冲"；两个都调才有效
+    confirm_frames: 3        # 连续在安全带内的帧数（8~11fps 下 ≈0.3s）
+    z_max: 1.5               # 宽测距 z ≤ 它才允许冲（>它 → 慢 creep 靠近）
+                             #   调大=更早冲（快，但更容易蹭杆）；调小=贴门再冲（稳，但慢）
+    surge: 0.30              # 直冲速度（< surge.through。撞杆与否主要由它 + dy_max 决定）
+  coarse: {far_ratio: 0.18, near_ratio: 0.55, align_x: 0.33, align_y: 0.29,
+           dash: false, dash_ratio: 0.35, dx_max: 0.14, dy_max: 0.20,
+           confirm_frames: 3, surge: 0.25}
+         # far/near_ratio=门框宽/屏宽 远近判定(0.18≈2.4m / 0.55≈0.78m @fx782)；
+         # align_x/y=对中阈值(归一化像素)。**2026-09-18 放宽 0.05/0.10 → 0.10/0.18 → 0.33/0.29**
+         #   （与 `align.px_x/px_y`(0.30/0.26) 同量纲、同量级；coarse 的框心是最粗的估计，
+         #    故刻意比它略松一点 —— 有不变量用例守着这个"coarse 不比 align 更严"的形状）
+         #   coarse 档这两项决定"creep 靠近"还是"HOLD → REACQUIRE 后退"——放宽的直接收益
+         #   就是少后退、少来回（实测"总在退-进-退"的主因之一）
+         #   dx_max/dy_max 是直冲安全带，比 align 更严（决定"敢不敢冲"）
+         #   （dash 现为 false，这两项只在打开 dash 时生效）；dash/dash_ratio/dx_max/dy_max/confirm_frames/surge
+         #   = coarse 档"够近(占比≥dash_ratio) + 连续对准 → 直冲"的参数
+         # 仲裁要点：**只有未对准才 HOLD/后退**；对准就 creep 靠近或直接冲
+  hold: {max_frames: 20}      # HOLD 无进展帧数 → REACQUIRE(只在"未对准"时累加)
   reacquire: {max_ms: 800,        # 单次后退上限(原 2000 → "明显后退"的主因)
               max_times: 2,       # 连续这么多次仍拿不到角点 → 放弃后退, 改原地 HOLD
               stop_ratio: 0.75,   # 闭环后退: 框占比退到进入时的 75% 就停
               reset_after_ms: 3000}
               # reset_after_ms: 距上次后退超过这么久 → 重新允许 max_times 次后退
-  through: {confirm_frames: 8} # 过 Z_pass 后目标消失确认帧数 → 判过门
+  through: {confirm_ms: 2500, confirm_frames: 8}
+                              # **冲刺时长**（ms）→ 判过门；**2026-09-18 由帧数改为时长**：
+                              #   帧数语义下时长随 fps 漂（8~11fps≈0.7~1.0s；30fps≈0.27s），
+                              #   而"能不能冲出去"取决于跑了多远 → 低帧率时容易**冲不出去停在门口**。
+                              #   **2026-09-18 现场实测把 900 改成 2500**：日志（gate_run1）里
+                              #   冲刺是从**门口**（框占比 0.97 ≈0.5m）才起步的，900ms 只够走一小段
+                              #   → "through 又没冲动"（9 帧后 DONE）。按公式重算：需要走
+                              #   ≈ 起步距离(0.5~1.2m) + 机身长(0.5m) ≈ 1.0~1.7m，若航速 ~0.5m/s
+                              #   → 2~3.4s。**下次下水按实测航速回填**：
+                              #   confirm_ms ≈ 1000·(起步距离 + 机身长)/v × 1.3
+                              #   **这是"没冲出去"最直接的旋钮**。
+                              # confirm_ms<=0 → 退回旧的帧数语义（confirm_frames=8）
   search: {spin_s: 2.0, pause_s: 1.0, yaw: 0.35}
   pose_hold_frames: 10        # 帧间防抖：丢姿态时的保持帧数
-
-  # ---- 质量分 Q（v1.4）：一帧证据质量，去**两个**地方，都不参与过门判定 ----
-  #   ① 先验(prior)    ：原始角点 conf × 帧新鲜度 → 逐点权重 w_prior，
-  #                      连同 q_mem(历史位姿证据) 的帧级增益进 kpt_memory 融合权重
-  #   ② 后验(posterior)：重投影 RMS + 位姿投影框 IoU（含线索↔位姿互检）
-  #                      → 运动谨慎度 c → 速度缩放 / 死区缩放
-  #   confirm_max_scale=1.0 表示**不改确认时长**，只改"给多少权重 / 开多快"
-  quality:
-    w_kpt: 1.0               # 分量权重：角点可见数+平均置信度
-    w_pnp: 1.0               #           重投影 RMS
-    w_box: 0.8               #           位姿投影框 vs 检测框 IoU（两链互检那条）
-    w_time: 0.5              #           帧新鲜度
-    rms_ref_px: 5.0          # RMS 参考尺度（该值处 q_pnp≈0.5）
-    q_no_pose: 0.25          # 无位姿时的 q_pnp
-    box_iou_floor: 0.4       # IoU ≤ 它 → q_box=0；≥0.9 → 1
-    q_lo: 0.35               # Q≤q_lo → 谨慎度 0（最谨慎）；Q≥q_hi → 1（正常）
-    q_hi: 0.75
-    speed_min_scale: 0.4     # 最谨慎时速度保留比例（下限，不会停死）
-    confirm_max_scale: 1.0   # 1.0 = 质量分**不影响**确认时长
-    deadzone_max_scale: 1.6  # 最谨慎时对准死区/阈值最多放大到几倍
-    prior_conf_pow: 1.0      # 先验里原始置信度的幂（<1 更宽容）
-    q_time_floor: 0.2        # 帧新鲜度下限（过期帧照常估计，只是权重低）
-    mem_lambda: 0.3          # q_mem(历史位姿证据) EMA 速率 → 喂下一帧先验
-
-  # ---- 恢复线索 + 线索↔位姿互相自检（v1.3；方向符号需水池实测）----
-  cues:
-    enable: true
-    record_only: false       # true=只记录不驱动（下水前先这样核对方向符号）
-    speed: 0.15              # 线索动作统一低速（仍会乘质量分速度缩放）
-    too_close_height_ratio: 0.9
-    boundary_margin_ratio: 0.02
-    turn_right_on_left_column: true     # 仅 TL,BL 可见 → 右转
-    turn_left_on_right_column: true     # 仅 TR,BR 可见 → 左转
-    descend_on_top_edge: true           # 仅 TL,TR 可见 → 下降
-    ascend_on_bottom_edge: true         # 仅 BR,BL 可见 → 上升
-    backward_on_too_close: true         # 框上下贴边 → 后退
-    backward_agree_z_m: 1.5  # 线索判"太近"但位姿 z 仍 > 它 → 冲突（质量分打折）
-    agree_bonus: 0.15        # 线索与位姿一致 → 质量分加成（封顶 1.0）
-    conflict_penalty: 0.5    # 冲突 → 质量分打折（只降权，不驱动）
-    cue_after_frames: 15     # 位姿连续不可用多少帧后线索才接管
-    cue_confirm_s: 0.10      # 线索动作确认：时长（秒）
-    cue_confirm_frames: 3    #               帧数（双条件，common/streak.py）
-
-    # ---- 主导权三档位：线索链 vs 位姿链（v1.5）----
-    #   auto  依据质量自动分配（**默认**）：位姿 Q 高 → 位姿主导；Q 低 → 线索份额上升
-    #   pose  位姿主导：位姿在位时线索一律不驱动，只在位姿不可用时兜底（等于 v1.4 行为）
-    #   cue   线索主导：相位允许且有明确线索动作 → 整帧听线索（不看 Q）
-    #   （旧名仍接受：pose_first→pose，blend→auto，cue_first→cue）
-    # 三档都会：① 位姿不可用时兜底接管（≥ cue_after_frames 帧）
-    #          ② 过动作确认（cue_confirm_*）③ THROUGH 相位永不介入
-    mode: auto
-    allow_approach: false    # 线索是否允许在 APPROACH 生效（想更主导就 true）
-    cue_pose_share: 0.0      # 仅 cue 档：给位姿保留的份额（0=完全接管，≤0.5）
-    speed_lead: 0.30         # 主导档（auto/cue）线索速度（pose 档仍用上面的 speed）
-    speed_uses_caution: false # 仅主导档：线索速度是否再乘谨慎度（默认不乘）
-    lead_q: 0.35             # auto 档：位姿后验 Q 低于它 → 线索权重开始 > 0
-    lead_full_q: 0.20        # auto 档：位姿 Q 低于它 → 线索权重 = 1（完全主导）
-    conflict_w: 1.0          # auto/cue 档：冲突时线索的权重下限（0=冲突仍听位姿）
-    lead_min_w: 0.25         # 权重小于它就不掺和（防两链各出一半力来回抖）
-
-  # ---- 帧守卫（v1.3，共用件 common/frame_stamp.py）----
-  # 唯一帧/单调时间/帧龄/采集断点；过期帧**仍用于估计**但不计入确认（两分法）
-  stamp: {max_age_s: 0.9, max_gap_s: 0.35, adaptive_gap: true, future_tol_s: 0.005}
 
 debug:                     # 通信调试
   tx_frame_hex: true        # 终端打印每次发出的 11B 运动帧（真串口下）
   tx_frame_log_ms: 0     # 打印节流（毫秒，200=5Hz）
+  tel_log_ms: 200       # 遥测(下位机回传深度/姿态)打印节流（毫秒，0=每帧都打）

@@ -1,0 +1,8 @@
+# tools/ 下不要提交这些：
+__pycache__/
+*.pyc
+# 含板子密码的 SSH 包装器/askpass（默认放在仓库外的 ~/RDKX5/，万一复制进来也别提交）
+askpass*.sh
+.tmp_askpass.sh
+ssh_x5*.sh
+scp_x5*.sh

@@ -15,12 +15,17 @@ import os
 # ---- 代码级常量（非参数；参数一律在 cfg/*.yaml）----
 PROJECT_NAME = "AUV"
 SIM_MODE = True          # 无硬件调试：串口仅打印（板上置 False）
+# 运行期可覆盖（默认行为不变）：AUV_SIM_MODE=0 真正发串口 / =1 只打印
+#   AUV_SIM_MODE=0 python3 main.py --task gate      ← 下水真实驱动
+#   AUV_SIM_MODE=1 python3 main.py --task gate      ← 台架只打印（默认）
+if os.environ.get("AUV_SIM_MODE") is not None:
+    SIM_MODE = os.environ["AUV_SIM_MODE"].strip().lower() not in \
+        ("0", "false", "no", "off", "sim_off")
 DEBUG = True
 LOG_FPS = True
 
 STATE_IDLE = "IDLE"
 STATE_BALL = "BALL"
-STATE_BACK = "BACK"
 STATE_GATE = "GATE"
 STATE_DONE = "DONE"
 STATE_ESTOP = "ESTOP"

@@ -22,6 +22,11 @@ Typical RDK command:
 
 Dry run without STM32 serial hardware:
     python3 udp_server.py --sim
+
+Telemetry (STM32 -> RDK): UartController 收 14B 遥测帧(0xAA55 + 深度/姿态 + 校验和，
+协议见 base/telemetry.py)，并按 cfg/comm.yaml → comm.depth_guard 做**限深保护**：
+深度 ≤ min_depth_m(默认 0.3m) 时禁止上浮——键盘按"上浮"也不会把机身顶出水面。
+遥测打印：[UART←] depth=...（节流 comm.debug.tel_log_ms）。
 """
 import os as _os, sys as _sys
 if __package__ in (None, ""):        # 支持直接 python3 manual/xxx.py 运行
@@ -31,45 +36,9 @@ import argparse
 import socket
 import time
 
-import struct
-
 import base.settings as S
 from base.uart import UartController
 
-TEL_LEN = 14
-TEL_HEADER = b"\xAA\x55"
-
-
-def parse_telemetry_frames(buf):
-    out = []
-    while len(buf) >= TEL_LEN:
-        pos = buf.find(TEL_HEADER)
-        if pos < 0:
-            del buf[:]
-            break
-        if pos > 0:
-            del buf[:pos]
-        if len(buf) < TEL_LEN:
-            break
-
-        frame = bytes(buf[:TEL_LEN])
-        checksum = sum(frame[:13]) & 0xFF
-        if checksum != frame[13]:
-            del buf[0]
-            continue
-
-        depth_cm, target_cm, roll_cd, pitch_cd, yaw_cd = struct.unpack_from(
-            "<hhhhh", frame, 3
-        )
-        out.append((
-            depth_cm / 100.0,
-            target_cm / 100.0,
-            roll_cd / 100.0,
-            pitch_cd / 100.0,
-            yaw_cd / 100.0,
-        ))
-        del buf[:TEL_LEN]
-    return out
 
 def clamp(value, lo=-1.0, hi=1.0):
     return max(lo, min(hi, float(value)))
@@ -136,9 +105,6 @@ def main():
 
     uart = UartController()
 
-    uart._drain_rx = lambda: None
-    rx_buf = bytearray()
-    last_tel_log = 0
     target = (0.0, 0.0, 0.0, 0.0)
     last_rx = time.time()
     last_log = 0.0
@@ -149,6 +115,10 @@ def main():
           % (S.comm.serial.device, S.comm.serial.baud, S.SIM_MODE,
              args.timeout_ms))
     print("[UDP] packet format: surge,sway,heave,yaw")
+    print("[UDP] depth_guard=%s min_depth=%.2fm（深度来自下位机 14B 遥测 0xAA55；"
+          "≤min_depth 时禁止上浮）"
+          % (S.get("comm.depth_guard.enable", True),
+             float(S.get("comm.depth_guard.min_depth_m", 0.3) or 0.0)))
 
     try:
         while True:
@@ -170,17 +140,7 @@ def main():
             if now - last_rx > timeout_s:
                 target = (0.0, 0.0, 0.0, 0.0)
 
-            uart.send_dof(*target)
-            if not uart.sim and uart._ser is not None:
-                n = uart._ser.in_waiting
-                if n:
-                    rx_buf.extend(uart._ser.read(n))
-                    for depth, target_depth, roll, pitch, yaw in parse_telemetry_frames(rx_buf):
-                        now = time.time()
-                        if now - last_tel_log >= 0.1:
-                            print("[TEL] depth=%.2fm target=%.2fm roll=%.2f pitch=%.2f yaw=%.2f"
-                                % (depth, target_depth, roll, pitch, yaw))
-                            last_tel_log = now
+            uart.send_dof(*target)     # 发帧时顺带收遥测/限深（base/uart.py:_drain_rx）
             time.sleep(0.005)
     except KeyboardInterrupt:
         print("\n[UDP] keyboard interrupt")

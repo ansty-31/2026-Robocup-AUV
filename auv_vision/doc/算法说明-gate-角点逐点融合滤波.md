@@ -1,10 +1,19 @@
-# gate 角点逐点融合滤波 — 数据处理说明（代码 `gate/data/kpt_memory.py`）
+# gate 角点逐点融合滤波 — 数据处理说明（代码 `gate/kpt_memory.py`）
+
+> **当前状态（20260917）**：过门（gate）= **扁平 v1.2 版**，本层代码路径就是 **`gate/kpt_memory.py`**
+> （`gate/` 下没有子包）。
+> `kpt_memory` 为**可选功能、默认开启**（配置里 `enable: true`，= 周一 09-14 原行为）：关掉用
+> `vision.gate.kpt_mem.enable: false`，或用 `AUV_GATE_KPT_MEM=0` 临时关闭
+> （优先级：`AUV_GATE_KPT_MEM` > `enable` > 兜底 `false`）；
+> 关闭时角点单帧直用，行为等同没集成该功能。
+> 想直接看开关差别：`python3 preview_detect.py --gate-kpt --fuse`（强制开融合做对比）。
+> v1.3/v1.4 分层版、质量分 Q、线索 cues、帧守卫等**已确定不需要、已删除**，本文不再描述。
 
 > 本文说明 v1.2 新增的**门角点数据处理层**：在识别之后、位姿解算之前，对**每个特征点
 > 自身**做鲁棒自适应融合滤波，用来抑制水面倒影引起的小漂移 / 短消失 / 偶发鬼点，
 > 让状态机保持稳定。
 >
-> 命名说明：这一层在讨论里被叫作 "kpt_gate"，落地的模块名是 **`gate/data/kpt_memory.py`
+> 命名说明：这一层在讨论里被叫作 "kpt_gate"，落地的模块名是 **`gate/kpt_memory.py`
 > （类 `KptMemory`）**，配置段 `vision.gate.kpt_mem`，调用点在 `gate/gate_task.py::_step`。
 >
 > 定位一句话：**它是一次"融合滤波"**——准确说是
@@ -20,7 +29,7 @@
 | **没改** | 识别模型与推理链路；`parse_kpt_mode` 的 mode 判定逻辑；`gate_pose` 的 PnP 解算与消歧；门几何/降级链/相位机 |
 | **改了** | 只在 `det.kpts / det.kpt_conf` 上做逐点数据处理，输出**同样形状**的 `(4,2)` 像素 + `(4,)` 置信度 |
 | **调用链** | `gate_task._step()`：`det` → `KptMemory.update(kpts, kpt_conf, now_ms)` → `parse_kpt_mode(...)` → `gate_pose(...)` |
-| **开关** | `vision.gate.kpt_mem.enable: false` → 完全旁路，回到"单帧直用"的原始行为 |
+| **开关** | `vision.gate.kpt_mem.enable: true`（**默认**，= 周一 09-14 原行为）→ 打开逐点融合；`enable: false` 或 `AUV_GATE_KPT_MEM=0` → 完全旁路，回到"单帧直用"的原始行为（优先级：`AUV_GATE_KPT_MEM` > `enable` > 兜底 `false`） |
 
 ## 2. 问题：现象 → 根因 → 为什么要修在数据层
 
@@ -51,12 +60,10 @@ R_i  = clip(k_sigma · σ_i, r_min_px, r_max_px)      # ② 验证门半径（�
 d    = |x_i - pred|                        # ③ 残差（当帧观测 vs 预测）
 w_geo= 1 / (1 + (d/R_i)²)                  # ④ 柯西鲁棒权重（连续，无跳变）
 w    = clip(w_prior_i · w_geo, 0, 1)       # ⑤ 证据权重 × 几何一致性
-       w_prior_i = 质量分**先验** = conf_i^pow · q_time(帧龄)（gate/data/quality.py 给；
-                   不给质量分时 w_prior = conf_i，与升级前逐位一致）
+       w_prior_i = conf_i（**扁平 v1.2：逐点权重直接取模型自身的 keypoint 置信度**）
 （可选 w_min>0：w 低于它就彻底忽略这一帧；默认 0 = 纯软融合）
 
-gain = q_gain_floor + (1-q_gain_floor)·q_mem   # ⑥a 帧级增益（q_mem=历史位姿证据 EMA）
-a    = alpha · gain · w                        # ⑥b 增益被"帧质量 × 点质量"调制
+gain = 1.0（**扁平 v1.2：无帧级增益**，a = alpha · w）   # ⑥
 p_i  = pred + a·(x_i - pred)               #    位置融合
 v_i  = v_i(1-βw) + βw·(p_i-pred)/dt        #    速度融合（限幅 ±5 px/ms）
 c_i  = (1-a)·c_i + a·conf_i                #    置信度融合（连续）
@@ -73,25 +80,12 @@ c_i  = (1-a)·c_i + a·conf_i                #    置信度融合（连续）
 |---|---|---|
 | `α-β` 递推（位置+速度） | α-β 滤波 / g-h 滤波（匀速模型，稳态等价卡尔曼） | 抑噪；带匀速补偿 → **零稳态滞后** |
 | `w = w_prior × w_geo` | 置信度加权的**鲁棒 M 估计**（IRLS 权重） | 不可信的观测"少信"而不是"丢弃" |
-| `w_prior = conf·q_time` | 质量分**先验**（帧新鲜度进了权重） | 过期/低置信帧少拉，但点仍有效 |
-| `gain = f(q_mem)` | 质量分**帧级**增益（历史位姿证据 EMA） | 位姿链最近不可信 → 更信历史、更平滑（有下限） |
+| `w_prior = conf_i` | 逐点先验权重 = 模型自身的 keypoint 置信度 | 低置信点少拉，但点仍有效 |
 | `w_geo = 1/(1+(d/R)²)` | 柯西/Lorentzian 权重函数 | 连续平滑，无二值跳变 |
 | `R = k_sigma·σ` | 由残差尺度得到的**验证门**(gating) | 挡住远离本点轨迹的观测（倒影鬼点） |
 | `σ` 慢跟踪残差 | 稳健尺度估计（类 MAD） | 半径随该点"平时有多飘"自动伸缩；世界真变了能**自愈** |
 | 只预测不更新 | **滑行** (coasting) | 短消失期间状态不丢 |
-| `c_i` 衰减 | 航迹质量分/置信度衰减 | 长丢失时交给原判定逻辑自然降级 |
-
-### 3.2b 质量分的两个入口（v1.4）
-
-`gate/data/quality.py` 给出的两路"证据质量"是本层的**可选**输入，缺省时行为与升级前一致：
-
-| 入口 | 来源 | 作用位置 | 语义 |
-|---|---|---|---|
-| `w_prior[i]` | 原始角点 conf × 帧新鲜度（**先验**，不看位姿） | 取代 ⑤ 里的 `conf_i` | 这一帧**这个点**值多少权重 |
-| `q`（用 `q_mem`） | 后验总分的 EMA（**历史**位姿证据） | ⑥a 帧级 `gain`，乘在 α/β 上 | 这一帧**整体**该多信观测 |
-
-两路都**只调权重、不做硬判**：帧差只会"少拉"，点仍有效、状态不丢，与本节
-"不硬判无效"的原则一致。
+| `c_i` 衰减 | 置信度衰减 | 长丢失时交给原判定逻辑自然降级 |
 
 ### 3.3 三条关键设计取舍
 
@@ -104,11 +98,17 @@ c_i  = (1-a)·c_i + a·conf_i                #    置信度融合（连续）
 3. **零滞后优先**：不做窗口算术平均（那会把 `Z` 拖后、过门判据偏晚），
    α-β 的匀速补偿把"平均的抑噪"和"不滞后"同时拿到。
 
-## 4. 参数（`cfg/vision.yaml → gate.kpt_mem`）
+## 4. 参数（`cfg/vision.yaml → vision.gate.kpt_mem`）
+
+> **可选功能、默认开启**。开关优先级：环境变量 `AUV_GATE_KPT_MEM` > 配置 `enable` > 兜底 `false`。
+> `AUV_GATE_KPT_MEM=0 python3 main.py --task gate` 临时关掉（不改配置）；`=1` 强制打开（压过 `enable: false`）。
+> `preview_detect.py --fuse` 以 `force=True` **强制**打开，便于 fused vs raw 对比。
+> 关闭时 `build_kpt_memory()` 返回 `None`，`gate/gate_task.py` 角点**单帧直用**，行为等同没集成该功能。
+> 下表默认值取自 `gate/kpt_memory.py::DEFAULTS`（`cfg/vision.yaml` 中另有覆盖值，以配置为准）。
 
 | 键 | 默认 | 含义 / 调参方向 |
 |---|---|---|
-| `enable` | true | false = 旁路，回到原始行为（便于水面 A/B） |
+| `enable` | true | **默认开启**（= 周一 09-14 原行为）：true = 打开融合；false = 旁路，回到"单帧直用"的原始行为（便于水面 A/B）。优先级低于环境变量 `AUV_GATE_KPT_MEM` |
 | `alpha` | 0.4 | 融合增益。**调大→更快、更抖**；调小→更稳、更迟 |
 | `beta` | 0.1 | 匀速补偿增益。跟踪加速运动时调大 |
 | `k_sigma` | 3.0 | 半径 = k_sigma×σ。**调小→更不信偏离大的观测**（更稳）；`≤0` 关闭几何权重（退化为纯 α-β） |
@@ -117,7 +117,7 @@ c_i  = (1-a)·c_i + a·conf_i                #    置信度融合（连续）
 | `sigma_lambda` | 0.15 | σ 慢跟踪速率。调小→历史更长（更稳、适应更慢） |
 | `w_min` | 0.0 | >0 时把权重低于它的帧彻底忽略（恢复"硬关"）；0 = 纯软融合 |
 | `conf_floor` | 0.05 | 低于它视为"本帧没打到（缺失）" |
-| `recall_conf` | 0.55 | 短消失回忆时给的最低置信度（应 ≥ `keypoint.conf_thr`） |
+| `recall_conf` | 0.45 | 短消失回忆时给的最低置信度。**必须 < `keypoint.conf_thr`（0.5）**——≥ 它会让外推出来的"回忆点"被 `parse_kpt_mode` 当成真实可见 → 拿外推点解 PnP 必失败（实测现象：持续 coarse / 无位姿）。`cfg/vision.yaml` 与 `kpt_memory.DEFAULTS` 都是 0.45；`KptMemory.__init__` 的形参默认值（0.55）只在直接构造对象时可见，走 `build_kpt_memory` 不会用到 |
 | `conf_decay` | 0.35 | 长丢失时置信度衰减率 |
 | `max_missing_frames` | 5 | 连续缺失多少帧内还"回忆"（≈ 0.5s @10fps） |
 | `min_frames` | 2 | 至少见过几帧才允许回忆 |
@@ -126,7 +126,7 @@ c_i  = (1-a)·c_i + a·conf_i                #    置信度融合（连续）
 **想更稳**：`alpha↓`、`k_sigma↓`、`sigma_lambda↓`、`max_missing_frames↑`
 **想更快**：`alpha↑`、`k_sigma↑`、`sigma_lambda↑`、`w_min>0`（对可疑帧更果断）
 
-## 5. 实测性质（`python3 tests/test_gate_kpt_memory.py`，13 项）
+## 5. 实测性质（无硬件单测，13 项；用例在 `tests/`）
 
 | 指标 | 结果 |
 |---|---|
@@ -178,9 +178,8 @@ c_i  = (1-a)·c_i + a·conf_i                #    置信度融合（连续）
 
 ```bash
 cd auv_vision
-python3 tests/test_gate_kpt_memory.py     # 本层单测（13 项：抖动/滞后/鬼点/半径/回忆/衰减/自愈/旋钮）
-python3 tests/test_gate_standalone.py     # 门相位机 + 倒影稳定化 + 穿门保护（含本层集成）
-python3 -m pytest tests/ -q               # 全量
+python3 -m pytest tests/ -q      # 无硬件用例（tests/；数量随开发增长，以输出为准）
+python3 main.py --task gate      # mock 后端跑一遍相位机（含本层集成）
 ```
 
 调参时建议先只看叠加里的两个量：
@@ -189,5 +188,5 @@ python3 -m pytest tests/ -q               # 全量
 - `mode` 的翻转频率 —— 这是"状态机稳不稳"的直接指标。
 
 > 进一步：`preview_detect.py --gate-kpt` 可做下水前的视觉自检（船不动）。若要把
-> `k_sigma / r_min_px / recall_conf / conf_decay` 用**真实倒影数据**标定，建议先加一个
+> `k_sigma / r_min_px / recall_conf / conf_decay` 用**真实倒影数据**标定，可用
 > `--dump kpt.jsonl`（逐帧存 `kpts/kpt_conf/bbox/时间戳`），再离线回放调参。

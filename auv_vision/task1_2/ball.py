@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """ball.py — 任务一 撞球（BallTask）· 运动逻辑融合版
 
-运动链（融合独立实验 task1_2/ball_hit_standalone 的三段式运动；**视觉识别仍用本项目**）：
+运动链（三段式运动移植自早期独立实验，**该实验目录已删除**；**视觉识别仍用本项目**）：
 
   SEARCH   无目标：原地**脉冲旋转**（我们的 spin_s/pause_s）+ 周期性慢速前进探测
            （转 spin_s → 停 pause_s，停的间隙让检测有静止帧）
@@ -15,8 +15,7 @@
 
 丢目标（沿用原思路的阶梯）：短时丢失（帧窗口）→ 保持/惯性 → hold（原地全 0，
 engage_hold_s）→ 回 SEARCH。**CENTER 阶段丢失绝不前进**（居中不允许带前进）。
-时限：timeout_ms（20s；DASH/STOP 期间不打断，保证命中与停稳都能走完）。
-撞球后回出发点由 run_ball_return.sh + task1_2/return_by_memory.py 负责。
+时限：`comm.ball.timeout_ms`（当前 cfg 30s；DASH/STOP 期间不打断，保证命中与停稳都能走完）。
 
 参数一律在 cfg/comm.yaml 的 `ball:` 段（settings 读取）。
 """
@@ -182,7 +181,7 @@ class BallTask(object):
     def _step_approach(self, dx, now_ms, r, g):
         """APPROACH：分级前进 + **仅 sway** 修水平（yaw=0、heave=0）。"""
         surge, label = self._surge_plan(r, g)
-        sway = _clip(-self._pid_sway.update(dx, now_ms))
+        sway = _clip(self._pid_sway.update(dx, now_ms))
         if r >= S.comm.ball.dash_ratio:
             self._dash_cnt += 1
             if self._dash_cnt >= S.comm.ball.dash_confirm_frames:

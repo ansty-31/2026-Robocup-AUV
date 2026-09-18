@@ -31,3 +31,6 @@ record/
 .DS_Store
 Thumbs.db
 auv_vision/bak/
+
+# pytest 缓存
+.pytest_cache/

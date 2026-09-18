@@ -73,6 +73,11 @@ def main():
     ap.add_argument("--save", default=None, help="保存带框图目录")
     ap.add_argument("--save-every", type=int, default=30)
     ap.add_argument("--duration", type=float, default=0.0, help="运行秒数; 0=一直跑")
+    ap.add_argument("--fuse", action="store_true",
+                    help="叠加显示 kpt_memory 融合后的角点(实心)+原始(空心)，并打印抖动对比"
+                         "（强制开启 kpt_mem，与 enable 默认值/AUV_GATE_KPT_MEM 无关）")
+    ap.add_argument("--dump", default=None,
+                    help="逐帧存 JSONL（角点/置信度/框/时间戳），供离线标定 kpt_mem/q_lo 等")
     a = ap.parse_args()
 
     if not HAS_CV2:
@@ -91,10 +96,7 @@ def main():
     backend = None
     model_desc = S.vision.model.path
     if a.gate_kpt:
-        try:
-            from gate.vision.gate_detector import build_gate_backend
-        except ImportError:
-            from auv_vision.gate.gate_detector import build_gate_backend
+        from gate.gate_detector import build_gate_backend
         backend = build_gate_backend()
         if backend is None:
             print("[PV] 门角点后端不可用(权重缺失)；检查 vision.model.task_models.gate.path")
@@ -121,10 +123,7 @@ def main():
     parse_kpt_mode = None
     if backend is not None:
         hub.register("gate", backend)         # 复用门任务后端(独立权重)
-        try:
-            from gate.vision.gate_frontend import parse_kpt_mode
-        except ImportError:
-            from auv_vision.gate.gate_frontend import parse_kpt_mode
+        from gate.gate_frontend import parse_kpt_mode
 
     pusher = None
     if a.stream:
@@ -147,6 +146,26 @@ def main():
             print("[PV] 窗口不可用(%s)，改用 --stream/--save" % e)
             window = False
 
+    # --fuse 是"显式要求对比融合" → force=True：无视 enable 默认值与 AUV_GATE_KPT_MEM，
+    # 一律构造出来对比（这正是它存在的意义：看开/关差别，不用改配置）
+    mem, fuse_stat = None, None
+    if a.fuse and a.gate_kpt:
+        from gate.kpt_memory import build_kpt_memory
+        km = S.vision.gate.kpt_mem
+        mem = build_kpt_memory(km, n_kpt=4, force=True)
+        if mem is None:
+            print("[PV] kpt_mem 构造失败（参数非法），无法对比融合")
+        else:
+            fuse_stat = {"raw": [], "fused": [], "prev": None}
+            print("[PV] 融合对比 ON（--fuse 强制开启，与 enable 默认值无关）："
+                  "实心=融合后，空心=原始；每 2s 打印抖动对比")
+            print("[PV] kpt_mem: alpha=%s beta=%s k_sigma=%s r_min_px=%s r_max_px=%s"
+                  " recall_conf=%s"
+                  % (km.get("alpha"), km.get("beta"), km.get("k_sigma"),
+                     km.get("r_min_px"), km.get("r_max_px"), km.get("recall_conf")))
+    dump_fh = open(a.dump, "w", encoding="utf-8") if a.dump else None
+    if dump_fh is not None:
+        print("[PV] 逐帧 dump → %s（每行一条 JSON：角点/置信度/框/mode/时间戳）" % a.dump)
     t0 = time.time()
     n = 0
     counts = {}
@@ -174,6 +193,35 @@ def main():
                     cv2.putText(img, "%s %.2f" % (d.kind, d.score),
                                 (d.x, max(14, d.y - 6)), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.6, col, 2)
+                if a.gate_kpt and d.kpts is not None and mem is not None:
+                  try:
+                    # 只对"选中的那个门"(角点最全)做融合，和 GateTask 口径一致
+                    best = max(dets, key=lambda x: float(np.sum(
+                        np.asarray(x.kpt_conf, float))) if x.kpt_conf is not None else -1)
+                    if d is best:
+                        fk, fc = mem.update(d.kpts, d.kpt_conf, time.monotonic() * 1000)
+                        for i in range(min(len(d.kpts), 4)):
+                            rx, ry = int(d.kpts[i][0]), int(d.kpts[i][1])
+                            cv2.circle(img, (rx, ry), 4, (160, 160, 160), 1)   # 原始=空心灰
+                            fx, fy = int(fk[i][0]), int(fk[i][1])
+                            cv2.circle(img, (fx, fy), 4, (60, 255, 60), -1)    # 融合=实心绿
+                        if fuse_stat is not None:
+                            if fuse_stat["prev"] is not None:
+                                pr, pf = fuse_stat["prev"]
+                                fuse_stat["raw"].append(
+                                    float(np.nanmedian(np.linalg.norm(
+                                        np.asarray(d.kpts[:4], float) - pr, axis=1))))
+                                fuse_stat["fused"].append(
+                                    float(np.nanmedian(np.linalg.norm(
+                                        np.asarray(fk[:4], float) - pf, axis=1))))
+                                for k in ("raw", "fused"):
+                                    if len(fuse_stat[k]) > 60:
+                                        fuse_stat[k].pop(0)
+                            fuse_stat["prev"] = (np.asarray(d.kpts[:4], float).copy(),
+                                                 np.asarray(fk[:4], float).copy())
+                  except Exception as _e:
+                    print("[PV] 融合异常 -> 关闭 --fuse（识别/显示不受影响）：%s" % _e)
+                    mem = None
                 if a.gate_kpt and d.kpts is not None:
                     quad = []
                     for i in range(min(len(d.kpts), len(KPT_NAMES))):
@@ -198,6 +246,27 @@ def main():
                         (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
             n += 1
+            if dump_fh is not None:
+                import json as _json
+                rec = {"t": round(time.time() - t0, 3), "frame": n,
+                       "n_det": len(dets), "fps": round(fps, 2), "dets": []}
+                for d in dets:
+                    item = {"kind": d.kind, "score": round(float(d.score), 4),
+                            "bbox": [int(d.x), int(d.y), int(d.w), int(d.h)]}
+                    if getattr(d, "kpts", None) is not None:
+                        item["kpts"] = [[round(float(x), 2), round(float(y), 2)]
+                                        for x, y in d.kpts]
+                        kc = d.kpt_conf if d.kpt_conf is not None else None
+                        item["kpt_conf"] = ([round(float(c), 4) for c in kc]
+                                            if kc is not None else None)
+                        if a.gate_kpt and parse_kpt_mode is not None:
+                            try:
+                                _m, _ids = parse_kpt_mode(d.kpts, d.kpt_conf)
+                                item["mode"], item["ids"] = str(_m), [int(i) for i in _ids]
+                            except Exception:
+                                pass
+                    rec["dets"].append(item)
+                dump_fh.write(_json.dumps(rec, ensure_ascii=False) + "\n")
             if pusher is not None:
                 ok, enc = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
                 if ok:
@@ -238,6 +307,15 @@ def main():
                                 print("         判定: mode=%s ids=%s" % (mode, list(ids)))
                             except Exception as e:
                                 print("         判定失败: %s" % e)
+                    if mem is not None and fuse_stat is not None and fuse_stat["raw"]:
+                        r = float(np.median(fuse_stat["raw"]))
+                        f = float(np.median(fuse_stat["fused"]))
+                        red = (1.0 - f / r) * 100.0 if r > 1e-6 else 0.0
+                        print("     [融合] 原始抖动 %.1f px → 融合后 %.1f px（降 %.0f%%）"
+                              " | 各点权重 %s | 半径 %s"
+                              % (r, f, red,
+                                 np.round(mem.weights, 2).tolist(),
+                                 np.round(mem.radius, 1).tolist()))
                 last_log = time.time()
             if a.duration and (time.time() - t0) >= a.duration:
                 break
@@ -249,6 +327,9 @@ def main():
         if window:
             cv2.destroyAllWindows()
         print("[PV] 结束 | 共 %d 帧 | 类别累计帧数: %s" % (n, counts))
+        if dump_fh is not None:
+            dump_fh.close()
+            print("[PV] dump 已保存: %s（%d 行，JSONL 逐帧可离线回看）" % (a.dump, n))
     return 0
 
 

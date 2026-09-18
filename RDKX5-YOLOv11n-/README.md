@@ -50,9 +50,9 @@ RDKX5-YOLOv11n-/
 │   ├── yolo11n-pose.pt        pose 预训练（官方 COCO，训练起点）
 │   └── yolo11n.onnx           最近一次 detect 导出（量化输入）
 ├── scripts/                   脚本按阶段分三区（详见 scripts/README.md）
-│   ├── 1_prepare/             训练前：extract_frames · calibrate_camera · prepare_frames · select_frames
+│   ├── 1_prepare/             训练前：extract_frames · calibrate_camera · prepare_frames(+noundistort) · select_frames · prepare_pose_dataset · resplit_dataset
 │   ├── 2_train/               训练：train_yolo11n.py（--task detect|pose）
-│   └── 3_export/              导出+量化：modify_ultralytics · export_onnx · prepare_calibration · quantize.sh
+│   └── 3_export/              导出+量化：modify_ultralytics · export_onnx · prepare_calibration · quantize.sh · test_decode_parity
 ├── docs/                      文档（教程/介绍/贡献指南）
 │   ├── tutorial_zh.md         完整部署教程（含踩坑记录）
 │   ├── README_ZH.md           中文项目介绍
@@ -95,7 +95,19 @@ python scripts/1_prepare/select_frames.py data/AUV_2/datay/origin \
     --quality-dir data/AUV_2/origin --keep 2000 --out-dir data/AUV_2/selected_2000
 
 # 5) 标注（RoboFlow）：检测框 或 门 4 角点（规范见下）
+
+# 6) 从 RoboFlow 拿回 pose 导出后，**必做两步**（否则 kpt_shape / 划分都会出问题）
+python scripts/1_prepare/prepare_pose_dataset.py data/AUV_4/PNP.yolov8 --dry-run   # 先看要改什么
+python scripts/1_prepare/prepare_pose_dataset.py data/AUV_4/PNP.yolov8             # → PNP.kpt4.yolov8
+python scripts/1_prepare/resplit_dataset.py data/AUV_4/PNP.kpt4.yolov8             # 序列感知划分
 ```
+
+> **⚠️ `weights/yolo11n.pt` 的 `gate` 类目前等于没有输出**：在 AUV_1 valid 集（152 张）上，
+> 即便把 `conf` 降到 0.05，`gate` 类最高置信度仍是 **0.00**，28 个门标注框在 IoU@0.5 与 @0.3 下命中均为 **0**；
+> 同一次评估 `blue_ball` 86/99、`red_ball` 76/92 都正常。所以**门检测不要用这个权重**，
+> 用 `weights/yolo11n-pose.pt`（AUV_4 PnP 门 4 角点模型，2026-09-17 训练，val Pose mAP50-95 0.952）。
+> 下一轮训练前请先核对训练数据集的 `names` 顺序、以及 `gate` 标签是否真的进了那一版——
+> 一个类别头完全没有输出，通常不是"数据不够"，而是标签或类别顺序的问题。
 
 ### 阶段 2 · 训练（`scripts/2_train/`）
 ```bash
@@ -124,8 +136,13 @@ python scripts/3_export/prepare_calibration.py \
 python scripts/3_export/modify_ultralytics.py --task pose
 python scripts/3_export/export_onnx.py --task pose            # → weights/yolo11n-pose.onnx
 python scripts/3_export/prepare_calibration.py \
-    --coco-path data/AUV_3/PNP.v1i.yolov8/train/images --num-images 300   # 默认写 calibration_data/
+    --coco-path data/AUV_4/PNP.kpt4.yolov8/train/images --num-images 200   # 默认写 calibration_data/
 ./scripts/3_export/quantize.sh configs/gate_kpt_config.yaml   # → output/gate_kpt_*.bin
+
+# 换过解码/导出方式后，用真图对拍"板端预处理+解码"与训练侧链路（需原版 head）
+cp <site-packages>/ultralytics/nn/modules/head.py.backup .../head.py
+python scripts/3_export/test_decode_parity.py --n 30
+python scripts/3_export/modify_ultralytics.py --task pose     # 跑完记得补回补丁版
 ```
 
 > **校准集分区（勿混用）**：`quantize.sh` 现在从配置里的 `cal_data_dir` 读校准目录。
@@ -149,8 +166,9 @@ python scripts/3_export/prepare_calibration.py \
 
 | 文件 | 角色 | 由谁产生 / 谁使用 |
 |---|---|---|
-| `weights/yolo11n.pt` | 检测模型（当前 AUV v3，3 类） | `2_train` 产生；供 `3_export` 导出、`select_frames` 筛图 |
-| `weights/yolo11n-pose.pt` | pose 模型（先官方预训练，后为 gate 训练产物） | 训练起点；`--task pose` 导出 |
+| `weights/yolo11n.pt` | 检测模型（当前 AUV v3，3 类）⚠️ `gate` 类无输出，门检测请用 pose 权重 | `2_train` 产生；供 `3_export` 导出、`select_frames` 筛图 |
+| `weights/yolo11n-pose.pt` | pose 模型（门 4 角点）；实际的门检测器。**当前 = AUV_4 版**（2026-09-17，val Pose mAP50-95 **0.952** / test **0.911**） | 训练起点（上一版备份见 `weights/yolo11n-pose.auv3.pt`）；`--task pose` 导出 |
+| `weights/yolo11n-pose.coco.pt` | pose 官方 COCO 预训练（17 点），从头训时用作起点 | 官方 asset |
 | `weights/yolo11n.onnx` | 检测 ONNX（6 输出） | `export_onnx.py` 产出；`quantize.sh` 输入 |
 | `weights/yolo11n-pose.onnx` | pose ONNX（9 输出） | 同上（`--task pose`） |
 | `output/*.bin` | 板端可加载模型 | `quantize.sh` 产出 |
@@ -177,6 +195,19 @@ pose 关键点语义（板端 `gate/gate_decode.py::decode_yolo11_kpt` 按此解
 > 早期 `modify_ultralytics.py` 多写了一个 `-0.5`，会让角点系统性偏移
 > **0.5 cell（stride 8/16/32 → 4/8/16 px）**，2026-09-12 已修正并与
 > ultralytics 原版逐点比对（可见角点差 **0.03 px**）。
+>
+> **2026-09-17 端到端复核**（`scripts/3_export/test_decode_parity.py`，用 AUV_4 真图 + 当前 bin 对应的 ONNX）：
+> * 预处理：板端 `common/preprocess.py` vs `prepare_frames.py` 链路 **逐像素最大差 0 灰阶**；
+> * 解码：板端 `decode_yolo11_kpt`(ONNX 输出) vs ultralytics 预测 **平均 0.00 px / 最大 0.00 px**（38 个角点）；
+> * 网格项：`+index` = 0.00 px，改成 `+index-0.5` = **22.63 px** 恒定偏差（stride 32 层）。
+>
+> ⚠️ 对拍时注意一个**有意的行为差异**：ultralytics 会把低置信角点写成 `(0,0)`，
+> 而板端 `decode_yolo11_kpt` **保留真实坐标、只把 `kpt_conf` 置 0**
+> （`gate/gate_frontend.py:parse_kpt_mode` 靠 conf 判可见性）。做数值对拍时必须把
+> 参考里 `(0,0)`/低置信的点剔掉，否则会算出几百 px 的假误差。
+>
+> 板端侧另有一组不依赖权重的合成张量单测（约定锁定 + 自动负向对照）：
+> `auv_vision/tests/test_gate_decode.py`、`tests/test_preprocess_rt.py`。
 
 **RoboFlow 关键点标注规范**：项目类型 `Keypoint Detection`；类别 1 个 `gate`；
 关键点 4 个，命名/顺序 **TL, TR, BR, BL**；允许只标可见角（未标角导出为 `v=0`，不参与 loss）；
@@ -184,18 +215,24 @@ pose 关键点语义（板端 `gate/gate_decode.py::decode_yolo11_kpt` 按此解
 
 > **导出格式：选 `YOLOv8 Pose` 即可，可直接用于 YOLO11-pose 训练，无需转换。**
 > RoboFlow 只提供 `YOLOv5 / YOLOv8 / YOLOv26` 的 Pose 导出，但 YOLOv8-pose 与
-> YOLO11-pose 的**数据集格式完全相同**（`kpt_shape: [4,3]` + 每行 `cls cx cy w h`
-> 后接 `x y v`×4），ultralytics 会在训练时按数据集的 `kpt_shape` 重建 Pose 头，
+> YOLO11-pose 的**数据集格式完全相同**（`kpt_shape` + 每行 `cls cx cy w h` 后接 `x y v`×点数），
+> ultralytics 会在训练时按数据集的 `kpt_shape` 重建 Pose 头，
 > 预训练权重里 17 点的关键点分支因形状不符被自动跳过（主干仍复用）。
-> 示例：`data/AUV_3/PNP.v1i.yolov8/`（`nc=1`、`names=['gate']`、`kpt_shape=[4,3]`）。
+
+> **⚠️ 但导出的 `data.yaml` 不能直接用**：RoboFlow 项目里删掉的关键点槽位**不会从导出里消失**，
+> 常见 `kpt_shape: [5, 3]` 而第 5 点在**全部**标签里都是 `0 0 0`；`flip_idx` 也总是恒等值。
+> 先过 `python scripts/1_prepare/prepare_pose_dataset.py <导出目录>` 归一（截槽位 + 校验
+> TL,TR,BR,BL 顺序 + 定 flip_idx），再 `resplit_dataset.py` 做序列感知划分。
+> 现成示例：`data/AUV_4/PNP.kpt4.yolov8/`（`nc=1`、`names=['gate']`、`kpt_shape=[4,3]`、
+> `flip_idx=[0,1,2,3]`、train/valid/test = 1043/131/130）。
 
 ---
 
 ## 注意事项
 
-- **head.py 状态**：`predict/val`（含 AMP 检查、`select_frames`）要**原版** head；导出 ONNX 要**补丁**。
+- **head.py 状态**：`训练 / predict / val`（含 `select_frames` 筛图）要**原版** head；导出 ONNX 要**补丁版**。
   `train_yolo11n.py` 自动 restore + 训练后重打补丁；手动切换：
-  `python scripts/3_export/modify_ultralytics.py --restore`。
+  `python scripts/3_export/modify_ultralytics.py --task detect|pose` 与 `--restore`（原版备份在 `head.py.backup`）。
 - **训练参数**：本机 8 个 dataloader worker 会与 CUDA fork 死锁 → 默认 `--workers 2`；显存小用 `--batch 4`。
 - **配置以板端为准**：`configs/vision.yaml`、`configs/front_camera.yaml`，以及预处理/解码链路
   （板端 `common/preprocess.py`、`common/detector.py`、`gate/gate_decode.py`）**均以板端工程为唯一权威**，
@@ -203,6 +240,13 @@ pose 关键点语义（板端 `gate/gate_decode.py::decode_yolo11_kpt` 按此解
   同步命令、差异核对与逐项一致性结论见 [configs/README.md](configs/README.md)。
 - **标定质量**：棋盘必须覆盖画面**四角与边缘**（早期标定仅中央 ~5% 采样，边缘畸变靠外推，
   水质浑浊时会放大模糊/噪声，表现为“去畸变不成功”）。
+- **解码是唯一的强耦合面**：改 `modify_ultralytics.py` 补丁、换导出方式、或动了板端
+  `decode_yolo11_kpt` 之后，**必须**用 `scripts/3_export/test_decode_parity.py` 拿真图对拍
+  （预处理逐像素 + 角点逐点 px + 网格项对照）。约定错一格不会报错，只会让 PnP 深度/姿态整体偏。
+- **PTQ 校准集必须与推理同分布**：用 `prepare_frames` 产出的 **640×640** 图
+  （`prepare_calibration.py` 对非方形图会 letterbox 补灰边，而板端是 squish，两者不一致）；
+  detect/pose 校准目录**分开**，混用会静默掉点。校准慢是正常的（200 张一轮约 55 分钟），
+  原因与"不要为此改 ONNX"见 [scripts/README.md](scripts/README.md) 的 3_export 小节。
 
 ---
 
