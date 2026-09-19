@@ -5,6 +5,7 @@
 遥测/限深用 `UartController.feed_telemetry()` 或假串口喂字节，不发真帧。
 """
 import os
+import time
 
 import numpy as np
 import pytest
@@ -431,3 +432,100 @@ def test_depth_guard_stale_action_block_up(monkeypatch):
     assert u.dof_out[2] == pytest.approx(0.8)
     u.close()
 
+
+
+# ---------------------------------------------------------------- 硬停（安全）
+# 2026-09-18 用户水里实测：转角脚本最后只发了一帧 neutral 就关串口 → 船一直转。
+# 根因：_ramp_step 是**字节级平滑**，neutral() 的 force 只绕过心跳节流、不绕过 ramp；
+#       而下位机没有"无帧超时停车"（comm.yaml heartbeat 注释）→ 锁在最后一个非零字节上。
+class _CountWrite(object):
+    def __init__(self, u):
+        self.u = u
+        self.n = 0
+        self._orig = u._write
+        u._write = self._hook
+
+    def _hook(self, frame, force=False):
+        self.n += 1
+        return self._orig(frame, force=force)
+
+
+def test_stop_hard_ramps_axes_back_to_neutral():
+    """stop_hard() 必须把四个轴字节**真的**带回中位（不是发一帧就算）。
+
+    注意：ramp 是"字节/秒"，需要**真实时间**流逝（`step_max=speed×dt`），
+    所以这里必须 sleep —— 紧凑循环里 dt≈0，轴根本不会动。
+    """
+    u = U.UartController(sim=True)
+    mid = S.comm.frame.axis_mid
+    for _ in range(5):
+        u.send_dof(0.0, 0.0, 0.0, 0.4, force=True)      # 持续右转
+        time.sleep(0.04)                                # 让 ramp 真的走一点
+    assert any(int(a) != mid for a in u._axes[:4]), \
+        "前提：此时轴应偏离中位（实际 %s）" % u._axes[:4]
+    u.stop_hard(verify=False)
+    assert all(int(a) == mid for a in u._axes[:4]), \
+        "stop_hard 后轴字节应全回中位，实际 %s" % u._axes[:4]
+    assert list(u._current_frame()[1:5]) == [mid] * 4, "实际发出的帧也必须是中性"
+    u.close()
+
+
+def test_close_hard_stops_the_boat_when_moving(monkeypatch):
+    """兜底：带着非零舵直接 close() → 关串口前自动硬停（否则船一直转）。
+
+    这里把 ramp 调快（5000 字节/秒）让用例快跑；"按 ramp 速率发够帧"本身由
+    上一个用例用真实 ramp 验证。
+    """
+    monkeypatch.setitem(S.comm.ramp, "speed_per_s", 5000.0)
+    u = U.UartController(sim=True)
+    mid = S.comm.frame.axis_mid
+    u.send_dof(0.0, 0.0, 0.0, -0.45, force=True)
+    time.sleep(0.02)                     # ramp 要真实时间才会动（首帧 dt≈0）
+    u.send_dof(0.0, 0.0, 0.0, -0.45, force=True)
+    assert any(int(a) != mid for a in u._axes[:4]), \
+        "前提：轴应偏离中位（实际 %s）" % u._axes[:4]
+    u.close()
+    assert all(int(a) == mid for a in u._axes[:4]), \
+        "close() 必须先把轴带回中位再关串口，实际 %s" % u._axes[:4]
+
+
+def test_close_sends_nothing_extra_when_already_neutral(monkeypatch):
+    """已在中位时 close() **一帧都不多发**（不影响既有行为/用例）。"""
+    monkeypatch.setitem(S.comm.ramp, "speed_per_s", 5000.0)
+    u = U.UartController(sim=True)
+    u.stop_hard(verify=False)
+    c = _CountWrite(u)
+    u.close()
+    assert c.n == 0, "已在中位时 close() 不该再发帧，实际发了 %d 帧" % c.n
+
+
+def test_stop_hard_reports_not_stopped_when_yaw_keeps_changing(monkeypatch):
+    """遥测 yaw 仍在变（船真的没停）→ stop_hard 返回 False，不做假确认。"""
+    monkeypatch.setitem(S.comm.ramp, "speed_per_s", 5000.0)
+    u = U.UartController(sim=True)
+    u.stop_hard(verify=False)
+
+    class _Drift(object):
+        def __init__(self):
+            self.yaw_deg = 0.0
+
+        def tick(self):
+            self.yaw_deg = (self.yaw_deg or 0.0) + 30.0     # 每帧涨 30° = 明显还在转
+
+    d = _Drift()
+    u.telemetry = d
+    orig = u.send_motion
+
+    def _send(name=None, force=False):
+        d.tick()
+        return orig(name=name, force=force)
+
+    u.send_motion = _send
+    assert u.stop_hard(verify=True, settle_s=0.1, max_extra=1) is False
+
+
+def test_uart_close_is_idempotent():
+    u = U.UartController(sim=True)
+    u.send_dof(0.0, 0.0, 0.0, 0.3, force=True)
+    u.close()
+    u.close()                                   # 第二次不应抛异常

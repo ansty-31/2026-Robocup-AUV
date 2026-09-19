@@ -52,6 +52,7 @@ parse() {
 # 1) 本地 vs manifest
 echo "==== [1/2] 本地 vs $MANIFEST ===="
 local_bad=0; n=0
+unver=0; unver_list=""
 while IFS=$'\t' read -r md5 f verified; do
   [ "$ONLY_VERIFIED" = "1" ] && [ "$verified" != "1" ] && continue
   n=$((n+1))
@@ -65,10 +66,23 @@ while IFS=$'\t' read -r md5 f verified; do
     echo "         现在=$now"
     local_bad=$((local_bad+1))
   fi
+  # ⚠️ 无方括号 = 清单里只记了"本地值"，**没有板端核对证据**。
+  #    这类条目比的是"本地 vs 本地"，不能当作"与板端一致"（2026-09-18 踩过：
+  #    板端把 kd 改成 0.05，本地报"逐字节一致"）。必须单独暴露出来。
+  if [ "$verified" != "1" ]; then
+    unver=$((unver+1)); unver_list="$unver_list $f"
+  fi
 done < <(parse)
 echo "  检查本地文件 $n 个，不一致 $local_bad 个"
 if [ "$local_bad" = "0" ]; then
-  echo "  ✓ 本地与\"最后同步到板端的状态\"逐字节一致"
+  if [ "$unver" = "0" ]; then
+    echo "  ✓ 本地与\"最后同步到板端的状态\"逐字节一致（全部 $n 个都有板端核对记录）"
+  else
+    echo "  ⚠️ 本地自身没被改过（$n 个中 $local_bad 个不一致），但其中 **$unver 个没有板端核对记录**："
+    for f in $unver_list; do echo "        · $f"; done
+    echo "     这些条目只记了本地值 → **不能当作与板端一致**；"
+    echo "     要确认板端，请跑：AUV_SSH=... bash tools/check_board_parity.sh --board（可加 --write 刷新）"
+  fi
 else
   echo "  ✗ 本地有改动/缺失（板端未必同步过）"
 fi

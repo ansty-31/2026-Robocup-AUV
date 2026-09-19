@@ -26,7 +26,12 @@ stream:
   #  PC 端接收/显示见 doc/前视USB相机低延迟推流方案.md）
   # 语义：谁打开相机谁顺带推流（UVC 只允许单进程取流），所以开录像/识别都能同时推，
   #       不会争抢相机；enable=false 时完全不生效。
-  enable: true             # 改成 false 即关闭
+  enable: false            # **2026-09-18 用户定：默认关掉推流**（调任务时一般直接在板端看画面）。
+                           #   现场实测：开着推流时 main.py 固定 ~143ms/帧(6.9fps)，而关掉推流的
+                           #   preview_detect 是 ~108ms/帧(9.3fps) → 推流+任务+日志合计约 35ms/帧。
+                           #   要临时开：`AUV_STREAM=1 python3 main.py --task gate`（env 优先于本开关，
+                           #   见 base/camera.py::get_stream_pusher）；manual.sh 走的就是 env 那条路。
+                           #   板端本地看画面：在板子的桌面上跑（有 DISPLAY 时 AUV_SHOW 默认为开）。
   host: 192.168.137.2      # 水面 PC 的 IP（接收脚本/ffplay 跑在这台机器上）
   port: 5000               # UDP 端口（PC: ffplay -f mjpeg "udp://@:5000"）
   stream_fps: 30           # 推流帧率上限（相机 720p MJPG 有 60fps 档，可按带宽调）

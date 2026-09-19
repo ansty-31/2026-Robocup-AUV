@@ -6,6 +6,7 @@
 每次发帧时顺带读空接收缓冲 → `self.telemetry.depth_m`；`comm.depth_guard` 据此**禁止上浮**
 （深度 ≤ min_depth_m 时把 heave 清零、heave 轴立刻回中），保证机身不冒出水面。
 """
+import math
 import os
 import sys
 import time
@@ -84,6 +85,14 @@ def dof_to_axis_bytes(surge=0.0, sway=0.0, heave=0.0, yaw=0.0,
         axes[ch["axis"]] = int(max(0, min(255, round(
             S.comm.frame.axis_mid + sign * val * S.comm.frame.axis_range))))
     return axes
+
+
+def _wrap180(deg):
+    """角度差归一化到 (-180, 180]（与 task1_2/turn_deg.py 的 wrap180 同语义）。"""
+    x = math.fmod(float(deg) + 180.0, 360.0)
+    if x <= 0:
+        x += 360.0
+    return x - 180.0
 
 
 def neutral_axis_bytes():
@@ -401,6 +410,73 @@ class UartController(object):
         self.last_motion = "stop"
         return self.send_motion(name="stop", force=True)
 
+    def stop_hard(self, dt=0.05, verify=True, settle_s=0.6, tol_deg=2.0,
+                  max_extra=3, quiet=False):
+        """**真正停住**：连发中性帧走完 ramp，再用遥测 yaw 验证它停下来了。
+
+        为什么不能只发一帧 `neutral()`：`_ramp_step` 对 yaw/surge/sway/heave 做字节级
+        平滑，`force=True` 只绕过心跳节流、**不绕过 ramp** → 单帧发出时轴字节还在半路
+        （yaw 84→128 只走到 ~95，仍是 −0.26 舵）。而下位机**没有无帧超时停车**，
+        随后的 `close()` 一关串口，船就锁在"最后一个还在转的字节"上（现场踩到）。
+
+        做法：① 连发中性帧，次数按 `ramp.speed_per_s` 与"最大偏离 127 字节"算够；
+              ② 静置 `settle_s` 期间继续发中性，同时用**遥测 yaw** 看有没有还在转；
+                 仍在转 → 再补 `max_extra` 轮（打印告警）。
+
+        Returns:
+            True  = 已回到中位（遥测确认停了；**无遥测时返回 True 但会打印"未验证"**）
+            False = 遥测显示仍在转（推进器/水流顶着，或下位机没跟上）
+        """
+        mid = int(S.comm.frame.axis_mid)
+        spd = float(S.comm.ramp.speed_per_s or 0.0)
+        # 最大偏离（±127 字节）走完需要多少帧，再留 2 帧余量
+        ticks = 2 if spd <= 0 else int(127.0 / max(1.0, spd * dt)) + 3
+        if not quiet:
+            off = [int(a) - mid for a in self._axes[:4]]
+            if any(off):
+                print("[UART] 硬停：轴偏离中位 %s（字节）→ 连发 %d 帧中性 + 遥测验证"
+                      % (off, ticks))
+        self._dof_target = (0.0, 0.0, 0.0, 0.0)
+        self.last_motion = "stop"
+        for _ in range(ticks):
+            self.send_motion(name="stop", force=True)
+            try:
+                time.sleep(dt)
+            except Exception:
+                pass
+        ok = all(int(a) == mid for a in self._axes[:4])
+        if not verify:
+            return ok
+        # ② 遥测 yaw 闭环验证：静置窗口内 yaw 不应再明显变化
+        y0 = getattr(self.telemetry, "yaw_deg", None)
+        if y0 is None:
+            if not quiet:
+                print("[UART] 硬停：回中位 %s；**无遥测 yaw，停住与否未验证**" % ok)
+            return ok
+        for k in range(max(1, int(max_extra))):
+            t_end = time.time() + max(0.1, settle_s)
+            y1 = y0
+            while time.time() < t_end:
+                self.send_motion(name="stop", force=True)
+                y = getattr(self.telemetry, "yaw_deg", None)
+                if y is not None:
+                    y1 = y
+                try:
+                    time.sleep(dt)
+                except Exception:
+                    pass
+            d = _wrap180((y1 or 0.0) - (y0 or 0.0))
+            if abs(d) <= float(tol_deg):
+                if not quiet:
+                    print("[UART] 硬停：✅ 已停住（%.1fs 内 yaw 变化 %+.2f° ≤ %.1f°）"
+                          % (settle_s, d, tol_deg))
+                return ok
+            if not quiet:
+                print("[UART] 硬停：⚠️ 仍在转（%.1fs 内 yaw 变化 %+.2f°）→ 补发中性帧"
+                      % (settle_s, d))
+            y0 = y1
+        return False
+
     # ---------------- 安全 ----------------
     def estop(self):
         if self._estop:
@@ -426,7 +502,18 @@ class UartController(object):
 
     # ---------------- 收尾 ----------------
     def close(self):
-        """关闭 DOF 轨迹日志与串口（可重复调用）。"""
+        """关闭 DOF 轨迹日志与串口（可重复调用）。
+
+        ⚠️ 兜底：**关串口前如果轴不在中位，先 `stop_hard()`** —— 下位机没有"无帧超时停车"，
+        带着半路的 ramp 字节关串口 = 船一直转/一直倒车（现场踩过）。已在中位时一帧都不多发
+        （所以既有行为与用例不受影响）。
+        """
+        mid = int(S.comm.frame.axis_mid)
+        if any(int(a) != mid for a in self._axes[:4]):
+            try:
+                self.stop_hard(quiet=False)
+            except Exception as e:
+                print("[UART] close 前硬停失败：%s" % e)
         if self._dof_log_f is not None:
             try:
                 self._dof_log_f.close()

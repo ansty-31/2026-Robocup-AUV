@@ -79,7 +79,7 @@ _D_LOITER = dict(enable=True, timeout_ms=3000, dx_max=0.14, dy_max=0.20)
 _D_Z = dict(cross=0.7, cross_confirm_frames=2, slow_max=1.3, near_lost_m=1.0,
             near_lost_ratio=0.60, z_stale_ms=1500)
 _D_SURGE = dict(fast=0.35, slow=0.15, creep=0.12, lost_backward=0.12,
-                reacquire=0.25, through=0.5)
+                reacquire=0.25, through=0.6)
 _D_COARSE = dict(far_ratio=0.18, near_ratio=0.55, align_x=0.33, align_y=0.29,
                  dash=True, dash_ratio=0.35, dx_max=0.08, dy_max=0.12,
                  confirm_frames=3, surge=0.25)
@@ -409,7 +409,7 @@ class GateTask(object):
         """本次冲刺速度：显式指定优先，否则 surge.through。"""
         if self._through_surge is not None:
             return float(self._through_surge)
-        return _num(_sub(self._G, "surge"), "through", 0.5)
+        return _num(_sub(self._G, "surge"), "through", 0.6)
 
     def _start_search(self):
         self.phase = PH_SEARCH
