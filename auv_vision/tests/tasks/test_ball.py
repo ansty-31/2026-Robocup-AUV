@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""tests/test_ball.py — task1_2.ball：BallTask 相位机（命中序列 / 搜索超时）。
+"""tests/tasks/test_ball.py — task1_2.ball：BallTask 相位机（命中序列 / 搜索超时）。
 
 用脚本化 hub 直接喂 Det，不加载模型、不开相机；now_ms 由测试推进（不真 sleep）。
 """
@@ -38,10 +38,15 @@ _DX_PX = 40
 
 
 def _growing_ball(n):
-    """前 3 帧无目标，之后边长 60→ 递增的球（面积占比升过 dash 阈值）。"""
+    """前 3 帧无目标，之后边长 60→ 递增的球，**封顶 240px**（面积占比最高约 0.19）。
+
+    封顶是为了"会咬"：不封顶时边长会涨到框比整幅画面还大（占比 >6，物理上不可能），
+    于是 `dash_ratio` 怎么调都能满足 —— 那个阈值等于没被测。240px@640×480 占比 0.19，
+    刚过 dash_ratio(0.15) 一点：既真实，又让阈值必须真的被读。
+    """
     if n < 3:
         return None
-    s = 60 + 8 * (n - 3)
+    s = min(60 + 8 * (n - 3), 240)
     cx = W // 2 + _DX_PX
     return Det("blue_ball", 0.9, cx - s // 2, H // 2 - s // 2, s, s)
 
@@ -84,7 +89,7 @@ def test_ball_growing_detection_hits(fake_uart):
     # DASH = 配置的最高速纯前进
     dash_surges = [d[0] for p, _a, d in rows if p == PH_DASH]
     assert dash_surges
-    assert set(dash_surges) == {S.comm.ball.surge_fast}
+    assert set(dash_surges) == {S.comm.motion.surge_fast}
     # 命中后明确回中位
     assert fake_uart.neutral_calls >= 1
 

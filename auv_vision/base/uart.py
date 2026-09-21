@@ -20,6 +20,12 @@ try:
 except ImportError:
     HAS_SERIAL = False
 
+# 限深保护的兜底阈值（m）：**必须与 cfg/comm.yaml 的 `depth_guard.min_depth_m` 同值**。
+#   它只在"配置缺键"时才生效，但那个方向很危险：原先写 0.3，而现场定死的是 0.55 →
+#   一旦配置读不到，机身可以从 0.55 一路浮到 0.30 —— **露出水面 = 本次比赛立即停止**。
+#   有不变量用例 `test_base.py::test_depth_guard_fallback_matches_cfg` 钉住两者相等。
+_D_MIN_DEPTH_M = 0.55
+
 
 def _now_ms():
     return int(time.time() * 1000)
@@ -302,7 +308,7 @@ class UartController(object):
             self.guard_blocks += 1
             self._log_guard(heave, now_ms, why="无新鲜深度遥测")
             return (surge, sway, 0.0, yaw)
-        limit = float(S.get("comm.depth_guard.min_depth_m", 0.3) or 0.0)
+        limit = float(S.get("comm.depth_guard.min_depth_m", _D_MIN_DEPTH_M) or 0.0)
         if self.telemetry.depth_m > limit:
             return (surge, sway, heave, yaw)
         self.guard_active = True

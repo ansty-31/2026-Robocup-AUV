@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""tools/analyze_heading.py — 从角点 dump 估「机身正不正」能不能测（航向估计的噪声底）。
+"""tools/analyze/analyze_heading.py — 从角点 dump 估「机身正不正」能不能测（航向估计的噪声底）。
 
 问题（用户 2026-09-18）：ALIGN 里 yaw 现在是用 `dxn` 驱动的 —— 那是**方位控制器**
 （把门拉到光轴上 = 机头指向门），**不是航向控制器**（机身与门法向平行）。所以"yaw 到底
@@ -12,7 +12,7 @@
     * 噪声 << 待修的角度（~10°）→ 可以加"航向 → yaw"通道；
     * 噪声同量级 → 测不准 → 老老实实以 sway 为主（并把估计打进日志继续观察）。
 
-用法：python3 tools/analyze_heading.py <dump.jsonl> [...]
+用法：python3 tools/analyze/analyze_heading.py <dump.jsonl> [...]
 """
 from __future__ import annotations
 
@@ -21,7 +21,8 @@ import os
 import statistics as st
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 工程根 = tools/<类>/x.py 往上**三**级（分类重整后本脚本深了一层）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import numpy as np                                              # noqa: E402
 import base.settings as S                                       # noqa: E402

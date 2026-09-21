@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""tools/check_kpt_decode.py — 门 keypoint 解码约定自检（离线，单图，不动相机/船）
+"""tools/check/check_kpt_decode.py — 门 keypoint 解码约定自检（离线，单图，不动相机/船）
 
 用途：把"角点乱飞"定性到底是 **模型** 还是 **解码约定**。
 同一张图跑一次模型，把同一个 cell 的原始 kpt 输出用几种候选公式解出来，
 画在同一张图上（不同颜色）并打印数值 —— 哪个公式把点钉在门框角上，就是对的。
 
     # 板端（有权重 + hbm_runtime）
-    python3 tools/check_kpt_decode.py --image log/frames/pv_000040.jpg --out /tmp/decode_check.jpg
+    python3 tools/check/check_kpt_decode.py --image log/frames/pv_000040.jpg --out /tmp/decode_check.jpg
 
 候选公式（anchor = 选择到的网格 cell 下标；stride = input_w / g）：
     V0 现在实现 : (raw)                    * stride
@@ -24,15 +24,15 @@ import sys
 
 import numpy as np
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-for p in (_ROOT, os.path.join(_ROOT, "tools")):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+# 工程根 = tools/check/x.py 往上**三**级（分类重整后本脚本深了一层）
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
 import base.settings as S                                       # noqa: E402
 from common.preprocess import ModelPreprocessor                 # noqa: E402
 from common.detector import bgr_to_packed_nv12_fast, bgr_to_packed_nv12  # noqa: E402
-from gate.vision.gate_decode import find_model_input, _KPT_PER_PT  # noqa: E402
+from gate.gate_decode import find_model_input, _KPT_PER_PT  # noqa: E402
 
 VARIANTS = ("V0", "V1", "V2", "V3", "V4")
 COLORS = {"V0": (0, 0, 255), "V1": (0, 255, 0), "V2": (255, 0, 0),
@@ -126,7 +126,7 @@ def main():
     print("图片 %dx%d | 权重 %s" % (w, h, os.path.basename(str(gc.path))))
 
     import hbm_runtime
-    from gate.vision.gate_decode import decode_yolo11_kpt
+    from gate.gate_decode import decode_yolo11_kpt
     model = hbm_runtime.HB_HBMRuntime(str(gc.path))
     key = find_model_input(model)
     pre = ModelPreprocessor(calib_path=S.vision.camera.front.calibration)

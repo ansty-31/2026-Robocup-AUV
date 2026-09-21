@@ -4,7 +4,7 @@
 
 系统采用上下位机分工：
 
-- `auv_vision/`：RDK X5 上位机，负责视觉识别、任务状态机、串口控制、轨迹记录与返回策略。
+- `auv_vision/`：RDK X5 上位机，负责视觉识别、任务状态机、串口控制、运动编排（撞球/过门/倒车/转向）。
 - `AUV/`：STM32F405 下位机，负责接收控制帧、读取 IMU/深度计、PID 控制和 PWM 输出。
 
 ## 系统架构
@@ -34,17 +34,19 @@ STM32F405 lower computer
 
 ```text
 2026-Robocup-AUV/
-├── auv_vision/              # RDK X5 上位机代码
-│   ├── main.py              # 任务调度与状态机入口
-│   ├── recorder.py          # 素材录制工具
-│   ├── base/                # settings / camera / uart
-│   ├── common/              # detector / PID / preprocess
-│   ├── task1_2/             # 撞球任务与记忆返回
-│   ├── gate/                # 过门任务，keypoint + PnP
-│   ├── cfg/                 # YAML 配置
-│   ├── models/              # RDK X5 模型文件
-│   ├── doc/                 # 算法说明
-│   └── tests/               # 无硬件测试
+├── auv_vision/              # RDK X5 上位机代码（工程根 = auv_vision/auv_vision/）
+│   ├── main.py              # 任务调度与状态机入口（ball / gate / all）
+│   ├── preview_detect.py    # 下水前视觉自检（--gate-kpt 看门框 + 4 角点）
+│   ├── manual.sh + manual/  # 手动模式：遥控桥 udp_server / 录像 recorder / 推流 stream
+│   ├── base/                # settings / camera / uart / telemetry(14B 遥测上行)
+│   ├── common/              # detector / PID / preprocess / turn_deg(按角度原地转)
+│   ├── task1_2/             # 撞球任务 + 编排脚本（倒车 / 左转 90° / 只跑过门）
+│   ├── gate/                # 过门任务，keypoint + PnP（含 heading_align 正航向）
+│   ├── tools/               # 部署/对齐 + 日志判读工具
+│   ├── cfg/                 # YAML 配置（vision / comm / front_camera）
+│   ├── models/              # RDK X5 模型文件（.bin）
+│   ├── doc/                 # 算法说明 + 实验待测 runbook
+│   └── tests/               # 无硬件测试（pytest，107 例）
 └── AUV/                     # STM32F405 下位机固件
     ├── AUV.ioc              # STM32CubeMX 工程
     ├── MDK-ARM/             # Keil MDK 工程
@@ -105,10 +107,12 @@ DOF 映射：
 
 ### STM32 -> RDK 遥测帧
 
-STM32 当前通过 USART2 回传深度、目标深度和三轴姿态角：
+STM32 当前通过 USART2 回传深度、目标深度和三轴姿态角（**共 14 字节**，
+解析在 `auv_vision/base/telemetry.py`）：
 
 ```text
-0xAA 0x55 0x0A depth_cm target_cm roll_cd pitch_cd yaw_cd checksum
+0xAA 0x55 <保留1B> depth_cm target_cm roll_cd pitch_cd yaw_cd checksum
+        └──────────── 5 × int16 小端 ────────────┘
 ```
 
 其中 payload 为小端 `int16`：
@@ -155,12 +159,17 @@ python3 main.py --task gate     # 过门任务
 python3 main.py --task all      # 按 comm.yaml 中 tasks.enabled 运行
 ```
 
-运行撞球 + 记忆返回：
+完整任务链（撞球 → 倒车返回 → 前进 2s → 左转 90° → 过门）：
 
 ```bash
 cd auv_vision/task1_2
-./run_ball_return.sh
+./run_ball_reverse.sh      # 8 步编排；AUV_GATE_AFTER=0 只做前 7 步
+./run_gate.sh              # 只跑过门（下水专测 gate）
 ```
+
+> 转向由 `common/turn_deg.py` 用下位机遥测 yaw **闭环**执行（转完硬停）；
+> 没有遥测时**直接拒转**（退出码 5），要开环盲转必须显式 `AUV_TURN_BLIND=1`。
+> 台架干跑：`AUV_SIM_MODE=1 ./run_ball_reverse.sh`（只打印不发串口）。
 
 ## STM32 下位机
 
@@ -225,44 +234,39 @@ depth_m = (pressure_01mbar - s_surface_pressure_01mbar) / 980.665f;
 - 目标丢失后执行搜索
 - 记录 DOF 轨迹供记忆返回使用
 
-### 记忆返回
+### 返回出发区
 
-路径：`auv_vision/task1_2/return_by_memory.py`
-
-通过反向回放已记录的 DOF 轨迹返回出发区，不依赖下视相机。
+`return_by_memory`（反向回放 DOF 轨迹）**已整体移除**：当前收尾是
+`task1_2/run_ball_reverse.sh` 的**定时直线倒车**（开环、不依赖视觉），随后前进 2s、
+按角度左转 90°（遥测闭环），再接 `main.py --task gate`。
 
 ### 过门任务
 
-路径：`auv_vision/gate/`
+路径：`auv_vision/gate/`（**扁平 v1.2，9 个文件**；速查见 `gate/过门-状态机与参数.md`）
 
 功能：
 
-- gate keypoint 四角检测
-- PnP 位姿估计
-- 距离对齐、进近、穿门相位机
-- 过门完成判定
+- gate keypoint 四角检测（YOLOv11 keypoint → `Det.kpts(4,2)`）
+- PnP 位姿估计（IPPE/SQPNP/P3P/ITERATIVE + 质量过滤），降级链 `full → p3p → width → coarse`
+- 相位机 `SEARCH → ALIGN(GOLDEN/HDG/CREEP/HOLD/REACQUIRE) → APPROACH → THROUGH`
+- **居中只有 sway 平移**（yaw 居中通道已删除）；**SEARCH 是左右平移扫视**（不旋转）
+- **ALIGN.HDG 离散正航向**：测→转→停稳→再测，让机身与门法向平行
+- 过门判定三条出口：`z.cross` 连续确认 / 近距丢门（z 新鲜或框占比）/ 门口超时兜底 `loiter.*`
 
 ## 测试
 
-无硬件测试位于 `auv_vision/tests/`。
+无硬件测试位于 `auv_vision/tests/`（**107 例，全部走 pytest**；旧的分文件脚本已删除，
+不要再单独 `python3 tests/test_xxx.py`）。
 
 ```bash
-cd auv_vision
-python3 tests/test_uart.py
-python3 tests/test_pid.py
-python3 tests/test_logic.py
-python3 tests/test_detector.py
-python3 tests/test_preprocess.py
-python3 tests/test_gate_geometry.py
-python3 tests/test_gate_flow.py
+cd auv_vision/auv_vision
+python3 -m pytest tests/ -q          # 全量（约 5 s）
 ```
 
-如果安装了 `pytest`：
-
-```bash
-cd auv_vision
-python3 -m pytest tests
-```
+现有模块：`test_gate` / `test_gate_dash`（档位仲裁·出口兜底·正航向·配置守卫）/
+`test_gate_decode` / `test_heading_align` / `test_turn_deg` / `test_ball` /
+`test_common` / `test_base`（串口帧·遥测限深·硬停）/ `test_preprocess_rt`。
+涉及真实识别的部分用 `cfg model.mode: mock` 的 `MockGateBackend` 闭环。
 
 ## 串口接线
 

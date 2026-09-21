@@ -233,7 +233,7 @@ R = cv2.Rodrigues(rvec)[0]
 | 3 角可见 | **p3p**：P3P + 上帧消歧 | 同上（角缺失侧误差大，进近后期慎用） |
 | 仅对向 2 角(TL,TR / BL,BR) | **width_range**：角距测距 | Z≈fx·W/|u_TR−u_TL|；瞄准点=两角中点；yaw 不可估 |
 | 仅 `gate` 框(角不足) | **coarse**：框中心对中（运动按"缺角仲裁"分档，非一律前进） | 无深度；前进仅限远距小框（见下） |
-| 无目标 | **search**：旋转搜索 | — |
+| 无目标 | **search**：左右平移扫视（2026-09-20 起**不旋转**） | — |
 
 主循环（对应 Bumblebee `gate_pose_estimator_node.detections_callback`）：
 ```
@@ -449,23 +449,23 @@ RANGE_ALIGN 内部按"前端 mode"分 4 个子状态（状态 = 档位，逐帧�
 
 - 门无朝向/对准要求：GOLDEN/APPROACH 里 yaw 修正可放宽（大死区/低速），核心 = 对准开口中心后直穿；
 - APPROACH：按 `Z=t.z` 分档前进 + 姿态保持（对准误差持续 PID）；`Z < Z_pass` → THROUGH；
-- **直冲出口（四条，任一成立即 THROUGH，忽略角丢失直行）**：
+- **直冲出口（三条，任一成立即 THROUGH，忽略角丢失直行）**：
   ① 位姿可信且 `Z ≤ z.cross` **连续 `cross_confirm_frames` 帧**（防单帧 PnP 错解直接冲出去）
      —— **实船已验证有效，勿动**；
-  ② 进近中已到近距（`Z ≤ z.near_lost_m`）后**整门丢失**——实船上最常见的过门路径；
-  ③ **width 档**（只对向 2 角）：`|dx|≤width.dx_max`、`|dy|≤width.dy_max` 连续
-     `width.confirm_frames` 帧 **且** `Z ≤ width.z_max` → 直冲，速度 `width.surge`；
-  ④ **coarse 档**（角点不足、整框可信）：安全带宽内连续确认 **且** 框占比 ≥ `coarse.dash_ratio`
-     → 直冲，速度 `coarse.surge`。
-  ③④ 的定位（2026-09-17 定）：**低帧率(实测 8~11fps)+机身抖动下，对准好就直接冲**，
-  姿态保持交给下位机 PID，不叠加多帧高精度视觉闭环（约束越多越容易被抖动打断）；
-  防撞杆三件套 = 安全带(`dx_max/dy_max`) + 较低冲刺速度(`surge`) + 未对准时静止。
-  开关 `width.dash` / `coarse.dash`（**false = 退回旧行为**：width 近距永久 HOLD、coarse 一看框大就退）。
-- **coarse 仲裁原则**：**只有未对准才 HOLD/后退**；对准就 creep 靠近或直冲
+  ② **近距丢门判过门**（ALIGN **与** APPROACH 都生效）：`Z ≤ z.near_lost_m`（**要求 z 新鲜**，
+     `z.z_stale_ms`）**或** 末次框占比 ≥ `z.near_lost_ratio`（两条判据 OR）——实船最常见的过门路径；
+  ③ **在门口超时兜底**（`loiter.*`，2026-09-18 新增）：框占比 ≥ `near_lost_ratio` 且
+     `|dx|≤dx_max`、`|dy|≤dy_max` 连续超过 `loiter.timeout_ms` → 自己拍板直冲。
+  ⚠️ **原「③ width 档对准就冲 / ④ coarse 档对准就冲」已整体删除**（2026-09-18 用户定：
+  不再需要 `width.dash`/`coarse.dash`/`dash_ratio`/`dx_max`/`dy_max`/`surge` 这一整套）。
+  现场依据：门在占比 0.97（≈0.5m）时**整框仍检测得到** → 走不到"丢门"分支 →
+  船贴着门口以 creep(0.20) 爬了 **18.7 秒**才收场；补上出口③正是为了填这段缺失的决策出口。
+- **coarse 仲裁原则**：**只有未对准才 HOLD/后退**；对准就 creep 靠近
   （实测"来回退"的主因是"一看框大就退"，与是否对准无关）。
-- THROUGH 内再按 `through.confirm_frames` **帧数**确认 → 计数 +1（达 `pass_target` → DONE(pass)）。
-  注意：**帧数 ≠ 距离**，低帧率下 8 帧≈0.7~1.0s、30fps 下≈0.27s；达 `pass_target` 后立即回中性，
-  没有额外前冲余量（这条实测有效，暂不改）。THROUGH 阶段**只前进、不做横向微调**；
+- THROUGH 内按 `through.confirm_ms` **时长**确认（2026-09-18 由帧数改为时长：帧数 ≠ 距离，
+  低帧率下 8 帧≈0.7~1.0s 会"冲不出去"；现场实测 900→**2500ms**）→ 计数 +1
+  （达 `pass_target` → DONE(pass)）；`confirm_ms<=0` 才退回帧数语义。
+  达 `pass_target` 后立即回中性，没有额外前冲余量。THROUGH 阶段**只前进、不做横向微调**；
   `body_center_offset` **当前未参与运算**（读了不用，接进对准基准=改逻辑，需先标定）。
 - **位姿跳变保护**：帧间 `Z` 突变 > `pnp.max_z_jump_m` 的帧判为错解弃帧（退化 coarse），
   防平面 PnP 偶发解直接触发 THROUGH 满速冲门；同时把上帧位姿用于所有模式的消歧（不只在 p3p）；
@@ -486,14 +486,13 @@ comm.gate:     timeout_ms / pass_target
                                                           # px_x/px_y=像素档(width/coarse)
                z{align_max, fast_max, slow_max, cross, cross_confirm_frames, near_lost_m}
                surge{fast, slow, creep, lost_backward, reacquire, through}
-               coarse{far_ratio, near_ratio, align_x, align_y,
-                      dash, dash_ratio, dx_max, dy_max, confirm_frames, surge}
-               width{dash, dx_max, dy_max, confirm_frames, z_max, surge}
-                                                          # width/coarse 直冲出口(③④)
+               coarse{far_ratio, near_ratio, align_x, align_y}
+               width{z_max}
+                                                          # width/coarse 直冲出口已删除(2026-09-18)
                hold{max_frames}
                reacquire{max_ms, max_times, stop_ratio, reset_after_ms}
-               through{confirm_frames}
-               search{spin_s, pause_s, yaw} / pose_hold_frames
+               through{confirm_ms, confirm_frames}
+               search{sweep_s, pause_s, sway} / pose_hold_frames
 vision.gate:   geometry(§3)
                keypoint{conf_thr}
                kpt_mem{enable, alpha, beta, valid_ms, k_sigma, r_min_px, r_max_px,

@@ -1,0 +1,80 @@
+
+
+#
+# 2026-09-21：tests/ 与 tools/ 分类重整 → 路径已更新；**搬过目录的条目去掉了方括号**（板端那边还是旧路径，等 --board 核对后再补）
+
+
+[ 92040cf1d16bcd677e577c7f8865bb09  README.md ]
+[ 5cd1d8b7a7777a4dd23414ed50790c53  base/__init__.py ]
+[ 167b72c7a524b5b3d5327284ad0598c8  base/camera.py ]
+8eb38fd4d986fab7d8ee0f6243ac4a72  base/settings.py
+[ 9135e1ea4c935a225d0116b1ad0247f6  base/telemetry.py ]
+[ 27edbd14e6aa1a18ddcb5e8e237689b5  base/uart.py ]
+[ 37fd37b64b620381b47b81cb8508c640  cfg/comm.yaml ]
+[ 1600c1a2838e75a42a7ffc3089d74d57  cfg/front_camera.yaml ]
+[ 8f566eaefdceaedeb1461e83f96a3c9a  cfg/vision.yaml ]
+[ b2983b6a93e934849e78f4f8e7374f24  common/PID.py ]
+[ b632fee694cd4166265b1aeda927dbac  common/__init__.py ]
+31fb75e14217adf60d1b378283967604  common/cfgnode.py
+[ 58dfcca5f25424d20e117a4b5d1bac18  common/detector.py ]
+[ 7eb0dae93bd4d927c0e7a800b447cdd7  common/preprocess.py ]
+49728f21de18b8b9e252d4e8a1148783  common/turn_deg.py
+[ 854c8b9834af6773fc393244233c6f5f  doc/前视USB相机低延迟推流方案.md ]
+[ 838be89a862679ae213f210a3f620d94  doc/实验待测-runbook.md ]
+a350414327adddee75563a395cb84424  doc/待研究-缺角位姿先验（三维信息复用）.md
+[ 2afddb0c3be5075927a6d97a8ee91a65  doc/算法说明-gate-PnP移植方案.md ]
+[ e14fc41ec0e2bc32c40ac1280ed660dd  doc/算法说明-gate-角点逐点融合滤波.md ]
+[ 162fa97a56f432efb331c0c7423c2f7f  doc/算法说明.md ]
+[ d875126922153e11c75cd10db0f96ba1  gate/__init__.py ]
+[ 9a39344f8b57b6124362015a99708c54  gate/gate_decode.py ]
+[ 1cf0298e90f4092ea9e1a124f468fd0b  gate/gate_detector.py ]
+[ 5fde068d71cf396c5956f12c6a59437a  gate/gate_frontend.py ]
+[ 11185673dc5501d3ff0fd66dd313840c  gate/gate_task.py ]
+[ 6a525d1d9d51270c4232b04db9b727e8  gate/geometry.py ]
+7d1912de082f38c50d79af0c13706275  gate/heading_align.py
+[ f8cee57d64ab6fba36906d56ead59426  gate/kpt_memory.py ]
+[ b787c80cab7014c5a61d0d7169020337  gate/mock.py ]
+[ 6ca58ba8e6121f25852f308ea1e63ea9  gate/过门-状态机与参数.md ]
+[ ac73e1b18f67f591612290ddf7fac6aa  main.py ]
+[ 87fddfa544fc2fcbd040b7817a5f7fca  manual.sh ]
+[ 34e4bdc7cebcd525742ef328ba32591a  manual/__init__.py ]
+[ 18c82011f1202c0622b3a5e3a8caae1d  manual/recorder.py ]
+[ 24542619f1225adceb3aca901ce8583b  manual/stream.py ]
+[ f94fe059e4e093a726eb8909779c4f83  manual/udp_server.py ]
+[ 3012d8ebcf6bacec695c3e501b82e70b  models/auv_multi.bin ]
+[ d38b803e5823b35696f5711ecd1c30b4  models/gate_kpt_bayese_640x640_nv12.bin ]
+[ a28156ba2949892b75f88d6e694380a6  models/yolo11n_detect_bayese_640x640_nv12.bin ]
+[ 659a0340c2b3edaa04bcc0cd9d2cf320  preview_detect.py ]
+[ 57b1a7d3b2f227d198baea7064409b64  task1_2/__init__.py ]
+[ e6c984e2966e6809160ac5d6b4ae3b71  task1_2/ball.py ]
+[ bb34841e98560721c2472ba7738abb56  task1_2/run_ball_reverse.sh ]
+[ 444e880ed96a38f108639f8a4d9db792  task1_2/run_gate.sh ]
+b7f47a1e4cecb7972ab1f5d74853e2a6  tests/README.md
+4c068b6611ad27e9423cc96634ec84c1  tests/__init__.py
+7003c776590ae08a55999b1d8eca00f7  tests/_bite_probe.py
+[ 0a92cfedf4247cdd8d50a650ec1bab54  tests/conftest.py ]
+05b85d7317c05bbde0c3930c3c9ef1df  tests/platform/__init__.py
+827888bb0825f6d334894447054c611d  tests/platform/test_base.py
+d2ff9acf9060cf09f6cedb0552ce0691  tests/platform/test_common.py
+c6cd59b32d4dda8935b7acfb2a1396fa  tests/tasks/__init__.py
+fbdf6ac226b8880d3a9a797876d67830  tests/tasks/test_ball.py
+80d641ddb917222f90ed979301cddc0e  tests/tasks/test_gate_flow.py
+896da81ac7393bf52017e4ea5660f023  tests/tasks/test_gate_vision.py
+f4e89f01de0c5fab0a8d15542c9ed3bc  tests/tasks/test_motion.py
+f9956fd663105cf940bd5d793f6c11f7  tests/tooling/__init__.py
+9acc416fccfcb1a58f7530f25ffac1bb  tests/tooling/test_pnp_calib.py
+[ 0e78d8095c39e54701965adde034fc9e  tools/README.md ]
+a5756436e46199292608db3824a030b3  tools/__init__.py
+17558c18e49a677a743fc747244bfc87  tools/analyze/__init__.py
+f9177ea7cddb8af59bd2709e6339416e  tools/analyze/analyze_heading.py
+8cac778700d28b2a2656d1fccb19aa0a  tools/analyze/analyze_kpt_dump.py
+e6526d43391b9ca956d7a3209e7fa7bf  tools/analyze/analyze_pnp_center.py
+a818b2b269294250109dca5604dc19a9  tools/analyze/analyze_task_log.py
+a75b0f625a574e52cecfbe0a9f0a769b  tools/analyze/feature_coverage.py
+4744a7b352151c4017e48aeda85bcd96  tools/analyze/pnp_calib.py
+aee4e5cd413024139261a227e58c08da  tools/check/__init__.py
+5ad49e51a44d3f3f8fc39e1d9a84e3c4  tools/check/check_gate_pose.py
+01cda87fbcbdda49f72428dc6c125596  tools/check/check_kpt_decode.py
+bae354d7a2e6f23060a93f42e39e82d4  tools/check/check_pipeline_identity.py
+dccb6a3c23ca6bc07ad1d8cea9f0aa07  tools/deploy/__init__.py
+31cf169f0703a5d2f86319e21e009e50  tools/deploy/archive_baks.sh

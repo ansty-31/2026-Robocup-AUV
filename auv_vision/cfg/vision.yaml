@@ -13,7 +13,7 @@ camera:
     height: 720
     fps: 30
     calibration: /home/sunrise/AUV/cfg/front_camera.yaml   # 去畸变标定 yaml（null=跳过）
-  down:                  # 下视(IMX415 MIPI)：保留——录素材/未来任务用；返回出发区已改记忆返回，策略不再用下视
+  down:                  # 下视(IMX415 MIPI)：保留（录素材/未来任务用）；**当前策略不使用下视**
     type: sim            # sim | mipi
     device: /dev/video1
     width: 640
@@ -22,16 +22,10 @@ camera:
     calibration: null
 
 stream:
-  # 前视画面推流（零转码 MJPEG；推流端 manual/stream.py + base/camera.py，
-  #  PC 端接收/显示见 doc/前视USB相机低延迟推流方案.md）
-  # 语义：谁打开相机谁顺带推流（UVC 只允许单进程取流），所以开录像/识别都能同时推，
-  #       不会争抢相机；enable=false 时完全不生效。
-  enable: false            # **2026-09-18 用户定：默认关掉推流**（调任务时一般直接在板端看画面）。
-                           #   现场实测：开着推流时 main.py 固定 ~143ms/帧(6.9fps)，而关掉推流的
-                           #   preview_detect 是 ~108ms/帧(9.3fps) → 推流+任务+日志合计约 35ms/帧。
-                           #   要临时开：`AUV_STREAM=1 python3 main.py --task gate`（env 优先于本开关，
-                           #   见 base/camera.py::get_stream_pusher）；manual.sh 走的就是 env 那条路。
-                           #   板端本地看画面：在板子的桌面上跑（有 DISPLAY 时 AUV_SHOW 默认为开）。
+  # 前视画面推流（零转码 MJPEG；推流端 manual/stream.py + base/camera.py）。
+  # 语义：**谁打开相机谁顺带推流**（UVC 只允许单进程取流）→ 开录像/识别都能同时推、不争相机。
+  # 实测代价与方案见 doc/前视USB相机低延迟推流方案.md；临时开：AUV_STREAM=1（env 优先于本开关）。
+  enable: false            # 默认关（调任务时一般在板端直接看画面）
   host: 192.168.137.2      # 水面 PC 的 IP（接收脚本/ffplay 跑在这台机器上）
   port: 5000               # UDP 端口（PC: ffplay -f mjpeg "udp://@:5000"）
   stream_fps: 30           # 推流帧率上限（相机 720p MJPG 有 60fps 档，可按带宽调）
@@ -54,8 +48,7 @@ model:
   mode: hbm_runtime               # mock | hbm_runtime | onnx（mock=虚拟测试）
   format: rdk_x5_bin       # RDK X5 模型必须是 X5 OE 工具链(hb_mapper makertbin)产出的 .bin
                            # 注意：.hbm 是车载 J5/J6/S100(Nash) 格式，X5(Bayes-e) 无法加载！
-  # ===== 双权重（ball 与 gate 分离）=====
-  # 权重① ball：沿用单模型多类别 .bin（model.path 下）
+  # ===== 双权重（ball 与 gate 分离，各自独立）=====
   path: /home/sunrise/AUV/models/yolo11n_detect_bayese_640x640_nv12.bin
   strict_x5_bin: true      # true: 拒绝 .hbm 后缀并提示正确编译链路
   input_size: 640          # 模型方形输入
@@ -64,9 +57,8 @@ model:
   score_threshold: 0.5
   nms_threshold: 0.45
   labels: [blue_ball, gate, red_ball]   # 类别顺序必须与训练/导出一致（决定解码类别）
-  # 权重② gate keypoint（占位）：导出 .bin 后填入下方 task_models.gate.path，
-  # 与权重①同时配置、互不影响（ball 走 model.path，gate 走 task_models.gate）。
-  # path 为空 → gate 用 mock 联调/或跳过（取决于 model.mode）
+  # 权重② gate keypoint：ball 走 model.path、gate 走 task_models.gate，互不影响。
+  # path 为空 → gate 用 mock 联调 / 或跳过（取决于 model.mode）
   task_models:
     gate: {path: /home/sunrise/AUV/models/gate_kpt_bayese_640x640_nv12.bin,
            kind: keypoint, labels: [gate],
@@ -93,64 +85,34 @@ debug:                     # 运行监测（仅本工程调试用）
 gate:                         # 过门（§3 几何 / keypoint / PnP 参数）
   geometry: {frame_w: 0.70, frame_h: 0.50, bar_width: 0.05,
              sym_bars: true, body_center_offset: 0.0}
-             # frame_w/frame_h: 门框**外轮廓**尺寸(m)，直接决定 PnP 深度标尺。
-             #   ⚠️ 需实测确认"70×50cm"是外缘还是开孔内缘（管径 5cm 时两者差 ~12%
-             #      深度 → 所有米制阈值(z.cross/near_lost_m/slow_max)一起平移）
-             # body_center_offset: 相机—机身安装偏置(m)。**当前只读入、不参与运算**：
-             #   接进 sway/heave 目标等于改对准基准(=改逻辑)，需先实测标定；
-             #   未标定前保持 0.0，对准基准 = 相机光轴。
-             # bar_width/sym_bars: 未参与运算（keypoint 只标外轮廓四角，留作记录）
+             # frame_w/frame_h：门框**外轮廓**尺寸(m)，直接决定 PnP 深度标尺。
+             #   ⚠️ 待实测确认"70×50cm"是外缘还是开孔内缘（管径 5cm 差 ~12% 深度，
+             #      会让所有米制阈值一起平移）→ 卷尺量完按 doc/算法说明-gate-PnP移植方案.md 回填。
+             # body_center_offset：相机—机身安装偏置(m)，**只读入、不参与运算**（未标定）。
+             # bar_width/sym_bars：未参与运算（keypoint 只标外轮廓四角，留作记录）。
   keypoint: {conf_thr: 0.7, vis_thr: 0.5}
-      # ⚠️ **2026-09-18 用户定：以板端现场值为准写回本地**（曾两次因"本地整份覆盖板端"
-      #    把现场值冲掉；现在本地=板端，部署不再回退）。
-      # conf_thr: **任务侧**角点阈值——判 mode / 选门 / 计数用它（gate_task）。
-      # vis_thr : **解码期**硬门限——低于它的角点 conf 在解码阶段就被清 0，
-      #           下游（含预览画面）再也看不到；`gate_decode.GateKeypointBackend`
-      #           → `decode_yolo11_kpt(vis_thr=...)` 真机后端也用它。
-      #   null → 沿用 conf_thr（= 历史行为：一个值同时管"解码"和"模式判定"）
-      #   数值 → 两者解耦（现用：解码 0.5 宽松、模式 0.7 严）
-      # 取值依据（2026-09-18 实测，tools/analyze_kpt_dump.py）：≥3 角可用帧占比
-      #   kpt_s1_full：0.95→23% / 0.8→87% / **0.7→94%**；再往下收益很小、鬼点风险上升
-      # 预览工具 `preview_detect.py --gate-kpt` 固定按 vis_thr=0.0 构造后端
-      # （显示模型原始置信度），因此不受这里影响 → 可直接用它挑阈值。
+      # ⚠️ 以**板端现场值**为准写回本地（曾两次因"本地整份覆盖板端"把现场值冲掉）。
+      # conf_thr：**任务侧**阈值——判 mode / 选门 / 计数（gate_task）。⚠️ 别改回 0.5（鬼点/倒影会被当真角点）。
+      # vis_thr ：**解码期**硬门限——低于它的角点在解码阶段就被清 0，下游（含预览）看不到。
+      #   null = 沿用 conf_thr（历史行为）；数值 = 两者解耦（现用：解码 0.5 宽松、模式 0.7 严）。
+      # 阈值实测依据见 gate/过门-状态机与参数.md §9.2；挑阈值用
+      #   `preview_detect.py --gate-kpt`（它按 vis_thr=0.0 显示模型原始置信度，不受这里影响）。
   kpt_mem: {enable: false, alpha: 0.4, beta: 0.1, valid_ms: 800,
             k_sigma: 3.0, r_min_px: 10.0, r_max_px: 80.0,
             sigma_init_px: 8.0, sigma_lambda: 0.15, sigma_floor_px: 0.5,
             w_min: 0.0, conf_floor: 0.05, recall_conf: 0.45, conf_decay: 0.35,
             max_missing_frames: 5, min_frames: 2}
-            # 门角点"逐点软融合"——**可选功能；2026-09-18 用户定：真关掉（enable: false）**。
-            #   板端曾因 `enable: flase`（拼写错）被 bool('flase')=True 而**实际开着**；
-            #   这里已按用户决定写 false，且与板端一致。行为等价于没集成这个功能。
-            # 开关优先级：环境变量 AUV_GATE_KPT_MEM > 这里 enable > 兜底 false
-            #   AUV_GATE_KPT_MEM=0 python3 main.py --task gate   # 临时关闭，不改配置
-            #   AUV_GATE_KPT_MEM=1 python3 main.py --task gate   # 强制开启（压过 enable: false）
-            # enable=false → 角点单帧直用，与没集成这个功能时逐字节同行为
-            # ⚠️ recall_conf 这里用 0.45（代码内默认是 0.55）——0.55 > keypoint.conf_thr(**当时 0.5**；现 0.7)
-            #    会让"回忆点"被 mode 判成真实可见（见下面那条），所以按 < conf_thr 取值。
-            # 行为（标注与实测见 doc/算法说明-gate-角点逐点融合滤波.md）：
-            #   置信度加权 ：每帧按 w = conf_i × w_geo 融合, w_geo=1/(1+(d/R)²)
-            #                → 一帧鬼点(w≈0)几乎不影响融合, 但**该点仍有效**、状态不丢
-            #   半径来自历史：R = clip(k_sigma × σ, r_min_px, r_max_px),
-            #                σ 是该点残差分布的慢跟踪(sigma_lambda) → 点安静则半径小、
-            #                快速逼近则自动放大、世界真变了也能自愈跟上
-            #   α-β 平均   ：alpha=融合增益, beta=匀速补偿(稳态滞后≈0, 不拖速度)
-            #   短消失回忆 ：没打到但近期见过 → 用融合状态外推, conf 保持 recall_conf
-            #                **必须 < keypoint.conf_thr**，否则"回忆点"会被 mode 判定
-            #                当成真实可见 → 拿外推点解 PnP 必失败（实测 coarse/无位姿）
-            #   长丢失衰减 ：超 max_missing_frames / valid_ms → conf 按 conf_decay 衰减,
-            #                自然低于 keypoint.conf_thr 后由原判定逻辑降级(不瞎编)
-            #   w_min>0    ：把权重低于它的帧彻底忽略(默认 0 = 纯软融合, 不硬关)
+            # 门角点"逐点软融合"——**可选功能，默认关**（enable: false → 角点单帧直用，
+            #   等价于没集成这个功能）。开关优先级：AUV_GATE_KPT_MEM > 这里 enable > 兜底 false。
+            # ⚠️ 板端曾因 `enable: flase`（拼写错）被 bool('flase')=True 而**实际一直开着**
+            #    → 现在用 cfgnode.flag() 按字符串语义解析，开关本身也要核对。
+            # ⚠️ recall_conf(0.45) **必须 < keypoint.conf_thr**，否则"回忆点"会被 mode 判成
+            #    真实可见 → 拿外推点解 PnP 必失败。
+            # 算法（置信度加权 / 历史分布定半径 / α-β 平均 / 短消失回忆 / 长丢失衰减）与
+            # 实测见 doc/算法说明-gate-角点逐点融合滤波.md；调参影响见 过门-状态机与参数.md §4.2。
   pnp: {reproj_px: 20.0, z_min: 0.2, z_max: 15.0, refine: true,
         max_z_jump_m: 0.8}       # 帧间 z 突变>该值视为错解弃帧(防满速冲门)
-  # reproj_px: 候选位姿的重投影 RMS 上限(px)。**2026-09-18 实测放宽 8→16→20（板端已生效）**：
-  #   拿真实录制角点离线复算（tools/analyze_kpt_dump.py 同法）：
-  #     kpt_v5    候选 RMS p50=12.0~12.6 p90=16.2~19.4 px → 8px 门槛下被拒八成以上
-  #     kpt_s1_full                        p50=10.6 p90=13.2 px → 被拒 73%
-  #   可用率：8px→12% / 12px→43% / 16px→79~90% / **20px→89~99%** / 25px→93%
-  #   取 20 而不取 25：候选 RMS 的 p90 就在 16~19px，20 刚好收下"正常抖动"，
-  #   25 会开始收下真正的错解（判据是 RMS，不再区分"轻微偏差"和"错配"）
-  #   位姿被拒 → gate_task 强制退化 coarse → mode 逐帧 full↔coarse → 米制/像素两套 PID
-  #   交替拿到一半帧 → 居中永远收敛不了（现象：一直 HOLD、到中心就调不动）。
-  #   ⚠️ 它的根因是"模型四角的固有残差"（≈10~18px），可能来自标注口径与门实际外形尺寸
-  #      （0.70×0.50 是外缘还是开口？）→ **卷尺实测门框尺寸后，这里的值应回调**。
-  #   安全网仍在：pnp.max_z_jump_m 弃帧 + 上帧位姿消歧，所以放宽它不等于放任错解。
+  # reproj_px：候选位姿重投影 RMS 上限(px)。**实测 8px 会拒掉约 88% 候选位姿**
+  #   （模型四角固有残差 ≈10~18px），现场放宽到 20；candidate 可用率与选值理由见
+  #   gate/过门-状态机与参数.md §9.2。⚠️ 位姿被拒 → 强制退化 coarse → 居中收敛不了。
+  #   安全网：pnp.max_z_jump_m 弃帧 + 上帧位姿消歧（放宽它不等于放任错解）。

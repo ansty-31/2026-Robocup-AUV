@@ -1,9 +1,9 @@
 #!/bin/bash
-# tools/deploy_to_board.sh — 按 tools/board_parity.md5 **批量**增量同步到板端 + 板端自检
+# tools/deploy/deploy_to_board.sh — 按 tools/deploy/board_parity.md5 **批量**增量同步到板端 + 板端自检
 #
-#   bash tools/deploy_to_board.sh              # 全流程（同步+删除+编译+pytest+终检）
-#   bash tools/deploy_to_board.sh --no-test    # 跳过板端 pytest（最快，秒级）
-#   bash tools/deploy_to_board.sh --dry-run    # 只报告将上传/删除哪些文件
+#   bash tools/deploy/deploy_to_board.sh              # 全流程（同步+删除+编译+pytest+终检）
+#   bash tools/deploy/deploy_to_board.sh --no-test    # 跳过板端 pytest（最快，秒级）
+#   bash tools/deploy/deploy_to_board.sh --dry-run    # 只报告将上传/删除哪些文件
 #
 # 退出码：0 = 同步完成且板端自检通过；1 = 同步完成但**板端 pytest 未全绿**（末尾 ⚠️ 会说明）。
 #   ⚠️ 板端"多出来的旧文件"（本地已删/改名的用例等）不会自动消失，全量 pytest 会因
@@ -21,7 +21,7 @@
 #     这里在收尾步骤顺手对板端 *.sh 统一 chmod +x，杜绝 "./manual.sh: Permission denied"。
 set -u
 TOOLS_DIR="$(cd "$(dirname "$0")" && pwd)"
-LOCAL="$(cd "$TOOLS_DIR/.." && pwd)"          # 工程根（含 cfg/、main.py）
+LOCAL="$(cd "$TOOLS_DIR/../.." && pwd)"       # 工程根 = tools/deploy 的上两级（含 cfg/、main.py）
 BOARD_HOST="${AUV_BOARD_HOST:-sunrise@192.168.137.10}"
 BOARD="${AUV_BOARD_DIR:-/home/sunrise/AUV}"
 HELP_DIR="${AUV_HELP_DIR:-/home/ansty/RDKX5}"
@@ -42,6 +42,9 @@ DELETED=(
   task1_2/ball_forward.py
   task1_2/run_ball_forward.sh
   tests/test_ball_forward.py
+  # 2026-09-19：按角度原地转的实现迁到 common/turn_deg.py（脚本与 gate 正航向共用），
+  # 板端旧的 task1_2/turn_deg.py 必须删掉，否则"两个同名脚本、行为不同"必然踩坑。
+  task1_2/turn_deg.py
   # 工程根旧副本：这些工具已迁到 tools/ 或已删除，板端根目录的同名旧文件要删
   check_pipeline_identity.py
   archive_baks.sh
@@ -74,17 +77,43 @@ DELETED=(
   tests/test_gate_enhance.py
   tests/test_gate_cue_lead.py
   doc/算法说明-gate-v1.4-分层与质量分.md
-  # 板端遗留的**旧版/已合并**用例：本地套件已精简成
-  #   test_ball / test_base / test_common / test_gate / test_gate_dash /
-  #   test_gate_decode / test_preprocess_rt（+ conftest），
+  # 2026-09-21 分类重整：tests/tools 下移到子目录后，**旧扁平路径必须删掉**
+  # （否则板端会同时存在新旧两份：pytest 收集到重名模块会 import-mismatch 报错）
+  tools/analyze_heading.py
+  tools/analyze_kpt_dump.py
+  tools/analyze_pnp_center.py
+  tools/analyze_task_log.py
+  tools/feature_coverage.py
+  tools/pnp_calib.py
+  tools/check_gate_pose.py
+  tools/check_kpt_decode.py
+  tools/check_pipeline_identity.py
+  tools/archive_baks.sh
+  tests/test_base.py
+  tests/test_common.py
+  tests/test_ball.py
+  tests/test_gate_vision.py
+  tests/test_gate_flow.py
+  tests/test_motion.py
+  tests/test_pnp_calib.py
+  # 板端遗留的**旧版/已合并**用例（2026-09-20 合并成 6 个文件时的旧名）
   # 板端这些更早的拆分文件不在清单里、会 import 已删除模块（gate.vision/gate.data/
   # common.ramp/build_frame_with_header…）→ 板端 pytest 收集即报错、把全量自检搞红。
   # 先备份到 bak/deploy_<stamp>/ 再删，保证"板端 == 清单"。
+  tests/test_gate_dash.py
+  tests/test_gate_decode.py
+  tests/test_preprocess_rt.py
+  tests/test_heading_align.py
+  tests/test_turn_deg.py
+  tests/test_gate.py
   tests/test_ball_hit.py
   tests/test_ball_port.py
   tests/test_ball_search.py
   tests/test_detector.py
-  tests/test_gate_flow.py
+  # ⚠️ 反面教材（别再犯）：`tests/test_gate_flow.py` 曾经既是"被删的分层版用例"、又是
+  #    "活文件"的同名路径 —— 那种情况下把它列进 DELETED 会把刚上传的文件再删掉。
+  #    2026-09-21 分类重整后活文件是 `tests/tasks/test_gate_flow.py`，扁平路径 `tests/test_gate_flow.py`
+  #    才是要清的旧位置（见上面的"分类重整"段）；两者同名不同路径，**加 DELETED 时看清层级**。
   tests/test_gate_geometry.py
   tests/test_gate_kpt_memory.py
   tests/test_gate_standalone.py
@@ -221,6 +250,9 @@ import base.settings as S
 from gate.kpt_memory import ENV_ENABLE, kpt_mem_enabled
 print('ball : timeout_ms=%s dash_ratio=%s stop_hold_s=%s' % (S.comm.ball.timeout_ms, S.comm.ball.dash_ratio, S.comm.ball.stop_hold_s))
 print('gate : near_ratio=%s hold=%s reacquire=%s' % (S.comm.gate.coarse.near_ratio, S.comm.gate.hold.max_frames, dict(S.comm.gate.reacquire)))
+print('motion(共用) : sway_kp=%s heave_kp=%s surge_fast=%s surge_slow=%s turn_kp=%s' % (
+    S.comm.motion.pid_sway.kp, S.comm.motion.pid_heave.kp,
+    S.comm.motion.surge_fast, S.comm.motion.surge_slow, S.comm.motion.turn_pid.kp))
 print('kptm : enable=%s（%s=%s）alpha=%s beta=%s recall_conf=%s' % (
     kpt_mem_enabled(S.vision.gate.kpt_mem), ENV_ENABLE,
     __import__('os').environ.get(ENV_ENABLE, '<未设>'),

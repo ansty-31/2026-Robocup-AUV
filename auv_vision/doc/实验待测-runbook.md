@@ -1,95 +1,386 @@
-# 实验待测 Runbook（人机协同：现场执行 / 后台分析）
+# 过门 PnP 位姿 / 深度标定实验 Runbook
 
-> 目标：把 `gate/README.md §5` 的待测项按"先台架、后水池、先视觉、后运动"的顺序跑完，
-> 每一步都有**明确命令、明确判据、明确要汇报的量**。执行的原始数据一律落盘 → 拉回来分析 → 再改参数。
+> **目的**：把「过门任务解出来的 `tvec.z`（深度）与 `(rvec, tvec)`（位姿）到底准不准」量出来，
+> 并把它**校正到可信**（回填 `frame_w/frame_h`、`reproj_px`、`conf_thr` 等参数）。
 >
-> 记录表在文末，边测边填。相关工具见 `tools/README.md`。
+> **为什么非做不可**：任务里所有米制判据都吃这个精度 ——
+> `z.cross=0.7`（出口①：冲刺触发点）、`z.near_lost_m=1.0`（出口②）、`z.slow_max=1.3`（进近降速点）、
+> `width.z_max=1.5`（宽档蠕进判据）。深度若系统性偏 20%，**冲刺会在离门 0.84 m 时触发而不是 0.7 m**，
+> 现场现象会像"算法不灵"，其实是标尺错了。
+>
+> **产出**（三份，缺一不可）：
+> ① `log/pnp_<日期>/*.jsonl` 原始 dump；② `tools/analyze/pnp_calib.py` 生成的 `report.md` + `summary.csv`；
+> ③ 本文 §6 的**记录表**（每档一行真值与环境备注）。
+>
+> **时间预算**：阶段 A（台架几何，全在岸上）≈ 60~90 min；阶段 B（水池真实光照/倒影）≈ 20 min。
+> ⚠️ **几何标定不需要下水**：PnP 只关心「相机 ↔ 门框」的几何，把船架在桌上、门挂在墙上量得更准也更安全。
+> 水只影响"角点能不能被检出来"（阶段 B）。
 
-## 安全前提（每次下水前逐条确认）
+---
 
-| 检查 | 命令/动作 | 通过标准 |
+## 0. 这次实验要回答的问题与验收判据
+
+| # | 问题 | 判据（达标线） | 不达标改什么 |
+|---|---|---|---|
+| Q1 | `tvec.z` 的标尺对不对（正比关系） | 正对档拟合 `z_meas = a·z_true + b`：`\|a−1\| ≤ 0.05` 且 `\|b\| ≤ 0.03 m` | 改 `gate.geometry.frame_w`（连 `frame_h`，见 §5.3 反演） |
+| Q2 | 深度绝对误差 | 1.0~4.0 m 档 `\|相对误差\| ≤ 10%`（既定判据）；p90 绝对误差 ≤ 5 cm @ ≤2 m | 同上；若误差**随距离单调漂**而非纯比例 → 查畸变/角点口径 |
+| Q3 | 横向/竖向尺度与符号 | `\|t_x − lat\| ≤ 3 cm`；`\|t_y + up\| ≤ 3 cm`（符号见 §1.3） | 符号错 → 查相机域/`dof_map`；尺度错 → 查 `frame_w/frame_h` |
+| Q4 | 航向 ψ 的可信度（HDG 的地基） | 各档 `psi + yaw` 的**中位数 ≤ 3°**（偏置）、**std ≤ 4°**（噪声） | 偏置大 → 查相机安装角/夹具（**不是** `body_center_offset`）；噪声大 → `hdg.tol_deg` 别收紧 |
+| Q5 | 位姿可用率与选档 | 1.0~3.0 m 的 full 可用率 ≥ 80%；`conf_thr`×`reproj_px` 有明确取舍点 | 改 `keypoint.conf_thr` / `pnp.reproj_px`（用 `pnp_calib` 报告 §4.1 选） |
+| Q6 | 校正是否真的生效 | 回填 cfg 后**重跑同一批 dump**，逐档相对误差降到 ≤ 5% | 没降 → 问题不在标尺（回到 Q2 的"漂移"分支） |
+
+**最小充分集** = S1（6 档正对）+ S2/S3（各 3~4 档偏移）+ S4（4 档角度）+ S5/S6（离线）+ S7（复核）。
+
+---
+
+## 1. 原理与符号约定
+
+### 1.1 深度标尺关系（本实验的核心）
+
+4 角 PnP 的 `tvec.z` 是"用**配置里的门框尺寸**去解释图像上量到的门框像素尺寸"得到的距离。
+正对门（门平面与像平面平行）时：
+
+```
+Δu = fx · W_true / z_true          （真实成像）
+z_meas = fx · W_cfg  / Δu          （PnP 用配置尺寸反解）
+⇒ z_meas = z_true · (W_cfg / W_true)
+```
+
+**所以深度误差是纯比例的**，比例因子 = `配置门宽 / 真实门宽`。量几个已知距离，
+看 `z_meas/z_true` 的中位数就能直接反解真实门宽：
+
+```
+W_true ≈ W_cfg / (z_meas/z_true 的中位数)
+```
+
+现场最常见的情形是**标了外轮廓、实际看到的是开口内缘**（规则写"约 70×50cm"，管径 5cm →
+开口 0.60×0.40）→ 预期 `a ≈ 0.70/0.60 ≈ 1.17`（深度偏大 17%，
+与历史观察"PnP z 比框宽粗估大 ~20%"吻合）。**这就是本实验最可能得到的结果。**
+
+⚠️ `frame_h` 不能靠单点比例定：宽高比不对时 4 点 PnP 无精确解，残差（px）变大，
+**近距离会直接超过 `reproj_px` 被整档拒掉**（合成数据上已验证：0.6 m 全拒、2 m 正常）。
+所以流程是：**先用深度比例定 `frame_w`，再扫宽高比定 `frame_h`**（§5.3）。
+
+### 1.2 相机域（必须同域，否则深度整体缩放错）
+
+检测角点所在域由 `vision.image.undistort` 决定，`gate/gate_detector.py::board_camera()` 跟着选：
+
+| `image.undistort` | PnP 用的内参 | 说明 |
 |---|---|---|
-| 串口模式 | 启动横幅 / `AUV_SIM_MODE=0` 显式指定 | 要动船必须 `实发`；台架用 `仅打印` |
-| 权重 | `python3 tools/check_pipeline_identity.py` + 启动横幅 `权重: gate=gate_kpt_bayese_640x640_nv12.bin` | 域自证通过 + 权重名正确 |
-| 代码版本 | `bash tools/check_board_parity.sh` | 本地 == 清单（板端 == 清单 更好） |
-| 相机占用 | `ps -ef \| grep "[m]ain.py"` | 无孤儿进程（run_gate.sh 会自动清） |
-| 电池/遥控 | 手动模式可随时接管 | 遥控器在手且能急停 |
+| `true`（当前） | **rectified K**（`getOptimalNewCameraMatrix(alpha=0)`，D=0） | dump 里的 kpts 就在**去畸变域** |
+| `false` | 原始 K + D | 域不同 → 深度与横向量都会变 |
 
-## 测试阶梯
+`cfg/front_camera.yaml`（标定）：1280×720，`fx=782.54`、`fy=779.79`、`cx=633.80`、`cy=386.91`，
+`D=[-0.4914, 0.3784, -0.0091, 0.0040, -0.2262]`，标定重投影误差 0.705 px。
+注意 `cx/cy` **不等于画面中心**（640/360），去畸变后主点还会再挪 —— 所以 `t_x/t_y` 的零点
+不能想当然按 640/360 算（S2/S3 正是在测这个）。
 
-### S0 台架自检（不接水、船不动）
+### 1.3 符号约定（最容易搞反的三处）
+
+| 量 | 正方向 | 真值命名 | 关系 |
+|---|---|---|---|
+| 相机系 `t_x` | 图像 x 向右 ⇒ 门在光轴**右**侧 | `lat+` | `t_x ≈ +lat` |
+| 相机系 `t_y` | 图像 y **向下** ⇒ 门在光轴**上方**时 `t_y` 为**负** | `up+` | `t_y ≈ −up` |
+| `psi`（`gate_normal_angles_deg` 的 yaw 分量） | `+psi = 门法向偏向画面右 = 机身相对门左偏` | `yaw+` = **船体右转** | `psi ≈ −yaw` |
+| DOF `sway` | `+ = 右移` | — | 与 `t_x` 同号 |
+| DOF `yaw` | `+ = 右转` | — | 与"船体右转"同号 |
+
+### 1.4 这些精度喂给谁（改参数前先看这张表）
+
+| 在线参数 | 当前值 | 直接吃 | 深度偏 20% 的后果 |
+|---|---|---|---|
+| `gate.z.cross` | 0.7 m | 出口① 冲刺触发 | 实际 0.84 m 才冲（或 0.56 m 就冲） |
+| `gate.z.near_lost_m` | 1.0 m | 出口② 近距丢门判过门 | 早判/晚判过门 |
+| `gate.z.slow_max` | 1.3 m | 进近降速点 | 该慢没慢 |
+| `gate.width.z_max` | 1.5 m | width 档蠕进判据 | 该蹭没蹭 |
+| `gate.z.cross_confirm_frames` | 2 | 防单帧错解 | **不要动**（保命） |
+| `pnp.max_z_jump_m` | 0.8 m | 防单帧错解 | **不要动**（保命） |
+
+---
+
+## 2. 器材与场地布置
+
+| 器材 | 用途 | 备注 |
+|---|---|---|
+| 卷尺（≥5 m）+ 夹子/重物 | 深度真值 | **最重要**；零点定义见下 |
+| 地面刻度胶带 / 粉笔 | 横向真值 `lat`、船位复现 | 每 25 cm 一道 |
+| 转台/转椅（带角度刻度）或地面角度线 + 激光笔 | 航向真值 `yaw` | 台架阶段比让船自己转更准 |
+| 垫块（书/木块，先量厚度） | 竖向真值 `up` | 或让门在挂轨上上下移 |
+| 水平尺 | 把光轴调平、门调竖直 | 减少多余的 `pitch` 分量 |
+| 记号笔 + 本文 §6 记录表 | 现场记录 | 文件名与真值一起写 |
+
+**真值零点怎么定**（必须全组统一，否则会拟合出假偏置）：
+
+- `z_true`：从**门管中心平面**量到**相机镜头外壳标记**。镜片与后节点差 1~2 cm，
+  统一口径后它是一个**常数偏置**（会体现在拟合的 `b` 里，可解释、可接受）。
+- `lat_true`：门中心到**相机光轴**的横向距离。做法：先把船摆到"门在画面正中"
+  （`preview_detect.py --gate-kpt` 看 `dxn≈0`），在地面沿四角画十字标记，之后所有平移都从它量。
+- `up_true`：门中心相对**光轴高度**的垂直距离（门中心更高 → `up+`）。**不要**用"离地高度"当 `up`。
+- `yaw_true`：船体相对"正对姿态"（门居中且左右边等长）的转角。台架用转台刻度；
+  水里用 `python3 common/turn_deg.py --deg 20 --dir left`（闭环走遥测 yaw），
+  **这次实验里它充当角度参考**；要更严格就用外部角度基准（地面线 + 激光笔）并在备注里写明用了哪种。
+
+**布置原则**：门固定不动（挂墙/挂架），**动船**（移船比移门容易且可复现）；
+门面尽量与船的预期航向垂直，避免引入额外 `pitch/roll`。
+
+---
+
+## 3. 命名规范与数据流（**文件名即真值**，不用手抄时间）
+
+```
+pnp_z150.jsonl                  正对门，z = 1.50 m
+pnp_z150_lat+25.jsonl           z=1.50 m，门在光轴右侧 25 cm
+pnp_z150_lat-25.jsonl           同上，左侧 25 cm
+pnp_z200_up+10.jsonl            z=2.00 m，门中心在光轴上方 10 cm
+pnp_z150_yaw+20.jsonl           z=1.50 m，船体右转 20°
+pnp_z075_yaw-30.jsonl           组合随意，段名顺序无关
+```
+
+- `z<厘米>` **必填**（`z150` = 1.50 m）；`lat±<厘米>` / `up±<厘米>` / `yaw±<度>` 可选，缺省 = 0；
+- 文件名里带别的信息没关系（`pnp_run3_z150_lat+10_yaw-10.jsonl` 也能解析）；
+- 实在不能带真值 → 用 `--gt gt.csv` 覆盖（表头 `file,z_m,lat_m,up_m,yaw_deg`）；
+- 板端时钟不准（可能 2000-01-01）→ **一律用文件名区分轮次，别用 `date` 命名**。
+
+板端目录建议：`/home/sunrise/AUV/log/pnp_<日期>/`，一次实验一个目录。
+拉回本地（SSH 包装器在 `/home/ansty/RDKX5/`）：
+
+```bash
+export AUV_SSH=/home/ansty/RDKX5/.ssh_x5.sh
+STREAM=/home/ansty/RDKX5/.ssh_x5_stream.sh          # 保留 stdin，供 tar 管道
+$STREAM "cd /home/sunrise/AUV && tar cf - log/pnp_0921/" > /tmp/pnp.tgz
+mkdir -p /tmp/pnp && tar xf /tmp/pnp.tgz -C /tmp/pnp
+```
+
+---
+
+## 4. 实验步骤
+
+### S0 台架自检（不下水、船不动，5 min）
+
 ```bash
 cd /home/sunrise/AUV
-python3 tools/check_pipeline_identity.py            # 域自证
-python3 preview_detect.py --gate-kpt --duration 5   # 权重能跑、能看到门框/角点
+python3 tools/check/check_pipeline_identity.py                  # 训练/推理同域自证（不过就别往下做）
+python3 preview_detect.py --gate-kpt --duration 10        # 能看到门框 + 4 角点？
+python3 -c "import base.settings as S; print(dict(S.vision.gate.geometry), dict(S.vision.gate.keypoint), dict(S.vision.gate.pnp))"
 ```
-**汇报**：域自证是否通过；`det=` 数量；能否看到 4 个角点。失败→先解决，别下水。
 
-### S1 视觉验收 + 数据落盘（船不动，镜头对准门）
+- `preview_detect.py` **不创建串口**（脚本自己声明"不打开串口 → 船不会动"），桌上开着放心。
+- 判据：稳定看到 4 个角点、置信度大多 ≥ 0.7、`mode=full`。
+- 把那行参数打印的结果抄进 §6 表 A（之后的报告要拿它当"实验前基线"）。
+
+### S1 深度标尺主实验（**最重要**，20~30 min）
+
+**摆位**：船固定（光轴大致水平、指向门中心），门沿同一直线放 6 个距离：
+**0.60 / 0.80 / 1.00 / 1.50 / 2.00 / 3.00 m**（近两档暴露"近距被拒"，远两档定标尺斜率）。
+
+**每档**：
+1. 卷尺量 `z_true`（口径见 §2）→ 写进 §6 表 B；
+2. 录 **20 s**（8~11 fps → 约 160~220 帧）：
+
 ```bash
-python3 preview_detect.py --gate-kpt --dump log/kpt_s1_static.jsonl --duration 30 --show
+cd /home/sunrise/AUV
+python3 preview_detect.py --gate-kpt --duration 20 \
+        --dump log/pnp_0921/pnp_z100.jsonl          # ← 真值写进文件名
 ```
-**要看的**：4 个角点是否稳定出现、有没有点落到倒影上、`有效角点 n/4`、画面里的 `mode/ids`。
-**汇报**：`det` 数量、`n/4`、有没有明显鬼点（点跳到水面倒影上）。
-**产出**：`log/kpt_s1_static.jsonl` → `bash tools/fetch_logs.sh` → 分析。
 
-### S2 倒影专项（船不动，镜头慢慢靠近水面线）
+3. 移到下一档重复。**同一档里让人轻微晃镜头（±2 cm）**，把真值口径误差平均掉，别一动不动。
+
+**当轮看什么**：终端每 2 s 打印 `有效角点(>=0.5)=n/4`。若近距档位姿一直不出
+（`mode` 卡在 coarse、终端也不报错）→ **先别怀疑角点**：很可能是门框尺寸比例不对导致残差超
+`reproj_px`（§1.1 尾注），这正是 S1 要暴露的现象之一。
+
+### S2 横向档（`lat`，10 min）
+
+在 **z = 1.50 m** 处把船横向平移 **±25 / ±50 cm**（按地面刻度），每档录 15 s：
+
+```
+pnp_z150_lat+25.jsonl   pnp_z150_lat-25.jsonl   pnp_z150_lat+50.jsonl   pnp_z150_lat-50.jsonl
+```
+
+判据：`t_x` 与 `lat` **同号**、`|t_x − lat| ≤ 3 cm`（Q3）。
+**符号反了不要去代码里加负号** —— 先查相机域与 `dof_map`（历史上 sway 反号就是这么来的）。
+
+### S3 竖向档（`up`，10 min）
+
+同一距离处抬/降**门**（或垫高船）**+10 / −10 / +20 cm**：
+
+```
+pnp_z150_up+10.jsonl    pnp_z150_up-10.jsonl    pnp_z150_up+20.jsonl
+```
+
+判据：门在光轴上方时 `t_y` **为负**（`t_y ≈ −up`），偏差 ≤ 3 cm。
+
+### S4 航向档（`yaw`，10 min）
+
+船体相对"正对"姿态转 **+10 / −10 / +20 / −30°**（台架转台刻度；水里用 `turn_deg` 闭环），
+每次转完**停稳 3 s 再录**（转动中测量不可信 —— 在线实现里 HDG 要"停稳再测"就是这个原因）：
+
 ```bash
-python3 preview_detect.py --gate-kpt --dump log/kpt_s2_reflect.jsonl --duration 30
+# 水里：闭环转（遥测 yaw 闭环），转完脚本会硬停
+python3 common/turn_deg.py --deg 20 --dir right && \
+python3 preview_detect.py --gate-kpt --duration 15 --dump log/pnp_0921/pnp_z150_yaw+20.jsonl
 ```
-**要看的**：角点跳到倒影上的频率；框是否被"拉高"（宽高比变小）。
-**判据**：分析脚本会报"宽高比 p10" 与 ">30px 跳变次数"。
 
-### S3 线索方向核对（`record_only: true`，船**不动**）
+判据：`psi ≈ −yaw`（Q4），并在报告 §3 里记下 `psi std`（噪声）—— 它决定 `gate.hdg.tol_deg=8°` 合不合理。
+
+### S5 选档扫描与 kpt_mem A/B（**离线**，用 S1 的 dump，5 min）
+
 ```bash
-# 板端：cfg/comm.yaml → gate.cues.record_only: true（先只记录不驱动）
-python3 preview_detect.py --gate-kpt --duration 30       # 看 visible 掩码
-# 或全程跑任务但不下发线索动作
-AUV_SIM_MODE=1 python3 main.py --task gate
+python3 tools/analyze/pnp_calib.py --sweep --report log/pnp_report.md --csv log/pnp_summary.csv \
+        log/pnp_0921/pnp_z*.jsonl
+python3 tools/analyze/pnp_calib.py --kpt-mem log/pnp_0921/pnp_z150*.jsonl     # 角点融合 开/关 A/B
 ```
-**判据**：只看到上边(TL,TR)→应 `DESCEND`；下边→`ASCEND`；左列→`TURN_RIGHT`；右列→`TURN_LEFT`。
-方向反了 ⇒ 改 `cues.*` 开关或 `motion/phase_recover.py::_CUE_DOF` 符号。
-**汇报**：每种可见性组合 → 观察到的 cue 动作 → 与预期是否一致。
 
-### S4 低风险运动（下水，慢速）
+输出：`conf_thr ∈ {0.5,0.6,0.7,0.8} × reproj_px ∈ {8,12,16,20,25}` 的"可用率 vs 深度误差 p90"格点，
+以及 p3p vs full 对比（`pnp_calib` 报告 §4.1 / §4.2）。
+
+### S6 p3p / width / coarse 的偏差与可用性（**离线**，同一命令）
+
+要回答两件事（见 `pnp_calib` 报告 §4.2）：
+
+1. **p3p 的深度能不能用**（历史实测偏 ≈ −28% → **不能**喂米制阈值）；
+2. **3 角时到底有没有位姿** —— 实测（本机 OpenCV 5）**没有上帧猜值 `prev` 时 3 点解不出来**，
+   即"一直只能看到 3 个角" = 一直没有位姿。现场含义：**别指望 p3p 救场**。
+
+### S7 回填与复核（10 min）
+
+1. 按 §5.4 把建议值写进 `cfg/vision.yaml`（**只改这一处**，别顺手改别的）；
+2. **重跑同一批 dump**（不用再下水）：
+
 ```bash
-cd task1_2 && AUV_SIM_MODE=0 AUV_DESCEND_S=0 AUV_FWD_S=0 ./run_gate.sh
+python3 tools/analyze/pnp_calib.py --report log/pnp_report_after.md --csv log/pnp_summary_after.csv \
+        log/pnp_0921/pnp_z*.jsonl
 ```
-**要看的**：`phase/substate/mode/ratio/kpt/kpt_raw/Q/caution/cue_w/cue_mode/z/pass`。
-**汇报**：完整终端日志（我拉回来逐帧对）。重点：有没有"点不全就后退"、REACQUIRE 次数、
-`z` 抖不抖、`cue_w` 有没有乱升。
 
-### S5 主导权三档对比（同一条轨迹跑 3 遍）
-```yaml
-gate.cues.mode: pose   # ① 位姿主导
-gate.cues.mode: auto   # ② 依据质量自动分配（默认）
-gate.cues.mode: cue    # ③ 线索主导
-```
-**判据**：倒影期 `cue_w` 应按 ①=0 → ② 自动升高 → ③=1；比较过门成功率与用时。
+3. 判据（Q6）：逐档 `|相对误差| ≤ 5%`，且 `a` 落回 1.00 ± 0.02；
+4. 跑无硬件用例：`python3 -m pytest tests/ -q` —— cfg 改动可能让"代码兜底默认值 == cfg"
+   那类不变量用例变红（`test_gate_defaults_match_cfg`），红了就同步 `gate/gate_task.py` 里的 `_D_*` 表；
+5. 板端对齐：`bash tools/deploy/check_board_parity.sh --board`。
 
-### S6 参数标定（用 S1/S2 的 dump）
+---
+
+## 5. 判读与报告
+
+### 5.1 一键命令
+
 ```bash
-bash tools/fetch_logs.sh
-python3 tools/analyze_kpt_dump.py log/board_*/kpt_*.jsonl
+python3 tools/analyze/pnp_calib.py \
+    --sweep --report log/pnp_report.md --csv log/pnp_summary.csv \
+    --frames-csv log/pnp_frames.csv \
+    log/pnp_0921/pnp_z*.jsonl
 ```
-把建议值写进 `cfg/vision.yaml`（kpt_mem / keypoint.conf_thr）与 `cfg/comm.yaml`（quality），
-`bash tools/deploy_to_board.sh --no-test` 同步后复测 S1，比较 `pose_flips` 是否下降。
 
-### S7 帧率与预处理
-```bash
-python3 preview_detect.py --gate-kpt --duration 20     # 记录 fps（带/不带 --stream 各一次）
-```
-**判据**：带推流 7.5 fps（实测）；目标把预处理 54ms 压下来 → 10 fps+。
+（`--gt` 备用；`--frame-w/--frame-h/--conf-thr/--reproj-px` 可临时覆盖 cfg，做
+"如果改成 X 会怎样"的离线复算，不改文件。）
 
-## 记录表
+### 5.2 输出怎么读
 
-| 步骤 | 日期 | 条件（船/门/水） | 关键数字 | 结论/改动 | 数据文件 |
-|---|---|---|---|---|---|
-| S0 | | | | | |
-| S1 | | | | | |
-| S2 | | | | | |
-| S3 | | | | | |
-| S4 | | | | | |
-| S5 | | | | | |
-| S6 | | | | | |
-| S7 | | | | | |
+| 章节 | 回答什么 | 关键列 |
+|---|---|---|
+| §1 逐档表 | 每个距离的实测值、可用率、"有检测但没位姿"的档 | `z 实测 p50`、`相对误差`、`可用率(full)`、`有位姿帧(全档)`、`RMS p50` |
+| §1.1 拟合 | 标尺错没错、有没有偏置 | `a`（>1 = 解偏大 = cfg 门宽偏大）、`b`、`R²` |
+| §1.2 反演 | **`frame_w/frame_h` 改成多少** | `z_meas/z_true` 中位数、`W*`、宽高比扫描表 |
+| §2 横向/竖向 | 尺度与符号 | `t_x`、`t_y` 与真值的偏差 |
+| §3 航向 | HDG 的地基 | `psi + yaw`（偏置）、`psi std`（噪声） |
+| §4.1 | 选 `conf_thr`/`reproj_px` | 可用率 vs 误差 p90 |
+| §4.2 | p3p 能不能用 | 各档 p3p/full 的 `z_rel` 与 `psi_std` |
+
+### 5.3 门框尺寸反演（工具已实现；`--no-invert` 可关）
+
+1. 取**正对档**（`lat/up/yaw` 全 0）的 `z_meas/z_true` **中位数** → `frame_w* = frame_w / 该比值`；
+2. 固定 `frame_w*`，1D 扫宽高比 `frame_h/frame_w ∈ [0.45, 1.05]`（深度对宽高比只有弱依赖，
+   但比例错会让**残差**变大 → 近距被拒），取"深度相对误差中位数最小"的 `frame_h`；
+3. 报告末尾会打印可直接粘贴的 cfg 片段。
+
+> ⚠️ **回填前先看拟合的 `b`**：若 `b` 明显非 0，或各档相对误差**随距离单调变化**（不是纯比例），
+> 说明问题不只是尺寸标尺（还有畸变残差、角点系统性外扩/内缩、真值口径不一致），
+> 此时**不要**用单点比例去校正 —— 先把畸变与角点口径查清（S1 近距档 + `tools/analyze/analyze_kpt_dump.py`）。
+
+### 5.4 结论 → 参数回填映射（照抄这张表）
+
+| 观察到 | 改哪个键 | 方向 |
+|---|---|---|
+| `a` 明显 > 1（z 偏大） | `vision.gate.geometry.frame_w`（连 `frame_h`，按 §5.3 反演） | 乘以 `1/a` |
+| `b` 明显 ≠ 0 | **先不要改参数** | 查真值口径 / 畸变（§5.3 警告） |
+| 近距档可用率 = 0 但 RMS 很大 | `frame_w/frame_h` 比例 | 按 §5.3 反演；临时 `--reproj-px 40` 复算确认 |
+| 可用率低而 RMS 很小 | `keypoint.conf_thr` 偏高 | 0.7 → 0.6（先确认 §4.1 里误差没变差） |
+| 位姿被拒多、RMS 分布偏大 | `pnp.reproj_px` | 20 → 25（**只在 §4.1 确认误差没跟着涨**才做） |
+| `psi + yaw` 偏一个常数 | 相机安装角/夹具 | **不是** `body_center_offset`（那是位置偏置，单位米，且未接线） |
+| `psi std` 大 | `gate.hdg.tol_deg` 别收紧 | 噪声 >4° 时 8° 已经是下限 |
+
+---
+
+## 6. 数据记录表（现场边测边填）
+
+**A. 参数快照（实验开始前记一次）**
+
+| 日期 | frame_w / frame_h | conf_thr / vis_thr | reproj_px | kpt_mem | 权重 md5 | 环境备注（光照/水况/镜头） |
+|---|---|---|---|---|---|---|
+| | / | / | | | | |
+
+**B. 每档一行**（`--csv` 会生成同样列的报告版；这里只填"真值 + 现场观察"）
+
+| 档名 | z_true (m) | lat (m) | up (m) | yaw (°) | 时间 | 帧数 | 现场观察（角点稳不稳/有无倒影/异常） |
+|---|---|---|---|---|---|---|---|
+| pnp_z060 | 0.60 | 0 | 0 | 0 | | | |
+| pnp_z080 | 0.80 | 0 | 0 | 0 | | | |
+| pnp_z100 | 1.00 | 0 | 0 | 0 | | | |
+| pnp_z150 | 1.50 | 0 | 0 | 0 | | | |
+| pnp_z200 | 2.00 | 0 | 0 | 0 | | | |
+| pnp_z300 | 3.00 | 0 | 0 | 0 | | | |
+| pnp_z150_lat+25 | 1.50 | +0.25 | 0 | 0 | | | |
+| pnp_z150_lat-25 | 1.50 | −0.25 | 0 | 0 | | | |
+| pnp_z150_lat+50 | 1.50 | +0.50 | 0 | 0 | | | |
+| pnp_z150_lat-50 | 1.50 | −0.50 | 0 | 0 | | | |
+| pnp_z150_up+10 | 1.50 | 0 | +0.10 | 0 | | | |
+| pnp_z150_up-10 | 1.50 | 0 | −0.10 | 0 | | | |
+| pnp_z150_up+20 | 1.50 | 0 | +0.20 | 0 | | | |
+| pnp_z150_yaw+10 | 1.50 | 0 | 0 | +10 | | | |
+| pnp_z150_yaw-10 | 1.50 | 0 | 0 | −10 | | | |
+| pnp_z150_yaw+20 | 1.50 | 0 | 0 | +20 | | | |
+| pnp_z150_yaw-30 | 1.50 | 0 | 0 | −30 | | | |
+
+**C. 结论（实验后填，与报告章节一一对应）**
+
+| 项 | 本次结论 | 依据 |
+|---|---|---|
+| `a` / `b` / `R²` | | `pnp_calib` 报告 §1.1 |
+| `frame_w` / `frame_h` 建议值 | | `pnp_calib` 报告 §1.2 |
+| 深度 \|相对误差\| 是否达标 | | `pnp_calib` 报告 §1 |
+| `t_x` / `t_y` 偏差 | | `pnp_calib` 报告 §2 |
+| `psi` 偏置 / 噪声 | | `pnp_calib` 报告 §3 |
+| `conf_thr` / `reproj_px` 结论 | | `pnp_calib` 报告 §4.1 |
+| p3p 能否给米制阈值 | | `pnp_calib` 报告 §4.2 |
+| 已回填的键 + 复核后误差 | | `pnp_calib` 复核报告 |
+
+---
+
+## 7. 常见故障与排除
+
+| 现象 | 最可能原因 | 处置 |
+|---|---|---|
+| 全场 `可用率=0`、`mode=coarse` | 权重没跑起来 / 忘了 `--gate-kpt` | 先做 S0；看终端有没有 `det` |
+| 只有近距档 `可用率=0`、RMS 却很大 | **`frame_w/frame_h` 比例不对**（残差超 `reproj_px`） | 临时 `--reproj-px 40` 复算确认，再按 §5.3 反演 |
+| 各档误差**随距离单调漂** | 真值口径不一致 / 畸变残差 / 角点系统性外扩 | 统一零点；跑 `tools/analyze/analyze_kpt_dump.py` 看角点口径 |
+| `z_meas` 比卷尺**小**（`a<1`） | `frame_w` 标小了 | 按 §5.4 乘 `1/a`（**不要**手写"补偿系数"） |
+| `t_x` 符号反 | 相机域/坐标约定搞错 | 查 `image.undistort` 与 `dof_map`，**不要在任务里加负号** |
+| `psi` 每档偏置都不一样 | 转台/地面角度线没校准 | 重做 S4；先确认"正对"姿态真的正对（`dxn≈0` 且左右边等长） |
+| 某些 dump 解析不出真值 | 文件名缺 `z<厘米>` | 重命名，或用 `--gt gt.csv` |
+| 帧率异常低（<5 fps） | 推流开着 / 分辨率或模型没对上 | 关 `stream.enable`；看启动横幅的权重与输入尺寸 |
+
+---
+
+## 8. 做完这一步能得到什么
+
+- **Q1~Q3 达标** → `z.cross=0.7`、`near_lost_m=1.0`、`slow_max=1.3` 才真是"0.7/1.0/1.3 米"，
+  冲刺触发点与降速点才有意义。
+- **Q4 达标** → ALIGN.HDG（离散正航向）才有意义：噪声大于收敛阈值时，"转到位"是随机的。
+- **Q5 有取舍点** → 低帧率下位姿可用率决定"这一帧能不能进位姿档"，也决定 THROUGH 的触发方式。
+- **Q6 复核过** → 才算完成闭环：**改了参数必须能用同一批数据证明误差变小**，
+  否则就是把"猜"当成了"标定"。
+
+> **已知未验证项（别当成已验证）**：
+> ① 门的真实尺寸（外轮廓 / 开口内缘 / 管径）—— 本实验就是要测它；
+> ② 水中倒影对 `conf_thr` 的影响（阶段 B 才有数据）；
+> ③ 相机安装角偏置的绝对量（本实验只能给"PnP vs 遥测 yaw 的一致性"，绝对参考需要外部角度基准）；
+> ④ `gate.geometry.body_center_offset`（位置偏置，未标定、未接线 —— 本次实验**不涉及**）。

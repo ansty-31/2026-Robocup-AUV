@@ -703,3 +703,14 @@ ffplay -fflags nobuffer -flags low_delay -framedrop -f mjpeg "udp://@:5000"
 | 带宽紧张/无线 | UDP 28 Mbps | 走 §6 HTTP（TCP 重传）或 §7 H.264 硬编（2~4 Mbps） |
 | 端到端延迟绝对值 | 采集/传输环节实测完整，但“玻璃到玻璃”需人工测 | 按 §12 手机拍屏法；预期 60~90 ms 量级 |
 
+
+## 附：推流开关在**任务运行**时的实测代价（2026-09-18）
+
+| 配置 | 每帧耗时 | 折算帧率 |
+|---|---|---|
+| `cfg/vision.yaml → stream.enable: true`（开着推流跑任务） | **~143 ms/帧** | 6.9 fps |
+| 关掉推流（同链路的 `preview_detect.py`） | **~108 ms/帧** | 9.3 fps |
+
+→ 推流 + 任务 + 逐帧日志合计约 **35 ms/帧**。这就是 `stream.enable` **默认 false** 的理由
+（调任务时一般在板端直接看画面，不必推流）；要临时开：`AUV_STREAM=1 python3 main.py --task gate`
+（env 优先于该开关，见 `base/camera.py::get_stream_pusher`；`manual.sh` 走的就是 env 那条路）。

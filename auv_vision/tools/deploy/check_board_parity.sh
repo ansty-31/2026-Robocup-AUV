@@ -2,21 +2,21 @@
 # check_board_parity.sh — 检查"本地代码 == 最后移植到板端的代码"
 #
 # 用法（在 tools/ 下或任意位置都行；工程根自动定位到上一级）：
-#   bash tools/check_board_parity.sh              # 本地 vs tools/board_parity.md5（无需板子，毫秒级）
+#   bash tools/deploy/check_board_parity.sh              # 本地 vs tools/deploy/board_parity.md5（无需板子，毫秒级）
 #   AUV_SSH=/home/ansty/RDKX5/.ssh_x5.sh \
 #     bash check_board_parity.sh --board          # 再与板端比对（**1 次 SSH 批量取 md5**，秒级）
 #   ... --board --only-verified                   # 只查有板端实测证据的那批
 #   ... --board --slow                            # 退回"一文件一次 SSH"的老路径（SSH 不稳时用）
-#   ... --board --write                           # 顺带把 tools/board_parity.md5 刷成当前实测状态
+#   ... --board --write                           # 顺带把 tools/deploy/board_parity.md5 刷成当前实测状态
 #
 # 说明：manifest 记录的是"最后一次与板端逐文件 md5 比对一致"时的字节；
 #   ① 本地全绿 = 本地没被改过；
 #   ② --board 也全绿 = 板端确实装的就是这份代码。
 #   只读操作：不写板端、不改本地。
 set -u
-# 本脚本在 tools/ 下，工程根 = 上一级；清单随工具一起放在 tools/
+# 本脚本在 tools/deploy/ 下 → 工程根 = 上**两**级；清单与驱动脚本同目录（tools/deploy/）
 TOOLS_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(cd "$TOOLS_DIR/.." && pwd)"
+PROJECT_ROOT="$(cd "$TOOLS_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
 MANIFEST="$TOOLS_DIR/board_parity.md5"
@@ -81,10 +81,43 @@ if [ "$local_bad" = "0" ]; then
     echo "  ⚠️ 本地自身没被改过（$n 个中 $local_bad 个不一致），但其中 **$unver 个没有板端核对记录**："
     for f in $unver_list; do echo "        · $f"; done
     echo "     这些条目只记了本地值 → **不能当作与板端一致**；"
-    echo "     要确认板端，请跑：AUV_SSH=... bash tools/check_board_parity.sh --board（可加 --write 刷新）"
+    echo "     要确认板端，请跑：AUV_SSH=... bash tools/deploy/check_board_parity.sh --board（可加 --write 刷新）"
   fi
 else
   echo "  ✗ 本地有改动/缺失（板端未必同步过）"
+fi
+
+# 1b) **本地有、清单没有**的源文件 —— 这类文件 deploy_to_board.sh **永远不会上传**
+#     ⚠️ 2026-09-20 加：新文件（common/turn_deg.py / gate/heading_align.py …）漏在清单外时，
+#        部署会把"新 gate_task.py + 缺 heading_align.py"这种半套状态推上板 → 板端 import 即崩；
+#        而本脚本原先只遍历清单、**完全看不见这些文件**（静默通过）。
+#     收录规则与 --write 里那段 find 保持一致（改了那边记得同步这里）。
+new_list=""
+while IFS= read -r f; do
+  case "$f" in
+    *"*"*) continue ;;
+  esac
+  grep -qE "[[:space:]]${f}[[:space:]]*\]?[[:space:]]*$" "$MANIFEST" || \
+    new_list="$new_list $f"
+done < <(find . -type f \( -name '*.py' -o -name '*.sh' -o -name '*.md' -o -name '*.yaml' \
+      -o -name '*.txt' \) \
+    -not -path './.*' \
+    -not -path './bak/*' -not -path './log/*' -not -path './rec/*' \
+    -not -path './models/*' -not -path '*/__pycache__/*' -not -name '*.pyc' \
+    -not -name 'check_board_parity.sh' -not -name 'board_parity.md5' \
+    -not -name 'deploy_to_board.sh' -not -name 'tidy_board_bak.sh' \
+    -not -name 'ssh_x5*.sh' -not -name 'askpass*.sh' \
+    -not -name '.*' | sed 's|^\./||' | sort)
+new_cnt=0
+for f in $new_list; do new_cnt=$((new_cnt+1)); done
+if [ "$new_cnt" != "0" ]; then
+  echo "  ✗ **本地有 $new_cnt 个源文件不在清单里 → deploy_to_board.sh 不会上传它们**："
+  for f in $new_list; do echo "        · $f"; done
+  echo "     修法（二选一）："
+  echo "       · 板端可达：AUV_SSH=... bash tools/deploy/check_board_parity.sh --board --write    # 刷清单"
+  echo "       · 板端不可达：把上面每个文件按「<md5>  <相对路径>」**无方括号**追加到"
+  echo "         tools/deploy/board_parity.md5（无方括号 = 仅本地记录，不算板端实测证据）"
+  local_bad=$((local_bad+new_cnt))
 fi
 
 # 2) 可选：与板端实机比对
@@ -164,13 +197,14 @@ if [ "$BOARD" = "1" ]; then
     {
       echo "# board_parity.md5 — 板端($BOARD_DIR) vs 本地(auv_vision/) 逐文件一致性清单"
       echo "#"
-      echo "# 用法：bash tools/check_board_parity.sh               # 本地 vs 本清单（不用板子）"
+      echo "# 用法：bash tools/deploy/check_board_parity.sh         # 本地 vs 本清单（不用板子）"
       echo "#       AUV_SSH=/home/ansty/RDKX5/.ssh_x5.sh bash check_board_parity.sh --board"
       echo "#       AUV_SSH=/home/ansty/RDKX5/.ssh_x5.sh bash check_board_parity.sh --board --write  # 刷新本清单"
       echo "#"
       echo "# 格式：[ md5  文件 ] = 已与板端逐字节核对一致（板端实测证据）；无方括号 = 仅本地记录"
-      echo "# 注意：tools/ 下的 check_board_parity.sh / deploy_to_board.sh / board_parity.md5 /"
-      echo "#       tidy_board_bak.sh 是\"本地驱动\"工具，不入清单（板端不需要）；archive_baks.sh 入清单（板端维护用）"
+      echo "# 注意：tools/deploy/ 下的 check_board_parity.sh / deploy_to_board.sh / board_parity.md5 /"
+      echo "#       tidy_board_bak.sh 是\"本地驱动\"工具，不入清单（板端不需要）；"
+      echo "#       tools/deploy/archive_baks.sh 入清单（板端维护用 → 板端 <根>/tools/deploy/archive_baks.sh）"
       echo "# cfg/vision.yaml **与 comm.yaml 一样整份同步**（本地是唯一参数源：下水前要 red 就改本地）；"
       echo "#   板端手改过该文件的话，下次 deploy 会被本地覆盖（覆盖前会备份到 bak/deploy_<stamp>/）"
       echo "# 更新：$(date +%m%d_%H%M%S)（--write 实测刷新：1 次 SSH 批量核对）"

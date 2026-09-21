@@ -313,7 +313,7 @@ def gate_normal_angles_deg(rvec, tvec=None):
       pitch_deg = atan2(n_y, n_z)  俯仰
     镜像解处理：平面目标 PnP 有前后对称的双解（n_z 可正可负，两者重投影等价），
     n_z < 0 时取 -n，使结果落在 (-90°, 90°)，否则会出现 ±180° 的假跳变。
-    精度：实测（tools/analyze_heading.py，真实角点 dump，conf 0.7/reproj 20px）
+    精度：实测（tools/analyze/analyze_heading.py，真实角点 dump，conf 0.7/reproj 20px）
     帧间 |Δ| p50≈3°，EMA 4 帧后噪声 ≈3° → **够用来做"慢慢校"，不够做快速闭环**。
     """
     n, _rho = plane_from_pose(rvec, tvec if tvec is not None else np.zeros((3, 1)))

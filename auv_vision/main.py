@@ -27,7 +27,7 @@ try:
 except ImportError:
     HAS_CV2 = False
 from base.camera import create_camera
-from base.uart import UartController, install_signal_handlers
+from base.uart import UartController, install_signal_handlers, _D_MIN_DEPTH_M
 from common.detector import DetectorHub
 from task1_2.ball import BallTask
 from gate.gate_task import GateTask
@@ -61,11 +61,12 @@ class AppController(object):
         self.queue = [TASK_STATE[n] for n in (tasks or S.comm.tasks.enabled)]
         self._state_start = None
         self.frames = 0
-        self._frame_seq = 0          # 采集序号（v1.3：gate 唯一帧/帧龄检查用）
+        self._frame_seq = 0          # 采集序号（逐帧日志用）
         self._log_t = time.time()
         self._video_on = self._init_video()
         # 任务逐帧日志（AUV_TASK_LOG=<path>）：把 last_info 每帧存一行 JSON，
-        # 供离线核对 phase/action/Q/caution/cue_w/z... 默认不开，不影响运行
+        # 供 tools/analyze/analyze_task_log.py 离线判读（phase/action/z/dx/dy/kpt/ratio/pass…）；
+        # 默认不开，不影响运行。
         self._task_log_path = os.environ.get("AUV_TASK_LOG")
         self._task_log_fh = None
 
@@ -114,7 +115,9 @@ class AppController(object):
         开启且当前深度 ≤ min_depth_m 时禁止上浮（base/uart.py::_apply_depth_guard）。
         """
         d = getattr(self.uart, "depth_m", None)
-        lim = float(S.get("comm.depth_guard.min_depth_m", 0.3) or 0.0)
+        # 兜底用 base/uart.py 里那个**与 cfg 同值**的常量（别再写 0.3：那会让画面
+        # 显示的限深阈值与真正生效的保护阈值不一致，现场会被自己的叠加骗）
+        lim = float(S.get("comm.depth_guard.min_depth_m", _D_MIN_DEPTH_M) or 0.0)
         on = bool(S.get("comm.depth_guard.enable", True))
         return ("depth=%s guard=%s min=%.2fm%s"
                 % ("n/a" if d is None else "%.2fm" % d,
@@ -162,14 +165,15 @@ class AppController(object):
         if self.state in STATE_TASK:
             name = STATE_TASK[self.state]
             info = self.tasks[name].last_info
+            # 只显示"当前任务真的会产出"的键（两个任务的并集，见各自 last_info）
             parts = ["%s=%s" % (k, v) for k, v in info.items()
                      if isinstance(v, (int, float, str)) and
                      k in ("action", "ratio", "growth", "dx", "dy", "sway",
                            "heave", "surge", "phase", "substate", "mode", "z",
-                           "area", "pass", "kpt", "kpt_raw",
-                           "Q", "Qmem", "gain", "caution", "cue", "cue_w",
-                           "cue_mode", "visible", "source", "frame_kind",
-                           "reason")]
+                           "pass", "kpt", "kpt_raw",
+                           # yaw 恒 0 是**正常**（居中只用 sway）；它只由正航向 ALIGN.HDG 产生
+                           # → hdg/hdg_i 一起显示便于现场核对
+                           "yaw", "hdg", "hdg_i", "reason")]
             lines.append(" ".join(parts))
         lines.append(self._uart_status())
         y = 20
@@ -230,7 +234,7 @@ class AppController(object):
         return self.state
 
     def _log_task_frame(self, task, now_ms):
-        """把本帧 last_info（含 phase/action/Q/caution/cue_w/z/...）写一行 JSON。"""
+        """把本帧 last_info（phase/action/z/dx/dy/kpt/ratio/pass/…）写一行 JSON。"""
         if not self._task_log_path:
             return
         try:
@@ -259,13 +263,13 @@ class AppController(object):
         self._state_start = now_ms
 
     def close(self):
+        """收尾：关闭推流 + 相机 + 串口 + 日志文件（残留占用会让下次启动像"锁死"）。"""
         if getattr(self, "_task_log_fh", None) is not None:
             try:
                 self._task_log_fh.close()
             except Exception:
                 pass
             self._task_log_fh = None
-        """收尾：关闭推流 + 相机 + 串口，避免残留占用（相机/串口被占会导致下次像“锁死”）。"""
         try:
             from base.camera import get_stream_pusher
             pusher = get_stream_pusher()

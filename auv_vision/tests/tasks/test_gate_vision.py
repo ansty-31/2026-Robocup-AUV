@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
-"""tests/test_gate.py — gate：PnP 几何往返 / keypoint mode 降级 / kpt_mem 开关 /
+"""tests/tasks/test_gate_vision.py — gate 视觉侧：PnP 几何往返 / keypoint 解码约定 /
+非等比缩放回投 / mode 降级 / kpt_mem 开关 / GateTask(mock) 无硬件闭环。
 GateTask 相位机（MockGateBackend 无硬件闭环）。"""
 import numpy as np
 import pytest
 
 import base.settings as S
 from common.detector import Det
+from gate.gate_decode import decode_yolo11_kpt
 from gate.gate_detector import board_camera
 from gate.gate_frontend import (MODE_COARSE, MODE_FULL, MODE_P3P, MODE_WIDTH,
                                 bbox_center, parse_kpt_mode, width_range_depth)
@@ -182,3 +184,156 @@ def test_gate_task_mock_reaches_through_and_counts_pass(fake_uart):
     surges = [f[0] for f in fake_uart.frames]
     assert S.comm.gate.surge.through in surges     # 穿门冲刺速度真的下发
     assert fake_uart.neutral_calls >= 1            # 结束时回中性
+
+
+# ==============================================================
+# keypoint 头解码约定（合成张量；训练侧 ONNX 与板端唯一的耦合面）
+# ==============================================================
+G = 80                                   # 用 stride=8 那一层做算术最直观
+STRIDE = 640 / G                         # = 8.0
+INPUT = 640
+REG_MAX = 16
+KPT_DIM = 4
+LABELS = ["gate"]
+
+
+
+def _blank_outputs(g=G, nc=1, kpt_dim=KPT_DIM, reg_max=REG_MAX):
+    """一个尺度的空输出：{通道数: [1,g,g,C]}。
+
+    cls 初值给 -10（sigmoid≈4.5e-5）而不是 0：sigmoid(0)=0.5 会全部越过 conf 阈值，
+    合成用例里必须显式把背景压下去，否则解出几千个空框。
+    """
+    cls = np.full((1, g, g, nc), -10.0, np.float32)
+    return {64: np.zeros((1, g, g, 4 * reg_max), np.float32),
+            nc: cls,
+            kpt_dim * 3: np.zeros((1, g, g, kpt_dim * 3), np.float32)}
+def _set_dfl(out, gx, gy, dist=3):
+    """把 (gx,gy) 格的 DFL 分布设成 one-hot 在 bin=dist → 解码距离恒为 dist 格。"""
+    a = out[64][0, gy, gx]
+    a[:] = 0.0
+    for side in range(4):
+        a[side * REG_MAX + dist] = 40.0          # softmax → 几乎 one-hot
+def _set_score(out, gx, gy, logit=6.0):
+    out[1][0, gy, gx, 0] = logit                 # sigmoid(6) ≈ 0.9975
+def _set_kpt_cell(out, gx, gy, i, cell_x, cell_y, v_logit=6.0):
+    """把第 i 个角点放在 **cell 坐标 (cell_x, cell_y)**。
+
+    注意：ONNX 输出的 kpt x/y **已经是 cell 坐标**（= `raw*2 + 网格索引`，
+    见 scripts/3_export/modify_ultralytics.py 的 POSE_FORWARD），
+    所以这里直接写 cell 坐标；板端只做 `×stride`。
+    """
+    a = out[KPT_DIM * 3][0, gy, gx]
+    a[3 * i + 0] = cell_x
+    a[3 * i + 1] = cell_y
+    a[3 * i + 2] = v_logit
+
+def test_kpt_grid_term_is_plus_index():
+    """网格项必须是 **+索引**，不是 +索引-0.5。
+
+    把角点编码在 cell 坐标 = 网格索引本身（raw=0）处：
+        正确 → 像素 = gx * stride
+        多写 -0.5 → 像素 = (gx-0.5) * stride，即 stride=8 上偏 4 px
+    """
+    gx, gy = 10, 20
+    out = _blank_outputs()
+    _set_score(out, gx, gy)
+    _set_dfl(out, gx, gy, dist=3)
+    for i in range(4):
+        _set_kpt_cell(out, gx, gy, i, cell_x=gx, cell_y=gy)
+
+    dets = decode_yolo11_kpt(out, LABELS, INPUT, INPUT,
+                             conf=0.25, iou=0.45, input_w=INPUT, input_h=INPUT)
+    assert len(dets) == 1, "合成张量应当解出 1 个目标"
+    k = np.asarray(dets[0].kpts)
+
+    # +索引 约定：cell 坐标 == 网格索引 → 像素 == 索引×stride
+    np.testing.assert_allclose(k[:, 0], gx * STRIDE, atol=1e-3)
+    np.testing.assert_allclose(k[:, 1], gy * STRIDE, atol=1e-3)
+
+    # 显式反证：-0.5 约定会给出不同的值，且差正好半个 cell
+    np.testing.assert_allclose(k[:, 0], (gx - 0.5) * STRIDE + 0.5 * STRIDE, atol=1e-3)
+    assert abs(k[0, 0] - (gx - 0.5) * STRIDE) > 3.9, "若成立说明网格项被写成了 -0.5"
+
+def test_kpt_channel_layout_is_xyv_interleaved():
+    """通道序必须是 [x,y,v]×K，且 K 个点各自独立（reshape(g*g, K, 3) 的语义）。"""
+    gx, gy = 5, 6
+    cells = [(gx + 0.5, gy + 0.5), (gx + 2.5, gy + 0.5),
+             (gx + 2.5, gy + 2.5), (gx + 0.5, gy + 2.5)]
+    out = _blank_outputs()
+    _set_score(out, gx, gy)
+    _set_dfl(out, gx, gy, dist=4)
+    for i, (cx, cy) in enumerate(cells):
+        _set_kpt_cell(out, gx, gy, i, cx, cy, v_logit=(6.0 if i < 3 else -6.0))
+
+    d = decode_yolo11_kpt(out, LABELS, INPUT, INPUT, conf=0.25, iou=0.45,
+                          input_w=INPUT, input_h=INPUT, vis_thr=0.5)[0]
+    k = np.asarray(d.kpts)
+    for i, (cx, cy) in enumerate(cells):
+        np.testing.assert_allclose(k[i], [cx * STRIDE, cy * STRIDE], atol=1e-3)
+    # v 经 sigmoid 后阈值化：第 4 点 logit=-6 → sigmoid≈0.0025 < 0.5 → conf 置 0
+    c = np.asarray(d.kpt_conf)
+    assert c[0] > 0.9 and c[3] == 0.0, "可见度应 sigmoid 后按 vis_thr 阈值化"
+
+def test_box_decode_is_dfl_times_stride_around_grid_center():
+    """框：dist 由 DFL 期望给出，中心 = (索引+0.5)×stride。"""
+    gx, gy, dist = 12, 9, 5
+    out = _blank_outputs()
+    _set_score(out, gx, gy)
+    _set_dfl(out, gx, gy, dist=dist)
+    for i in range(4):
+        _set_kpt_cell(out, gx, gy, i, cell_x=gx + 0.5, cell_y=gy + 0.5)
+
+    d = decode_yolo11_kpt(out, LABELS, INPUT, INPUT,
+                          conf=0.25, iou=0.45, input_w=INPUT, input_h=INPUT)[0]
+    cx, cy = (gx + 0.5) * STRIDE, (gy + 0.5) * STRIDE
+    # Det.x/y/w/h 是 int（见 common/detector.py:34），所以用 w/h 反推中心并放宽 1px
+    got_cx = d.x + d.w / 2.0
+    got_cy = d.y + d.h / 2.0
+    assert abs(got_cx - cx) <= 1.0 and abs(got_cy - cy) <= 1.0
+    assert abs(d.w - 2 * dist * STRIDE) <= 2 and abs(d.h - 2 * dist * STRIDE) <= 2
+
+def test_scale_back_to_frame_is_squish():
+    """回投必须是 squish（x/y 用不同系数），因为板端预处理是直接 resize 到 640×640。"""
+    gx, gy = 10, 20
+    out = _blank_outputs()
+    _set_score(out, gx, gy)
+    _set_dfl(out, gx, gy, dist=3)
+    for i in range(4):
+        _set_kpt_cell(out, gx, gy, i, cell_x=gx + 0.5, cell_y=gy + 0.5)
+
+    d = decode_yolo11_kpt(out, LABELS, 1280, 720,
+                          conf=0.25, iou=0.45, input_w=640, input_h=640)[0]
+    k = np.asarray(d.kpts)
+    np.testing.assert_allclose(k[:, 0], (gx + 0.5) * STRIDE * (1280 / 640), atol=1e-3)
+    np.testing.assert_allclose(k[:, 1], (gy + 0.5) * STRIDE * (720 / 640), atol=1e-3)
+    # 若误用等比（两个方向都乘 2）→ y 会差 720/640=1.125 倍，这里显式反证
+    assert abs(k[0, 1] - (gy + 0.5) * STRIDE * 2.0) > 1.0
+
+def test_multiscale_outputs_are_merged_and_nms_dedups():
+    """3 个尺度的字典应合并，重叠目标被 NMS 压成一个。"""
+    out = {}
+    for g in (20, 40, 80):
+        o = _blank_outputs(g=g)
+        gx = gy = g // 4
+        _set_score(o, gx, gy, logit=6.0)
+        _set_dfl(o, gx, gy, dist=2)
+        for i in range(4):
+            _set_kpt_cell(o, gx, gy, i, cell_x=gx + 0.5, cell_y=gy + 0.5)
+        out.update(o)
+
+    dets = decode_yolo11_kpt(out, LABELS, INPUT, INPUT,
+                             conf=0.25, iou=0.45, input_w=INPUT, input_h=INPUT)
+    assert len(dets) == 1, f"多层同位置目标应被 NMS 合并，实际 {len(dets)}"
+    assert dets[0].kind == "gate"
+    assert dets[0].kpts.shape == (4, 2) and dets[0].kpt_conf.shape == (4,)
+
+def test_low_score_cells_are_filtered_by_conf():
+    """cls 低于 conf 的格子必须被丢掉（否则 NMS 前会爆炸）。"""
+    out = _blank_outputs()
+    _set_score(out, 3, 3, logit=-6.0)            # sigmoid ≈ 0.0025 < 0.25
+    _set_dfl(out, 3, 3, dist=2)
+    for i in range(4):
+        _set_kpt_cell(out, 3, 3, i, cell_x=3.5, cell_y=3.5)
+    assert decode_yolo11_kpt(out, LABELS, INPUT, INPUT, conf=0.25,
+                             input_w=INPUT, input_h=INPUT) == []

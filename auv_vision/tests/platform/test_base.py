@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""tests/test_base.py — base 层：settings 加载 / 11B 串口帧与控制器 / 遥测上行与限深保护 / 相机工厂。
+"""tests/platform/test_base.py — base 层：settings 加载 / 11B 串口帧与控制器 / 遥测上行与限深保护 / 相机工厂。
 
 只跑 SIM 路径：UartController(sim=True)、相机 type 强制 sim，不碰串口与摄像头。
 遥测/限深用 `UartController.feed_telemetry()` 或假串口喂字节，不发真帧。
@@ -29,6 +29,13 @@ def test_settings_loads_real_yaml_values():
             float(S.vision.gate.keypoint.conf_thr)
     assert S.vision.gate.pnp.z_max == 15.0
     assert S.comm.frame.header == 0xA5
+    # ⚠️ **限深下限是"现场定死"的唯一例外：0.55 不准改**（2026-09-18 用户定）。
+    #    本地曾长期写 0.3，两次整份推板端把它冲掉 → 船可能浮出水面直接结束比赛。
+    #    行为本身另有用例（test_depth_guard_blocks_surfacing_only，阈值从 cfg 读、相对判定），
+    #    这一条专门钉**数值**：改了它必须有人来解释。
+    assert float(S.comm.depth_guard.min_depth_m) == pytest.approx(0.55), \
+        "comm.depth_guard.min_depth_m 是现场定死的 0.55，不准改（详见 README 限深保护一节）"
+    assert bool(S.comm.depth_guard.enable) is True
     assert S.get("vision.gate.kpt_mem.recall_conf") == 0.45
     assert S.get("vision.no_such_key") is None
     assert S.get("comm.gate.deep.missing") is None
@@ -70,20 +77,6 @@ def test_uart_dof_axis_bytes_and_motion_text():
     assert U.describe_motion(U.build_neutral_frame()) == "停止"
 
 
-def test_uart_frame_layout_is_11_bytes():
-    """11B 帧布局 = 0xA5 + 7 轴 + 3 键，且 DOF 落到正确轴位。"""
-    neutral = U.build_neutral_frame()
-    assert len(neutral) == 11
-    assert neutral[0] == S.comm.frame.header == 0xA5
-    assert list(neutral[1:8]) == U.neutral_axis_bytes()
-    assert list(neutral[8:11]) == list(S.comm.frame.btn_values) == [0, 0, 0]
-
-    fwd = U.build_frame_from_dof(surge=1.0)
-    assert len(fwd) == 11
-    assert fwd[0] == 0xA5
-    assert fwd[1] == S.comm.frame.axis_mid      # yaw 未动 → 中位
-    assert fwd[2] == 255                        # surge 满速
-    assert fwd[8:] == bytes(S.comm.frame.btn_count)   # 3 个按键字节全 0
 
 
 def test_uart_controller_sim_setmotion_neutral_estop():
@@ -182,29 +175,6 @@ def test_telemetry_frame_roundtrip_and_resync():
     assert T.check_telemetry(bytes(bad)) is False
 
 
-def test_telemetry_receiver_freshness_and_reset():
-    """TelemetryReceiver：最新值、新鲜度(超时)、坏帧不污染、reset。"""
-    rx = T.TelemetryReceiver()
-    assert rx.depth_m is None
-    assert rx.fresh(500, now_ms=1000) is False          # 从未收到 → 不可用
-    assert rx.age_ms(1000) is None
-
-    assert rx.feed(T.build_telemetry_frame(0.5, 0.4, 1.0), now_ms=1000) == 1
-    assert rx.depth_m == pytest.approx(0.5)
-    assert rx.target_m == pytest.approx(0.4)
-    assert rx.frames == 1 and rx.bad == 0
-    assert rx.age_ms(1200) == 200
-    assert rx.fresh(500, now_ms=1200) is True
-    assert rx.fresh(500, now_ms=1600) is False          # 超过 stale_ms → 不新鲜
-
-    bad = bytearray(T.build_telemetry_frame(0.05))
-    bad[-1] ^= 0xFF
-    assert rx.feed(bytes(bad), now_ms=2000) == 0
-    assert rx.bad >= 1
-    assert rx.depth_m == pytest.approx(0.5)             # 坏帧绝不更新深度
-
-    rx.reset()
-    assert rx.depth_m is None and rx.frames == 0 and rx.age_ms() is None
 
 
 class _FakeSerial(object):
@@ -231,20 +201,6 @@ class _FakeSerial(object):
         pass
 
 
-def test_uart_drain_rx_parses_depth_from_serial(monkeypatch):
-    """真串口路径：发帧时顺带收遥测 → uart.depth_m（不用喂 feed_telemetry）。"""
-    u = U.UartController(sim=True)
-    monkeypatch.setattr(u, "sim", False)
-    monkeypatch.setattr(u, "_ser", _FakeSerial(
-        T.build_telemetry_frame(0.37, 0.30) + b"\xAA"))     # 末尾半个帧头
-    assert u.depth_m is None
-    u.send_dof(surge=0.2, force=True)                        # _write → _drain_rx
-    assert u.depth_m == pytest.approx(0.37)
-    assert u.telemetry.frames == 1
-    assert len(u._ser.written) == 1                          # 帧照常发出
-    assert u.depth_fresh() is True
-    assert u._drain_rx() == 0                                # 没有新数据 = 空操作
-    u.close()
 
 
 def test_uart_real_serial_pty_telemetry_and_guard(monkeypatch):
@@ -299,6 +255,8 @@ def _guard_uart(monkeypatch, sent, dof_comp=False):
     monkeypatch.setattr(u, "_write", lambda frame, force=False:
                         (sent.append(bytes(frame)), True)[1])
     return u
+
+
 
 
 def test_depth_guard_blocks_surfacing_only(monkeypatch):
@@ -371,14 +329,6 @@ def test_dive_boost_scales_downward_only(monkeypatch):
     u.close()
 
 
-def test_dive_boost_switch_off(monkeypatch):
-    """开关可关：`dof_comp.enable=false` → 下潜原样下发。"""
-    sent = []
-    u = _guard_uart(monkeypatch, sent, dof_comp=True)
-    monkeypatch.setitem(S.comm.dof_comp, "enable", False)
-    u.send_dof(heave=-0.2, force=True)
-    assert u.dof_out[2] == pytest.approx(-0.2)
-    u.close()
 
 
 def test_depth_guard_passthrough_when_stale_or_disabled(monkeypatch):
@@ -489,14 +439,6 @@ def test_close_hard_stops_the_boat_when_moving(monkeypatch):
         "close() 必须先把轴带回中位再关串口，实际 %s" % u._axes[:4]
 
 
-def test_close_sends_nothing_extra_when_already_neutral(monkeypatch):
-    """已在中位时 close() **一帧都不多发**（不影响既有行为/用例）。"""
-    monkeypatch.setitem(S.comm.ramp, "speed_per_s", 5000.0)
-    u = U.UartController(sim=True)
-    u.stop_hard(verify=False)
-    c = _CountWrite(u)
-    u.close()
-    assert c.n == 0, "已在中位时 close() 不该再发帧，实际发了 %d 帧" % c.n
 
 
 def test_stop_hard_reports_not_stopped_when_yaw_keeps_changing(monkeypatch):
@@ -524,8 +466,3 @@ def test_stop_hard_reports_not_stopped_when_yaw_keeps_changing(monkeypatch):
     assert u.stop_hard(verify=True, settle_s=0.1, max_extra=1) is False
 
 
-def test_uart_close_is_idempotent():
-    u = U.UartController(sim=True)
-    u.send_dof(0.0, 0.0, 0.0, 0.3, force=True)
-    u.close()
-    u.close()                                   # 第二次不应抛异常

@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""tools/analyze_task_log.py — 分析 main.py 的逐帧任务日志（AUV_TASK_LOG 产出的 JSONL）
+"""tools/analyze/analyze_task_log.py — 分析 main.py 的逐帧任务日志（AUV_TASK_LOG 产出的 JSONL）
 
 用途：下水/台架跑完后，判断"到底是识别、位姿、还是决策在卡"。
 不依赖硬件，纯离线：读 JSONL + 用 cfg 里的当前阈值反推判据。
 
 用法：
-    python3 tools/analyze_task_log.py <log.jsonl> [--task gate]
+    python3 tools/analyze/analyze_task_log.py <log.jsonl> [--task gate]
 """
 
 from __future__ import annotations
@@ -17,7 +17,8 @@ import os
 import statistics as st
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 工程根 = tools/<类>/x.py 往上**三**级（分类重整后本脚本深了一层）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import base.settings as S                                    # noqa: E402
 
@@ -160,20 +161,25 @@ def main():
                   % (nm, len(v), v[int(0.1 * len(v))], st.median(v),
                      v[int(0.9 * len(v)) - 1], st.pstdev(v)))
         if len(full_h) >= 5:
-            print("   => bias 建议值 ≈ %+.1f°（机身摆正后读到的中位数 → 写进 "
-                  "comm.gate.align_yaw.heading.bias_deg 再开 enable）" % st.median(full_h))
+            print("   => 这个中位数就是**正航向要消掉的姿态偏置**（相机安装偏置已包含在内）："
+                  "%+.1f°" % st.median(full_h))
+            print("      收敛阈值见 comm.gate.hdg.tol_deg（用户定 8~10°）；"
+                  "若中位数明显偏一个常数，先怀疑相机—机身安装偏置"
+                  "（`gate.geometry.body_center_offset`，尚未标定），不要用别的手段去「补偿」它。")
             print("   注：full 的 std = 此刻机身实际在晃多少，不是噪声底；"
-                  "噪声底用静态 dump 测（tools/analyze_heading.py）")
+                  "噪声底用静态 dump 测（tools/analyze/analyze_heading.py）")
 
     # ---- ⑦c 水平通道"能动力"：为什么调不动 ----
-    yaw_out = float((S.get("comm.gate.align_yaw", None) or {}).get(
-        "out_max", (S.get("comm.ball", None) or {}).get("edge_yaw_max", 0.15)) or 0.15)
+    # ⚠️ 2026-09-20 起**居中只有 sway 通道**（`comm.gate.align_yaw` 已删除；
+    #     gate 里唯一的 yaw 来源是 ALIGN.HDG 正航向 → 增益 comm.motion.turn_pid）。
+    yaw_out = float((S.get("comm.motion.turn_pid", None) or {}).get("out_max", 0.45) or 0.45)
     sway_out = float((S.get("comm.gate.pid_sway", None) or {}).get(
-        "out_max", (S.get("comm.ball.approach_pid", None) or {}).get("out_max", 0.45)) or 0.45)
+        "out_max", (S.get("comm.motion.pid_sway", None) or {}).get("out_max", 0.45)) or 0.45)
     sw = [_g(r, "sway") for r in rows]
     yw = [_g(r, "yaw") for r in rows]
-    print("\n⑦c 水平通道能动力（执行器死区 %.3f；sway 上限 %.2f=25%% 推力，yaw 上限 %.2f=15%% 推力）"
-          % (dz, sway_out, yaw_out))
+    print("\n⑦c 水平通道能动力（执行器死区 %.3f；sway 上限 %.2f=25%% 推力）" % (dz, sway_out))
+    print("    注：yaw 若为 0 属**正常**（居中不用转向；只有正航向 ALIGN.HDG 才发 yaw，上限 %.2f）"
+          % yaw_out)
     for nm, v, om in (("sway", sw, sway_out), ("yaw", yw, yaw_out)):
         dead = sum(1 for x in v if 0 < abs(x) < dz)
         top = sum(1 for x in v if abs(x) >= om - 1e-9)
@@ -226,7 +232,7 @@ def main():
         if run_start is not None:
             worst = max(worst, _g(rows[-1], "t") - run_start)
         print("   最长连续「已在门口却没用冲刺速度」时长 = %.1fs  ← 这段就是白等/蹭门风险" % worst)
-        print("   => 若这段很长：coarse/width 的 commit 出口（dash）是不是还关着？")
+        print("   => 若这段很长：出口③「在门口超时兜底」没触发？看 loiter.timeout_ms / dx_max / dy_max")
     else:
         print("   从未到过门口（占比始终 < %.2f）" % near_r)
 

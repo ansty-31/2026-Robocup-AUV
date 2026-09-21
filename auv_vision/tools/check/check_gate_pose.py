@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
-"""tools/check_gate_pose.py — 查"为什么位姿被拒"（只读相机，不驱动推进器）。
+"""tools/check/check_gate_pose.py — 查"为什么位姿被拒"（只读相机，不驱动推进器）。
 
 打印每帧：角点置信度 / mode / 候选解数量 / 最佳候选的 RMS 与 tz / gate_pose 最终结果。
-用法（板端）：python3 tools/check_gate_pose.py [秒数]
+用法（板端）：python3 tools/check/check_gate_pose.py [秒数]
 """
 import os
 import sys
 import time
 
-for _p in (os.getcwd(), os.path.dirname(os.path.abspath(__file__))):
+# 工程根 = tools/check/x.py 往上**三**级；cwd 也留着（有些用法从工程根直接跑）
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+for _p in (_ROOT, os.getcwd()):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -20,13 +22,21 @@ from gate.gate_frontend import parse_kpt_mode          # noqa: E402
 from gate.geometry import object_points, _iter_candidates, reproj_rms, gate_pose   # noqa: E402
 from gate.kpt_memory import build_kpt_memory           # noqa: E402
 
-DUR = float(sys.argv[1]) if len(sys.argv) > 1 else 20.0
+if any(a in ("-h", "--help") for a in sys.argv[1:]):
+    print(__doc__.strip())
+    sys.exit(0)
+try:
+    DUR = float(sys.argv[1]) if len(sys.argv) > 1 else 20.0
+except ValueError:
+    print("参数不是秒数：%r\n用法：python3 tools/check/check_gate_pose.py [秒数]" % sys.argv[1])
+    sys.exit(2)
 cam = board_camera()
 obj3 = object_points()
 V = S.vision.gate
-conf_thr = float(S.get("vision.gate.keypoint.conf_thr", 0.5))
+# 兜底值 == 当前 cfg（别在这里抄旧值：0.5/8.0 是改配置前的历史字面量）
+conf_thr = float(S.get("vision.gate.keypoint.conf_thr", 0.7))
 pnp = V.get("pnp", {}) or {}
-reproj_thr = float(pnp.get("reproj_px", 8.0))
+reproj_thr = float(pnp.get("reproj_px", 20.0))
 zb = (float(pnp.get("z_min", 0.2)), float(pnp.get("z_max", 15.0)))
 
 backend = build_gate_backend()                 # 板端 cfg 的 vis_thr(0.5) 已能看到原始置信度

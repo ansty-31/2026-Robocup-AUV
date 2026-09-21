@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""tools/check_pipeline_identity.py — "域自证"脚本（本地/板端都能跑；不入运行时）
+"""tools/check/check_pipeline_identity.py — "域自证"脚本（本地/板端都能跑；不入运行时）
 
 每次把代码/配置同步到另一台机器（PC ↔ 板端）后跑一次（服务整个项目，不限 gate）：
-    python3 tools/check_pipeline_identity.py
-    # 或: python3 tools/check_pipeline_identity.py --vision cfg/vision.yaml
+    python3 tools/check/check_pipeline_identity.py
+    # 或: python3 tools/check/check_pipeline_identity.py --vision cfg/vision.yaml
 
 校验（设备内相对一致性，不绑定 cv2 版本/哈希，避免 PC 与板端误报）：
   1. 声明项：undistort=true、input_size=640、标定分辨率==配置帧尺寸、纯拉伸（无 letterbox/crop）；
   2. 单一来源：getOptimalNewCameraMatrix(alpha=0, centerPrincipalPoint=False) 的结果
-     必须与 gate.vision.geometry.CameraModel(rectified=True) 的 K 一致；
+     必须与 gate.geometry.CameraModel(rectified=True) 的 K 一致；
   3. 域恒等式：A⁻¹(A·new_K)==K_full；detector decode 的逆缩放 == 1/resize 缩放
      （"关键点回缩域"与"PnP 域"必须是同一个域）。
 退出码：0=一致；1=不一致（部署脚本可据此报警）。
@@ -57,7 +57,7 @@ def _check(name, ok, detail=""):
 
 def run(vision_path=None, calibration=None, tol=1e-6):
     import cv2
-    from gate.vision.geometry import CameraModel
+    from gate.geometry import CameraModel
 
     vision_path = vision_path or os.path.join(_ROOT, "cfg", "vision.yaml")
     print("=== gate 域自证 (pipeline_id=%s) ===" % PIPELINE_ID)

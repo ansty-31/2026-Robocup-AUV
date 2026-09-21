@@ -3,12 +3,12 @@
 
 运动链（三段式运动移植自早期独立实验，**该实验目录已删除**；**视觉识别仍用本项目**）：
 
-  SEARCH   无目标：原地**脉冲旋转**（我们的 spin_s/pause_s）+ 周期性慢速前进探测
+  SEARCH   无目标：原地**脉冲旋转**（spin_s/pause_s）+ 周期性慢速前进探测
            （转 spin_s → 停 pause_s，停的间隙让检测有静止帧）
-  CENTER   看到球：**surge=0、sway=0**，仅 yaw(edge_yaw PID) + heave(ball.pid)，
-           把球在**水平与竖直**同时居中（沿用我们的 yaw 控制方式）
-  APPROACH 稳定居中后：surge **分级**前进（远 fast / 近 slow）+ **仅 sway** 做水平修正
-           （approach_pid，移植自独立实验）；**yaw=0、heave=0**
+  CENTER   看到球：**surge=0、sway=0**，仅 yaw(edge_yaw PID) + heave(motion.pid_heave)，
+           把球在**水平与竖直**同时居中
+  APPROACH 稳定居中后：surge **分级**前进（远 surge_fast / 近 surge_slow）+ **仅 sway**
+           做水平修正（motion.pid_sway）；**yaw=0、heave=0**
   DASH     面积(EMA) ≥ dash_ratio 连续 dash_confirm_frames 帧 → **surge_fast**（分级里
            最高那档）冲刺 dash_dur_s，**不检测有没有撞到**
   STOP     冲刺结束 → 全 0 保持 stop_hold_s（**稳定停住**）→ DONE("hit")
@@ -17,18 +17,25 @@
 engage_hold_s）→ 回 SEARCH。**CENTER 阶段丢失绝不前进**（居中不允许带前进）。
 时限：`comm.ball.timeout_ms`（当前 cfg 30s；DASH/STOP 期间不打断，保证命中与停稳都能走完）。
 
-参数一律在 cfg/comm.yaml 的 `ball:` 段（settings 读取）。
+参数：本任务特有的在 cfg/comm.yaml 的 `ball:` 段；**与过门共用的**（两套 PID、
+surge_fast/surge_slow/loss_inertia_surge）在 `motion:` 段 —— 一处调、两个任务同时生效。
 """
 from __future__ import annotations
 
 import base.settings as S
 from common.PID import PID
+from common.cfgnode import motion_num, motion_pid
 
 PH_SEARCH = "SEARCH"
 PH_CENTER = "CENTER"
 PH_APPROACH = "APPROACH"
 PH_DASH = "DASH"
 PH_STOP = "STOP"
+
+
+def _shared_surge(key):
+    """**ball/gate 共用**的前进速度档（comm.motion.surge_fast / surge_slow / loss_inertia_surge）。"""
+    return motion_num(key)
 
 
 def _dx_norm(cx, w):
@@ -74,26 +81,15 @@ class BallTask(object):
         self._hold_until_ms = None
 
         # 三套 PID（量纲都是"归一化偏差 ±1"）
-        hk = dict(kp=S.comm.ball.pid.kp, ki=S.comm.ball.pid.ki,
-                  kd=S.comm.ball.pid.kd,
-                  out_min=-S.comm.ball.pid.out_max,
-                  out_max=S.comm.ball.pid.out_max,
-                  deadzone=S.comm.ball.pid.deadzone)
-        # ① 居中 yaw（我们的方式：带阻尼 PID + 限幅，靠近自动减速）
+        # ① 居中 yaw（撞球特有：门/球居中用旋转 + 限幅，靠近自动减速；过门居中只用 sway）
         self._pid_yaw = PID(kp=S.comm.ball.edge_yaw_kp, ki=0.0,
                             kd=S.comm.ball.edge_yaw_kd,
                             out_min=-S.comm.ball.edge_yaw_max,
                             out_max=S.comm.ball.edge_yaw_max,
                             deadzone=0.0)
-        # ② 居中 heave（垂直）
-        self._pid_heave = PID(**hk)
-        # ③ 接近 sway（水平；移植独立实验的调参）
-        ak = dict(kp=S.comm.ball.approach_pid.kp, ki=S.comm.ball.approach_pid.ki,
-                  kd=S.comm.ball.approach_pid.kd,
-                  out_min=-S.comm.ball.approach_pid.out_max,
-                  out_max=S.comm.ball.approach_pid.out_max,
-                  deadzone=S.comm.ball.approach_pid.deadzone)
-        self._pid_sway = PID(**ak)
+        # ② 居中 heave（垂直）③ 接近 sway（水平）——**与过门共用 comm.motion 那两套**
+        self._pid_heave = PID(**motion_pid("pid_heave"))
+        self._pid_sway = PID(**motion_pid("pid_sway"))
 
         self.last_info = {"action": "stop", "phase": PH_SEARCH, "ratio": 0.0,
                           "growth": 0.0, "dx": 0.0, "dy": 0.0, "sway": 0.0,
@@ -123,8 +119,8 @@ class BallTask(object):
 
     def _surge_plan(self, r, g):
         """面积占比分级 → (前进速度, 标签)。接近段只用两档（fast/slow）。"""
-        fast = S.comm.ball.surge_fast
-        slow = S.comm.ball.surge_slow
+        fast = _shared_surge("surge_fast")
+        slow = _shared_surge("surge_slow")
         if r >= S.comm.ball.r_slow:
             if g > S.comm.ball.growth_eps:
                 return fast, "approach_fast"
@@ -190,7 +186,7 @@ class BallTask(object):
                 self._dash_cnt = 0
                 self._pid_sway.reset()
                 # 冲刺帧就是纯前进（不带上一帧的横移修正）
-                return "dash", S.comm.ball.surge_fast, 0.0, 0.0, 0.0
+                return "dash", _shared_surge("surge_fast"), 0.0, 0.0, 0.0
         else:
             self._dash_cnt = 0
         return label, surge, sway, 0.0, 0.0
@@ -198,7 +194,7 @@ class BallTask(object):
     def _step_dash(self, now_ms):
         """DASH：纯前进冲刺（不检测）；到时 → STOP 保持。"""
         if now_ms < self._dash_until_ms:
-            return "dash", S.comm.ball.surge_fast
+            return "dash", _shared_surge("surge_fast")
         self._phase = PH_STOP
         self._stop_until_ms = now_ms + S.comm.ball.stop_hold_s * 1000
         self._reset_pids()
@@ -222,7 +218,7 @@ class BallTask(object):
         if self._lost_cnt <= grace:
             if self._phase == PH_APPROACH:
                 # 接近中短时丢失：低速惯性保持（还在前进段，允许前进）
-                return "approach_inertia", S.comm.ball.lost_inertia_surge, 0.0
+                return "approach_inertia", _shared_surge("loss_inertia_surge"), 0.0
             # SEARCH / CENTER：原地保持（**居中段绝不前进**）
             return "hold", 0.0, 0.0
         if self._hold_until_ms is None:

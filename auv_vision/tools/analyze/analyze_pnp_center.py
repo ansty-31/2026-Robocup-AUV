@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""tools/analyze_pnp_center.py — 位姿档"居中误差"到底可不可信？（p3p vs full）
+"""tools/analyze/analyze_pnp_center.py — 位姿档"居中误差"到底可不可信？（p3p vs full）
 
 动机（2026-09-18）：现场"冲歪时最强只能卡进 p3p，还是有点调不动"。
 位姿档的横向误差 `dxn` 是**把门原点(0,0,0)用解出的位姿投影回图像**算的
@@ -16,7 +16,7 @@
     |中位偏差| 小 且 符号相反比例低  → 位姿档的居中误差可信
     偏差大 / 符号常相反            → p3p 的投影不可信 → 该档不该用位姿误差做居中
 
-用法：python3 tools/analyze_pnp_center.py <dump.jsonl> [...]
+用法：python3 tools/analyze/analyze_pnp_center.py <dump.jsonl> [...]
 """
 from __future__ import annotations
 
@@ -24,7 +24,8 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 工程根 = tools/<类>/x.py 往上**三**级（分类重整后本脚本深了一层）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import numpy as np                                              # noqa: E402
 import base.settings as S                                       # noqa: E402

@@ -18,8 +18,9 @@
 #         AUV_REV_SURGE(-0.35)  倒车速度（负=后退）
 #         AUV_LOG_TAG(run)        日志文件名前缀（板子时钟不准，**用前缀区分轮次，别用 date**）
 #                                 → log/<tag>ball.jsonl / log/<tag>gate.jsonl / /tmp/<tag>path.csv
+#         （转角原语已移到 common/turn_deg.py，本脚本调用它）
 #         AUV_BALL_LOG / AUV_GATE_LOG / AUV_DOF_LOG   单独覆盖这三个路径
-#                                 逐帧日志（过门那份）用 tools/analyze_task_log.py 判读
+#                                 逐帧日志（过门那份）用 tools/analyze/analyze_task_log.py 判读
 #         AUV_REV_ON_FAIL(0)    撞球任务非 0 退出时是否仍然倒车（1=倒）
 #         --- 2026-09-18 新增的三步 ---
 #         AUV_POST_FWD_S(2)       倒车后**前进秒数**（0=跳过）
@@ -168,7 +169,7 @@ else
     turn_args+=(--blind)
     [ -n "${TURN_RATE}" ] && turn_args+=(--rate-dps "${TURN_RATE}")
   fi
-  python3 task1_2/turn_deg.py "${turn_args[@]}"
+  python3 common/turn_deg.py "${turn_args[@]}"   # 2026-09-18 移到 common/（公用运动原语）
   trc=$?
   case "${trc}" in
     0) echo "-- 转向到达（退出码 0）--" ;;
@@ -187,7 +188,7 @@ if [ "${GATE_AFTER}" = "1" ]; then
   AUV_TASK_LOG="${GATE_LOG}" python3 main.py --task gate
   grc=$?
   echo "过门任务退出码 ${grc}（0=正常结束，3=后端不可用拒绝启动）"
-  echo "逐帧日志：${GATE_LOG}（拉回来用 python3 tools/analyze_task_log.py 判读）"
+  echo "逐帧日志：${GATE_LOG}（拉回来用 python3 tools/analyze/analyze_task_log.py 判读）"
 else
   echo "-- 已按 AUV_GATE_AFTER=0 跳过过门任务 --"
 fi

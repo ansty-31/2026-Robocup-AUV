@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""tools/analyze_kpt_dump.py — 从 preview_detect --dump 的 JSONL 看角点可得率与 PnP 命中率。
+"""tools/analyze/analyze_kpt_dump.py — 从 preview_detect --dump 的 JSONL 看角点可得率与 PnP 命中率。
 
 用途：回答"放宽哪个阈值能真正提高位姿可用率"（conf_thr / vis_thr / reproj_px）。
-用法：python3 tools/analyze_kpt_dump.py <dump.jsonl> [more.jsonl ...]
+用法：python3 tools/analyze/analyze_kpt_dump.py <dump.jsonl> [more.jsonl ...]
 """
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ import os
 import statistics as st
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 工程根 = tools/<类>/x.py 往上**三**级（分类重整后本脚本深了一层）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import numpy as np                                              # noqa: E402
 import base.settings as S                                       # noqa: E402
