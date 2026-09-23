@@ -165,8 +165,11 @@ def main():
     parser.add_argument("--task", choices=["detect", "pose"], default="detect",
                         help="任务：detect=目标检测 / pose=关键点（gate 4 角点）")
     parser.add_argument("--weights", default=None,
-                        help="预训练权重（默认 detect: yolo11n.pt / pose: yolo11n-pose.pt，"
-                             "不存在则自动下载）")
+                        help="预训练权重。**detect** 缺省 = weights/yolo11n.pt（当前生产检测权重）。"
+                             "**pose 必须显式指定**（2026-09-23 起取消静默默认，避免从上一代门模型"
+                             "热身而继承其角点口径/几何偏差）：\n"
+                             "    · weights/yolo11n-pose.coco.pt —— 官方 COCO 17 点，从零重训（推荐）\n"
+                             "    · weights/yolo11n-pose.pt      —— 当前生产门模型，热身微调（会继承上一代特性）")
     parser.add_argument("--epochs", type=int, default=100, help="训练轮数")
     parser.add_argument("--imgsz", type=int, default=640, help="训练输入尺寸（与量化640x640保持一致）")
     parser.add_argument("--batch", type=int, default=4, help="批大小")
@@ -194,6 +197,20 @@ def main():
     parser.set_defaults(amp=True)
     args = parser.parse_args()
     # 按任务填充默认值（detect: yolo11n.pt / pose: yolo11n-pose.pt）
+    if args.task == "pose" and not args.weights:
+        print("=" * 70)
+        print("❌ pose 训练必须显式指定 --weights（2026-09-23 起不再静默默认）")
+        print("=" * 70)
+        print("原因：auv5 曾按缺省值从上一代门模型（auv4）热身，把 auv4 在**错误内参 + 旧链路**上")
+        print("      学到的角点口径/几何偏差继承了下来（实测四边形相对标签系统性内缩 ~2-4%；")
+        print("      而从官方预训练重训的实验臂面积比 ≈1.02，无内缩且 mAP 不降）。")
+        print()
+        print("请二选一（显式传参）：")
+        print("  ① 从零重训（推荐）：--weights weights/yolo11n-pose.coco.pt")
+        print("  ② 热身微调（自行承担继承）：--weights weights/yolo11n-pose.pt")
+        print()
+        print("说明见 runs/auv5/REPORT_auv5_pose.md §12 与 weights/README.md 的命名/上线规则。")
+        sys.exit(2)
     args.weights = args.weights or str(REPO_ROOT / WEIGHT_FILES[args.task])
     args.project = args.project or str(REPO_ROOT / "runs" / args.task)
     args.output_pt = args.output_pt or str(REPO_ROOT / WEIGHT_FILES[args.task])

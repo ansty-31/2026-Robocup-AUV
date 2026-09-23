@@ -113,7 +113,9 @@ python scripts/1_prepare/resplit_dataset.py data/AUV_4/PNP.kpt4.yolov8
 python scripts/2_train/train_yolo11n.py --data <data.yaml> --epochs 300 --batch 4 --device 0 --cache ram
 
 # pose（默认权重 weights/yolo11n-pose.pt，输出 weights/yolo11n-pose.pt）
-python scripts/2_train/train_yolo11n.py --task pose --data <data.yaml> --epochs 300 --batch 4 --device 0
+# pose：**必须显式指定起点**（2026-09-24 起缺省即报错；推荐从官方预训练重训）
+python scripts/2_train/train_yolo11n.py --task pose --data <data.yaml> \
+    --weights weights/yolo11n-pose.coco.pt --epochs 300 --batch 4 --device 0
 ```
 
 要点：

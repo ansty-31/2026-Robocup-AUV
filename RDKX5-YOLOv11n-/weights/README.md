@@ -15,12 +15,28 @@
 >
 > 即：文件名/文档里说的 "AUV v3" 与实盘 md5 对不上（`weights/yolo11n.pt` 与名为 `auv_v4` 的
 > 训练目录同源）。**我没有改动任何权重、也没有改版本命名**，请由你确认哪个才是真正的 v3/v4。
-| `yolo11n-pose.pt` | **pose 模型（当前 = AUV_5 版）**：门 4 角点。2026-09-23 在 `data/AUV_5/gate-pose.yolov8`（625 张，清水 53%，图 = **D+wb 链路**）上从 auv4 版权重微调，早停 258/300（best=ep158），val Pose mAP50 **0.959** / mAP50-95 **0.936**，test mAP50 **0.9589** / mAP50-95 **0.9242**。md5 `f08f82ed…` | `scripts/2_train/train_yolo11n.py --task pose` 产出（best.pt 复制到本名） | 导出 pose ONNX、板端 gate 4 角点；详见 [`runs/auv5/REPORT_auv5_pose.md`](../runs/auv5/REPORT_auv5_pose.md) |
+| ~~`yolo11n-pose.pt`~~ | **⚠️ 该槽位自 2026-09-24 起为空**（auv5 因「错误起点」退役，见下方规则；
+   等新标注到齐后从 `coco.pt` 重训再放入）。原 auv5 版：：门 4 角点。2026-09-23 在 `data/AUV_5/gate-pose.yolov8`（625 张，清水 53%，图 = **D+wb 链路**）上从 auv4 版权重微调，早停 258/300（best=ep158），val Pose mAP50 **0.959** / mAP50-95 **0.936**，test mAP50 **0.9589** / mAP50-95 **0.9242**。md5 `f08f82ed…` | `scripts/2_train/train_yolo11n.py --task pose` 产出（best.pt 复制到本名） | 导出 pose ONNX、板端 gate 4 角点；详见 [`runs/auv5/REPORT_auv5_pose.md`](../runs/auv5/REPORT_auv5_pose.md) |
+> ## ⚠️ pose 训练的起点规则（2026-09-24 起，强制）
+>
+> **pose 训练必须显式传 `--weights`**（`train_yolo11n.py` 已改为缺省即报错）：
+>
+> | 起点 | 含义 | 何时用 |
+> |---|---|---|
+> | `weights/yolo11n-pose.coco.pt` | 官方 COCO pose 17 点 | **推荐**：从零重训，不继承任何历史口径 |
+> | `weights/yolo11n-pose.pt` | 当前生产门模型 | 热身微调，**会继承上一代的角点口径与几何偏差** |
+>
+> **血泪教训（auv5，2026-09-23）**：auv5 按当时的静默默认从 auv4 热身，把 auv4 在
+> **错误内参（A 标定）+ 旧链路**上学到的「角点口径」一起继承了下来 —— 实测四边形/标签面积比只有
+> 0.960–0.977（系统性内缩 ~2–4%，近距离肉眼可见「点偏中间」）；而同数据、同增强、从 `coco.pt`
+> 起步的对照臂面积比 **1.022（无内缩）**，mAP 还不降（0.9233 vs 0.9242）。
+> 完整证据见 [`runs/auv5/REPORT_auv5_pose.md`](../runs/auv5/REPORT_auv5_pose.md) §11–§12。
+
 | `yolo11n-pose.auv4.pt` | 上一版 pose 模型（AUV_4 版，2026-09-17 在 `data/AUV_4/PNP.kpt4.yolov8` 上微调，206 ep 早停 / best=ep106，val Pose mAP50-95 **0.952**、test **0.911**）。md5 `3a5e87fa…`；同源训练记录 `_archive/runs/pose/auv4/` | 2026-09-23 被 auv5 顶替时按代次改名保留 | **回退用**（改名前的文件就是它） |
 | `yolo11n-pose.coco.pt` | 官方 COCO pose 预训练（17 点）备份，从头训练时用 | 官方 asset | `2_train --task pose --weights weights/yolo11n-pose.coco.pt` |
 | `yolo11n-pose.auv3.pt` | 更早一版 pose 模型（AUV_3 版）。**更早的进板 bin 对应的就是它** | 手动备份；同源训练记录 `_archive/runs/pose/PNP_v1/`（md5 `db2ceb28…`） | **回退用** |
 | `yolo11n.onnx` | 检测 ONNX（6 输出，opset 11 / 640） | `scripts/3_export/export_onnx.py` | `scripts/3_export/quantize.sh`（PTQ 输入） |
-| `yolo11n-pose.onnx` | **当前** pose ONNX（**9 输出**，NHWC，kpt 通道 12；输入 `images 1×3×640×640`，opset 11）= auv5 版导出，md5 `05fd2d8b…` | `export_onnx.py --task pose`（需先 `modify_ultralytics.py --task pose` 打补丁） | `quantize.sh configs/gate_kpt_config.yaml` |
+| ~~`yolo11n-pose.onnx`~~ | **⚠️ 槽位为空**（随 auv5 一并删除）；原 auv5 导出：（**9 输出**，NHWC，kpt 通道 12；输入 `images 1×3×640×640`，opset 11）= auv5 版导出，md5 `05fd2d8b…` | `export_onnx.py --task pose`（需先 `modify_ultralytics.py --task pose` 打补丁） | `quantize.sh configs/gate_kpt_config.yaml` |
 | `yolo11n-pose.auv4.onnx` | 上一版 pose ONNX（AUV_4 导出），md5 `1e7785ca…` | 同上，被 auv5 顶替时改名保留 | **回退用** |
 
 > **命名规则（2026-09-23 起）**：**当前版本占"规范名"**（`yolo11n-pose.pt` / `yolo11n-pose.onnx` /

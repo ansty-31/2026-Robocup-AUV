@@ -175,7 +175,9 @@ python scripts/1_prepare/resplit_dataset.py data/AUV_4/PNP.kpt4.yolov8          
 > **⚠️ `weights/yolo11n.pt` 的 `gate` 类目前等于没有输出**：在 AUV_1 valid 集（152 张）上，
 > 即便把 `conf` 降到 0.05，`gate` 类最高置信度仍是 **0.00**，28 个门标注框在 IoU@0.5 与 @0.3 下命中均为 **0**；
 > 同一次评估 `blue_ball` 86/99、`red_ball` 76/92 都正常。所以**门检测不要用这个权重**，
-> 用 `weights/yolo11n-pose.pt`（AUV_4 PnP 门 4 角点模型，2026-09-17 训练，val Pose mAP50-95 0.952）。
+> 门 4 角点用 pose 模型（`--task pose`）。⚠️ **2026-09-24 起 `weights/yolo11n-pose.pt` 槽位为空**：
+> auv5 因「错误起点（从 auv4 热身，继承了错误内参时代的角点口径）」退役，待新标注到齐后从
+> `weights/yolo11n-pose.coco.pt` 重训。详见 `runs/auv5/REPORT_auv5_pose.md` §11–§13。
 > 下一轮训练前请先核对训练数据集的 `names` 顺序、以及 `gate` 标签是否真的进了那一版——
 > 一个类别头完全没有输出，通常不是"数据不够"，而是标签或类别顺序的问题。
 
@@ -185,8 +187,11 @@ python scripts/1_prepare/resplit_dataset.py data/AUV_4/PNP.kpt4.yolov8          
 python scripts/2_train/train_yolo11n.py --data data/AUV_1/dataset/AUV.yolov11/data.yaml \
     --epochs 300 --batch 4 --imgsz 640 --device 0 --cache ram
 
-# 关键点（gate 4 角点；默认预训练 weights/yolo11n-pose.pt，训练后重打 pose 补丁）
+# 关键点（gate 4 角点；训练后自动重打 pose 补丁）——起点必须显式指定，见下
+#   ⚠️ pose 必须显式给起点（缺省即报错）；推荐从官方预训练重训：
+#      --weights weights/yolo11n-pose.coco.pt
 python scripts/2_train/train_yolo11n.py --task pose --data <roboflow导出>/data.yaml \
+    --weights weights/yolo11n-pose.coco.pt \
     --epochs 300 --batch 4 --imgsz 640 --device 0
 #   best.pt 自动复制为 weights/yolo11n.pt 或 weights/yolo11n-pose.pt
 ```
@@ -237,7 +242,7 @@ python scripts/3_export/modify_ultralytics.py --task pose     # 跑完记得补�
 | 文件 | 角色 | 由谁产生 / 谁使用 |
 |---|---|---|
 | `weights/yolo11n.pt` | 检测模型（当前 AUV v3，3 类）⚠️ `gate` 类无输出，门检测请用 pose 权重 | `2_train` 产生；供 `3_export` 导出、`select_frames` 筛图 |
-| `weights/yolo11n-pose.pt` | pose 模型（门 4 角点）；实际的门检测器。**当前 = AUV_4 版**（2026-09-17，val Pose mAP50-95 **0.952** / test **0.911**） | 训练起点（上一版备份见 `weights/yolo11n-pose.auv3.pt`）；`--task pose` 导出 |
+| `weights/yolo11n-pose.pt` | **⚠️ 自 2026-09-24 起为空**（auv5 因错误起点退役：从 auv4 热身继承了错误内参时代的角点口径，实测系统性内缩 2–4%） | 待从 `weights/yolo11n-pose.coco.pt` 重训后放入 |
 | `weights/yolo11n-pose.coco.pt` | pose 官方 COCO 预训练（17 点），从头训时用作起点 | 官方 asset |
 | `weights/yolo11n.onnx` | 检测 ONNX（6 输出） | `export_onnx.py` 产出；`quantize.sh` 输入 |
 | `weights/yolo11n-pose.onnx` | pose ONNX（9 输出） | 同上（`--task pose`） |
