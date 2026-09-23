@@ -84,3 +84,14 @@ htmlcov/
 # 训练输出与本地数据集
 runs/
 data/
+
+# 实验专区的数据与结果不入库（脚本与文档要入库，见 experiment/README.md）
+experiment/data/
+experiment/runs/
+experiment/logs/
+
+# 录像素材（GB 级，禁止入库）
+raw-data/
+
+# 归档区：暂时不用但保留的产物/备份（见 _archive/README.md，不进库）
+_archive/

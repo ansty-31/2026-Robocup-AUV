@@ -11,7 +11,7 @@
      若存在 <文件>.timestamps（逐帧时间戳），可用 --every-seconds 按时间抽帧
 
 用途：先切出原始帧 → 人工分类（红球/蓝球/门/标定板…）→
-      再用 scripts/prepare_frames.py 统一预处理（去畸变 + 补偿 + 640x640）。
+      再用 scripts/1_prepare/prepare_frames.py 统一预处理（去畸变 + 补偿 + 640x640）。
 
 用法示例：
     python scripts/1_prepare/extract_frames.py data/AUV_2/auv_xxx.mjpeg              # 裸流全量切

@@ -49,14 +49,14 @@
 ```
 数据准备(data/xxx/data.yaml)         ① 训练
         ↓
-scripts/train_yolo11n.py             ② 微调(基于yolo11n.pt预训练权重)
+scripts/2_train/train_yolo11n.py             ② 微调(基于yolo11n.pt预训练权重)
         ↓  best.pt → yolo11n.pt
-scripts/modify_ultralytics.py        ③ 输出头拆分（detect=6输出 / pose=9输出，自动备份/验证）
-scripts/export_onnx.py               ④ 导出 ONNX（--task detect|pose）
+scripts/3_export/modify_ultralytics.py        ③ 输出头拆分（detect=6输出 / pose=9输出，自动备份/验证）
+scripts/3_export/export_onnx.py               ④ 导出 ONNX（--task detect|pose）
         ↓  yolo11n.onnx
-scripts/prepare_calibration.py       ⑤ 从图片生成100张校准数据(.rgb)
+scripts/3_export/prepare_calibration.py       ⑤ 从图片生成100张校准数据(.rgb)
         ↓  calibration_data/
-scripts/quantize.sh                  ⑥ Docker内 hb_mapper PTQ量化
+scripts/3_export/quantize.sh                  ⑥ Docker内 hb_mapper PTQ量化
         ↓
 output/yolo11n_detect_bayese_640x640_nv12.bin  ⑦ scp → RDK X5 板端
 ```
@@ -102,21 +102,21 @@ names: [red_ball, blue_ball, gate]   # 类别
 ```bash
 # 1) 棋盘格（视频或图片目录）→ 相机内参 yaml（RMS≤0.8px 验收）
 #    棋盘要覆盖画面四角/边缘，否则边缘畸变靠外推、去畸变会失真
-python scripts/calibrate_camera.py data/AUV_1/board \
+python scripts/1_prepare/calibrate_camera.py data/AUV_1/board \
     --cols 11 --rows 8 --square-mm 20 --output configs/front_camera.yaml
 
 # 2) 录制文件 → 原始帧（自动识别容器视频 / 裸 MJPEG 流，后者无损切割）
-python scripts/extract_frames.py data/AUV_2/auv_xxx.mjpeg        # 裸 MJPEG 全量切
-python scripts/extract_frames.py data/AUV_1/rec_front.mp4 --step 5
+python scripts/1_prepare/extract_frames.py data/AUV_2/auv_xxx.mjpeg        # 裸 MJPEG 全量切
+python scripts/1_prepare/extract_frames.py data/AUV_1/rec_front.mp4 --step 5
 #    输出 <同目录>/<文件名>_frames/frame_000001.jpg ...（原始分辨率）
 
 # 3) 分好类的图片集 → 训练图集（去畸变 + 白平衡/CLAHE/gamma 补偿 + 640x640）
-python scripts/prepare_frames.py data/AUV_2/<分类目录> --config configs/vision.yaml
+python scripts/1_prepare/prepare_frames.py data/AUV_2/<分类目录> --config configs/vision.yaml
 #    --calibration configs/front_camera.yaml 亦可手动指定；参数须与板端一致
 
 # 4)（可选）用已有模型筛图：剔除不要的类别 + 按画面质量加权抽样
-python scripts/select_frames.py data/AUV_2/datay/origin \
-    --weights runs/detect/auv_v3/weights/best.pt --drop-classes red_ball \
+python scripts/1_prepare/select_frames.py data/AUV_2/datay/origin \
+    --weights weights/yolo11n.pt --drop-classes red_ball \
     --quality-dir data/AUV_2/origin --keep 2000 --out-dir data/AUV_2/selected_2000
 ```
 
@@ -129,7 +129,7 @@ python scripts/select_frames.py data/AUV_2/datay/origin \
 
 ```bash
 # GPU: --device 0；CPU 可不带该参数（较慢）
-python scripts/train_yolo11n.py --data data/auv/data.yaml --epochs 100 --imgsz 640 --device 0
+python scripts/2_train/train_yolo11n.py --data data/auv/data.yaml --epochs 100 --imgsz 640 --device 0
 ```
 
 - 自动使用/下载根目录 `yolo11n.pt`（80 类 COCO 预训练），自定义类别数自动适配
@@ -140,12 +140,12 @@ python scripts/train_yolo11n.py --data data/auv/data.yaml --epochs 100 --imgsz 6
 
 ```bash
 # 检测（Detect 头 → 6 个张量：3×bbox + 3×cls）
-python scripts/modify_ultralytics.py --task detect   # 自动备份 head.py.backup 并验证
-python scripts/export_onnx.py                        # yolo11n.onnx（opset 11, 640, 6 输出）
+python scripts/3_export/modify_ultralytics.py --task detect   # 自动备份 head.py.backup 并验证
+python scripts/3_export/export_onnx.py                        # yolo11n.onnx（opset 11, 640, 6 输出）
 
 # 关键点（Pose 头 → 9 个张量：每尺度 bbox64 + cls nc + kpt 12，gate 4 角点）
-python scripts/modify_ultralytics.py --task pose
-python scripts/export_onnx.py --task pose            # yolo11n-pose.onnx（9 输出）
+python scripts/3_export/modify_ultralytics.py --task pose
+python scripts/3_export/export_onnx.py --task pose            # yolo11n-pose.onnx（9 输出）
 ```
 
 > pose 的 RoboFlow 标注规范（4 点 TL,TR,BR,BL / Keypoint Detection / 导出 YOLOv8 Pose）、
@@ -155,13 +155,13 @@ python scripts/export_onnx.py --task pose            # yolo11n-pose.onnx（9 输
 ### ⑤ 准备校准数据（需要一批有代表性的图片，如 COCO val2017）
 
 ```bash
-python scripts/prepare_calibration.py --coco-path /path/to/coco/val2017 --num-images 100
+python scripts/3_export/prepare_calibration.py --coco-path /path/to/coco/val2017 --num-images 100
 ```
 
 ### ⑥ PTQ 量化（Docker 容器内执行 hb_mapper）
 
 ```bash
-./scripts/quantize.sh   # 等价于 docker run ... hb_mapper makertbin --config configs/yolo11n_config.yaml
+./scripts/3_export/quantize.sh   # 等价于 docker run ... hb_mapper makertbin --config configs/yolo11n_config.yaml
 ```
 
 量化配置要点（`configs/yolo11n_config.yaml`）：

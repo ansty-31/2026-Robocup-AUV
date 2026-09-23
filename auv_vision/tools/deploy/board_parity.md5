@@ -4,6 +4,7 @@
 # 2026-09-21：tests/ 与 tools/ 分类重整 → 路径已更新；**搬过目录的条目去掉了方括号**（板端那边还是旧路径，等 --board 核对后再补）
 
 
+
 [ 92040cf1d16bcd677e577c7f8865bb09  README.md ]
 [ 5cd1d8b7a7777a4dd23414ed50790c53  base/__init__.py ]
 [ 167b72c7a524b5b3d5327284ad0598c8  base/camera.py ]
@@ -62,6 +63,7 @@ fbdf6ac226b8880d3a9a797876d67830  tests/tasks/test_ball.py
 896da81ac7393bf52017e4ea5660f023  tests/tasks/test_gate_vision.py
 f4e89f01de0c5fab0a8d15542c9ed3bc  tests/tasks/test_motion.py
 f9956fd663105cf940bd5d793f6c11f7  tests/tooling/__init__.py
+172c2b2a1e210e73e936eb2964fdea53  tests/tooling/test_label_corners.py
 9acc416fccfcb1a58f7530f25ffac1bb  tests/tooling/test_pnp_calib.py
 [ 0e78d8095c39e54701965adde034fc9e  tools/README.md ]
 a5756436e46199292608db3824a030b3  tools/__init__.py
@@ -71,6 +73,7 @@ f9177ea7cddb8af59bd2709e6339416e  tools/analyze/analyze_heading.py
 e6526d43391b9ca956d7a3209e7fa7bf  tools/analyze/analyze_pnp_center.py
 a818b2b269294250109dca5604dc19a9  tools/analyze/analyze_task_log.py
 a75b0f625a574e52cecfbe0a9f0a769b  tools/analyze/feature_coverage.py
+4cc71b62f1a99a44e1d0019681e0ebc4  tools/analyze/label_corners.py
 4744a7b352151c4017e48aeda85bcd96  tools/analyze/pnp_calib.py
 aee4e5cd413024139261a227e58c08da  tools/check/__init__.py
 5ad49e51a44d3f3f8fc39e1d9a84e3c4  tools/check/check_gate_pose.py

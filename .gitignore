@@ -34,3 +34,6 @@ auv_vision/bak/
 
 # pytest 缓存
 .pytest_cache/
+
+# 录像素材（PC 端保存区，GB 级，禁止入库）
+auv_vision/RDKX5-YOLOv11n-/raw-data/

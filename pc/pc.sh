@@ -14,7 +14,10 @@
 #   ./pc.sh --kill-stale --show          # 先清掉上次残留的录像进程（释放 UDP 端口）
 #   ./pc.sh --dry-run                    # 只打印将执行的命令
 #
-# 录像产物（默认在 pc/record/）：
+# 目录约定（2026-09-23 起）：**record/ 当 tmp**（录制期间的中转），**RDKX5-YOLOv11n-/raw-data/<时间戳>/
+# 才是保存区**；每段录像的视频流与它的 .timestamps 一起进那个子目录（`--save-dir` 可改）。
+#
+# 录像产物（tmp 在 pc/record/，保存区在 RDKX5-YOLOv11n-/raw-data/auv_<时间戳>/）：
 #   auv_<时间戳>.mp4      ← 默认产物（ffmpeg -c:v copy 零转码；--show 时结束后自动封装）
 #   auv_<时间戳>.mjpeg     ← 仅 --raw / --keep-raw 时保留（原始流）
 #   auv_<时间戳>.mjpeg.timestamps  ← 逐帧到达时间轴
@@ -27,7 +30,8 @@ PY="${PYTHON:-python3}"
 HOST="192.168.137.10"      # 板端 IP（键盘遥控目标）
 PORT=5000                  # 板端推流端口（本机接收）
 CTRL_PORT=9000             # 板端遥控桥端口（本机发送）
-OUT_DIR="record"
+OUT_DIR="record"                                        # tmp：录制期间的中转目录
+SAVE_DIR="$(cd "$(dirname "$0")/.." && pwd)/RDKX5-YOLOv11n-/raw-data"   # 保存区
 DURATION=0
 USE_KEY=1
 USE_REC=1
@@ -47,7 +51,8 @@ while [ $# -gt 0 ]; do
     --host)       HOST="$2"; shift 2 ;;
     --port)       PORT="$2"; shift 2 ;;
     --ctrl-port)  CTRL_PORT="$2"; shift 2 ;;
-    --out-dir)    OUT_DIR="$2"; shift 2 ;;
+    --out-dir|--tmp-dir)  OUT_DIR="$2"; shift 2 ;;
+    --save-dir)   SAVE_DIR="$2"; shift 2 ;;
     --duration)   DURATION="$2"; shift 2 ;;
     --http)       HTTP="$2"; shift 2 ;;
     --speed)      SPEED="$2"; shift 2 ;;
@@ -71,7 +76,8 @@ LOG="${OUT_DIR}/pc_${TS}.log"
 # ---- 录像命令 ----
 REC_CMD=()
 if [ "${USE_REC}" = "1" ]; then
-  REC_CMD=("${PY}" -u pc_recorder.py --out-dir "${OUT_DIR}" --port "${PORT}")
+  REC_CMD=("${PY}" -u pc_recorder.py --tmp-dir "${OUT_DIR}" --save-dir "${SAVE_DIR}"
+           --name "auv_${TS}" --port "${PORT}")
   [ -n "${HTTP}" ] && REC_CMD+=(--http "${HTTP}")
   [ "${DURATION}" != "0" ] && REC_CMD+=(--duration "${DURATION}")
   if [ "${VIEW}" = "1" ]; then
@@ -172,6 +178,9 @@ else
   echo "   录像    (关闭)"
 fi
 echo "   接收    $( [ -n "${HTTP}" ] && echo "${HTTP}" || echo "udp://0.0.0.0:${PORT}" )"
+if [ "${USE_REC}" = "1" ]; then
+  echo "   目录    tmp=${OUT_DIR}/（中转） → 保存=${SAVE_DIR}/auv_${TS}/（视频 + timestamps 一起）"
+fi
 echo "   日志    ${LOG}"
 echo "   停止    Ctrl-C（会先停录像并给出转 mp4 命令）"
 echo "=================================================================="
@@ -190,7 +199,12 @@ if [ "${USE_REC}" = "1" ]; then
   if ! kill -0 "${REC_PID}" 2>/dev/null; then
     echo "!! 录像启动失败，见 ${LOG}" >&2
     tail -n 8 "${LOG}" 2>/dev/null
-    rm -f "${OUT_DIR}"/auv_* 2>/dev/null      # 启动即失败：清掉本次的 0 字节残留
+    # ⚠️ 2026-09-22 事故：这里原本有一行 `rm -f "${OUT_DIR}"/auv_*`（注释写的是"清掉本次的
+    #    0 字节残留"），它的通配符会把整个 OUT_DIR 里的**历史录像全删掉**。
+    #    触发条件：--show/--view 用了没有 GUI 的 cv2（如 conda base 的 python3，OpenCV 5.0.0
+    #    headless）→ imshow 抛异常 → 进程 1 秒内死 → 走到这个分支 → 清空全部素材。
+    #    **这行永远不该存在**：失败就失败，绝不删用户的素材。要清残留就只清本次那个文件名
+    #    （pc_recorder.py 支持 --name，可把文件名提前定下来），但默认什么都不删。
     REC_PID=""
     exit 1
   fi

@@ -12,7 +12,7 @@ camera:
     width: 1280
     height: 720
     fps: 30
-    calibration: /home/sunrise/AUV/cfg/front_camera.yaml   # 去畸变标定 yaml（null=跳过）
+    calibration: cfg/front_camera.yaml   # 去畸变标定 yaml（null=跳过）
   down:                  # 下视(IMX415 MIPI)：保留（录素材/未来任务用）；**当前策略不使用下视**
     type: sim            # sim | mipi
     device: /dev/video1
@@ -35,7 +35,7 @@ image:
   # 识别前图像链路（推理统一入口）
   undistort: true                # true: cv2.remap 去畸变（需对应 camera.*.calibration）
   white_balance_bgr: [1.0, 1.05, 1.15]   # 白平衡通道增益（B,G,R）轻微
-  clahe_clip: 0.5                # LAB-L 通道 CLAHE clipLimit（0=关闭，轻微）
+  clahe_clip: 0                  # 2026-09-23 起关闭（板端实测对精度无影响，省 ~8 ms/帧）
   gamma: 0.85                    # gamma LUT（<1 提亮，1.0=关闭）
 
 color:
@@ -49,7 +49,7 @@ model:
   format: rdk_x5_bin       # RDK X5 模型必须是 X5 OE 工具链(hb_mapper makertbin)产出的 .bin
                            # 注意：.hbm 是车载 J5/J6/S100(Nash) 格式，X5(Bayes-e) 无法加载！
   # ===== 双权重（ball 与 gate 分离，各自独立）=====
-  path: /home/sunrise/AUV/models/yolo11n_detect_bayese_640x640_nv12.bin
+  path: models/yolo11n_detect_bayese_640x640_nv12.bin
   strict_x5_bin: true      # true: 拒绝 .hbm 后缀并提示正确编译链路
   input_size: 640          # 模型方形输入
   input_name: images         # hbm_runtime 输入名（板端报错时填模型实际名）
@@ -60,7 +60,7 @@ model:
   # 权重② gate keypoint：ball 走 model.path、gate 走 task_models.gate，互不影响。
   # path 为空 → gate 用 mock 联调 / 或跳过（取决于 model.mode）
   task_models:
-    gate: {path: /home/sunrise/AUV/models/gate_kpt_bayese_640x640_nv12.bin,
+    gate: {path: models/gate_kpt_bayese_640x640_nv12.bin,
            kind: keypoint, labels: [gate],
            kpt_order: [TL, TR, BR, BL]}   # 门 keypoint 权重(4角点)
 
@@ -83,11 +83,14 @@ debug:                     # 运行监测（仅本工程调试用）
   show_video: true          # 弹窗显示带识别框的相机画面（无 DISPLAY/cv2 时自动跳过）
   overlay_text: true        # 画面叠加 状态/任务信息
 gate:                         # 过门（§3 几何 / keypoint / PnP 参数）
-  geometry: {frame_w: 0.70, frame_h: 0.50, bar_width: 0.05,
+  geometry: {frame_w: 0.77, frame_h: 0.56, bar_width: 0.05,
              sym_bars: true, body_center_offset: 0.0}
-             # frame_w/frame_h：门框**外轮廓**尺寸(m)，直接决定 PnP 深度标尺。
-             #   ⚠️ 待实测确认"70×50cm"是外缘还是开孔内缘（管径 5cm 差 ~12% 深度，
-             #      会让所有米制阈值一起平移）→ 卷尺量完按 doc/算法说明-gate-PnP移植方案.md 回填。
+             # frame_w/frame_h：门框**外轮廓**尺寸(m)，PnP 深度的**唯一标尺**。
+             #   ★ **陆上实验（2026-09-22 21:00 前）确认的最终值 = 0.77 × 0.56**
+             #     （卷尺实测外缘 77×56 cm，管外径 5 cm；`ruler_calib.py --gate` 反演 W_eff = 0.78~0.80）。
+             #     旧值 0.70/0.50 让 z 读小 9.1%（0.70/0.77）⇒ 那时 `z.cross=0.7` 实际在真 0.77 m 触发；
+             #     换到 0.77/0.56 后，`comm.gate.z.cross` 必须**同步**设成 0.77 才是同一个物理触发点。
+             #   ⚠️ 水下还要用水下那份内参（`cfg/front_camera.yaml`，fx=782.5）验证折射因子 k。
              # body_center_offset：相机—机身安装偏置(m)，**只读入、不参与运算**（未标定）。
              # bar_width/sym_bars：未参与运算（keypoint 只标外轮廓四角，留作记录）。
   keypoint: {conf_thr: 0.7, vis_thr: 0.5}

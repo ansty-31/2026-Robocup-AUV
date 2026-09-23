@@ -7,22 +7,52 @@
 > 系统 `python3` 没装 torch/ultralytics，会直接 `ModuleNotFoundError`。
 
 ```
-1_prepare/   训练前：数据准备（切帧 → 标定 → 预处理 → 筛图）
+1_prepare/   训练前：数据准备
+             ├── (根) 共用·常用：切帧 / 标定 / 预处理 / 筛图 / 重划分
+             ├── pose/        ★ 门（4 角点）专用：Roboflow pose 导出 → 跨域换算 → 挑待标图
+             └── provenance/  素材溯源：把已标的图对回原始帧（已一次性闭合，换数据集可复用）
 2_train/     训练：detect / pose
 3_export/    导出与量化：改输出头 → ONNX → 校准数据 → PTQ 量化
 ```
 
+> 已完成的实验脚本与其产物**不删除**，训练记录留在 `runs/`，暂时不用的移入
+> [`_archive/`](../_archive/README.md)（含恢复方法）。
+
 ## 1_prepare/ — 训练前（数据准备）
+
+### 根目录：共用 / 后期常用（新素材的常规流程走这几个）
 
 | 脚本 | 用途 | 常用参数 |
 |---|---|---|
 | `extract_frames.py` | 切帧：自动识别**容器视频 / 裸 MJPEG 流**（裸流按 JPEG 标记无损切割） | `--step N`、`--every-seconds S`、`--start-frame`、`--max-frames`、`--dry-run` |
 | `calibrate_camera.py` | 相机标定：棋盘（视频或图片目录）→ 内参 yaml；全池择优 + 离群剔除，RMS≤0.8px 验收 | `--cols/--rows/--square-mm`、`--views`、`--min-shift`、`--save-views` |
-| `prepare_frames.py` | 预处理：去畸变 remap → **640×640** → 白平衡/CLAHE/gamma（与板端 `common/preprocess.py` 同链路、**同顺序**；**参数以板端为准**，镜像见 [configs/README.md](../configs/README.md)） | `--config configs/vision.yaml`、`--out-dir`；或 `--calibration` + `--wb-gains/--clahe/--gamma` |
-| `prepare_frames_noundistort.py` | **不去畸变**变体：resize **640×640** → 白平衡/CLAHE/gamma（其余与上一个完全同链路，复用其实现）。用于把「未校正畸变图」混入训练集，提升模型对畸变的韧性 | 同上（`image.undistort` 被忽略）；建议 `--out-dir .../processed_640_noundistort` |
-| `select_frames.py` | 用模型剔除指定类别画面，再按 `清晰度×亮度合理性` 质量加权随机抽样；**可给多个输入目录把「不去畸变」变体按 `--mix-ratio` 混入**（混合集输出自动加 `--mix-prefix` 前缀防重名）。不给 `--drop-classes` 时**跳过推理**（只滤损坏帧，`--weights` 可不传） | `--drop-classes`、`--weights`、`--conf`、`--quality-dir`、`--keep`、`--gamma`、`--mix-ratio`、`--mix-prefix`、`--report` |
-| `prepare_pose_dataset.py` | **Roboflow pose 导出 → 可训练数据集**：截断「尾随全零」关键点槽位、校验角点顺序约定、决定 `flip_idx`；图片用硬链接，**原导出目录一个字节不改** | `--kpt 4`、`--out`、`--flip-idx-lr-swap`、`--dry-run` |
+| `prepare_frames.py` | 预处理：去畸变 remap → **640×640** → 白平衡/CLAHE/gamma（与板端 `common/preprocess.py` 同链路；**参数以板端为准**，镜像见 [configs/README.md](../configs/README.md)）。`--chain-order new` 改为 `resize → enhance → remap@640`（= **D 域**，定稿方向） | `--config configs/vision.yaml`、`--out-dir`、`--chain-order new\|old`；或 `--calibration` + `--wb-gains/--clahe/--gamma` |
+| `select_frames.py` | 用模型剔除指定类别画面，再按 `清晰度×亮度合理性` 质量加权随机抽样；**可给多个输入目录，第 1 个是主集、其余按 `--mix-ratio` 掺入**（混合集输出自动加 `--mix-prefix` 前缀防重名；当初用于混"不去畸变"变体，该用途已废弃）。不给 `--drop-classes` 时**跳过推理**（只滤损坏帧，`--weights` 可不传） | `--drop-classes`、`--weights`、`--conf`、`--quality-dir`、`--keep`、`--gamma`、`--mix-ratio`、`--mix-prefix`、`--report` |
 | `resplit_dataset.py` | 数据集重划分：**序列感知**（同段连续帧不跨 split，避免相邻帧泄漏）+ 稀有类平衡 + 自动备份；先 `--dry-run` 看方案 | 数据集根目录、`--ratios 0.8 0.1 0.1`、`--group-gap`、`--seed`、`--dry-run`、`--force` |
+
+### `pose/` — 门 / 4 角点专用（detect 线用不到）
+
+| 脚本 | 用途 | 关键参数 |
+|---|---|---|
+| `prepare_pose_dataset.py` | **Roboflow pose 导出 → 可训练数据集**：截断「尾随全零」关键点槽位、校验角点顺序约定、决定 `flip_idx`；图片用硬链接，**原导出目录一个字节不改** | 导出目录、`--kpt 4`、`--out`、`--flip-idx-lr-swap`、`--dry-run` |
+| `map_pose_dataset.py` | **跨去畸变域换算标注 + 生成 pose 训练集**。`--domain B\|C\|D` × `--enhance on\|off\|wb`（`wb` = 白平衡+gamma、**无 CLAHE**；默认输出目录随之带 `_noenh`/`_wb` 后缀，定稿生产集 = `data/mapped/pose_D_wb`），`--selfcheck` 环回校验（raw → D → raw，应 ~0.001 px）。<br>同时是**各域图像/坐标的公共库**：`Domain` 类被 detect 侧的域对照、球影响检查等复用 | `--domain`、`--enhance`、`--selfcheck`、`--out`、`--prov` |
+| `make_mixed_gate_set.py` | 新一版「selected_3000」：跨水质融合门图 → 定稿链路（D + wb）渲染 → 质量/门框存在性过滤 → **内容去重**（配额不足时自动逐级放宽阈值）→ 待标图 + `manifest.csv` | `--total`、`--dedup-thr`、`--oversample`、`--out-dir`、`--no-model-filter` |
+
+### `provenance/` — 素材溯源（已一次性闭合；换数据集可复用）
+
+回答"这张已标的图到底是哪一段裸流的第几帧"，是 `pose/map_pose_dataset.py` 的上游输入。
+**注意**：源帧索引（`runs/prov/index_enh.npz`，216 MB）已删，需要时重建约 1 分钟。
+
+| 脚本 | 用途 |
+|---|---|
+| `materialize_raw.py` | 把溯源命中的**锚点帧**落成素材（`data/mapped/raw/`，各域渲染的输入） |
+| `provenance_match.py` | 图↔图溯源匹配（数据集内部对回） |
+| `provenance_stream.py` | 在**裸 MJPEG / mp4 流**上按帧号直达；`--offset TAG=N` 修被重编号的组 |
+| `provenance_nn.py` | 内容最近邻溯源（精确命中失败时兜底；阈值要放宽，真命中 mad128 约 0.4–0.6） |
+| `provenance_merge.py` | 合并多轮结果 → 统一 provenance 表（下游 `pose/map_pose_dataset.py` 的输入） |
+
+> **实验专属工具已移出本目录** → `experiment/scripts/`（去畸变域对比、板端对照、标定体检等）：
+> 只服务那一轮实验的东西全归那里。分类索引见 [`experiment/README.md`](../experiment/README.md)。
 
 ```bash
 python scripts/1_prepare/extract_frames.py data/AUV_2/auv_xxx.mjpeg --every-seconds 1
@@ -33,35 +63,22 @@ python scripts/1_prepare/select_frames.py data/AUV_2/datay/origin --weights weig
     --drop-classes red_ball --quality-dir data/AUV_2/origin --keep 2000 --out-dir data/AUV_2/selected_2000
 ```
 
-### 混入「不去畸变」图，增强模型韧性
+### ~~混入「不去畸变」图，增强模型韧性~~（已废弃）
 
-去畸变依赖标定文件；标定失效 / `vision.yaml` 的 `undistort: false` / 相机变动时，
-送进模型的是**未校正的畸变图**。把该变体按比例混入训练集，模型同时见过两种几何：
-
-```bash
-# 1) 生成不去畸变变体（与 prepare_frames.py 同链路，只少一步 remap）
-python scripts/1_prepare/prepare_frames_noundistort.py data/AUV_3/auv_xxx_frames \
-    --config configs/vision.yaml --out-dir data/AUV_3/processed_640_noundistort
-
-# 2) 选图时把两个目录都给进去：第 1 个是主集，其余按 --mix-ratio 掺入
-python scripts/1_prepare/select_frames.py \
-    data/AUV_3/processed_640/auv_xxx_frames \
-    data/AUV_3/processed_640_noundistort/auv_xxx_frames \
-    --weights weights/yolo11n.pt --drop-classes red_ball \
-    --quality-dir data/AUV_3/auv_xxx_frames \
-    --mix-ratio 0.35 --keep 2000 --out-dir data/AUV_3/selected_2000 \
-    --report data/AUV_3/select_report.csv
-```
-
-- 输出：主集 `frame_000123.jpg`，混合集 `nd_frame_000123.jpg`（前缀见 `--mix-prefix`）
-- **⚠️ 标注**：不去畸变保留了几何畸变，两版**标注框不通用**，需**分别标注**
+> **2026-09-23 废弃**：配套脚本 `prepare_frames_noundistort.py` 已删除，这条路线不再使用
+> （去畸变域已经定稿为 **D 域**：`resize(640) → enhance → remap@640`，见
+> `pose/map_pose_dataset.py` 与 [experiment/README.md](../experiment/README.md) 的域对比结论）。
+>
+> `select_frames.py` 的**多目录混合**能力本身还在（给多个输入目录，第 1 个是主集、其余按
+> `--mix-ratio` 掺入，混合集输出加 `--mix-prefix` 前缀），只是当初那个用途不需要了；
+> 要混任何第二来源都还能用。
 
 ### Roboflow pose 导出 → 可训练数据集（标完必做两步）
 
 ```bash
 # 1) 归一：kpt_shape → [4,3]（截掉尾随全零槽位）+ 校验 TL,TR,BR,BL + 定 flip_idx
-python scripts/1_prepare/prepare_pose_dataset.py data/AUV_4/PNP.yolov8 --dry-run
-python scripts/1_prepare/prepare_pose_dataset.py data/AUV_4/PNP.yolov8   # → data/AUV_4/PNP.kpt4.yolov8
+python scripts/1_prepare/pose/prepare_pose_dataset.py data/AUV_4/PNP.yolov8 --dry-run
+python scripts/1_prepare/pose/prepare_pose_dataset.py data/AUV_4/PNP.yolov8   # → data/AUV_4/PNP.kpt4.yolov8
 
 # 2) 序列感知重划分（Roboflow 的随机划分有严重的相邻帧泄漏）
 python scripts/1_prepare/resplit_dataset.py data/AUV_4/PNP.kpt4.yolov8 --dry-run
@@ -89,6 +106,8 @@ python scripts/1_prepare/resplit_dataset.py data/AUV_4/PNP.kpt4.yolov8
 |---|---|---|
 | `train_yolo11n.py` | 训练/微调（`--task detect\|pose`）：自动恢复原版 head → 训练 → best 复制到 `weights/` → 按任务重打输出头补丁 | `--data`、`--task`、`--weights`、`--epochs`、`--batch`、`--imgsz`、`--device`、`--cache ram`、`--no-repatch` |
 
+> 域对比实验的批量训练脚本 `train_domain_arms.sh` 已移到 `experiment/scripts/`（它只服务那次对照实验，不属常规训练）。
+
 ```bash
 # detect（默认权重 weights/yolo11n.pt，输出 weights/yolo11n.pt）
 python scripts/2_train/train_yolo11n.py --data <data.yaml> --epochs 300 --batch 4 --device 0 --cache ram
@@ -102,7 +121,7 @@ python scripts/2_train/train_yolo11n.py --task pose --data <data.yaml> --epochs 
 - 本机 8 个 dataloader worker 会与 CUDA fork 死锁 → 默认 `--workers 2`；显存小用 `--batch 4`；
 - pose 数据集需 `kpt_shape: [4, 3]` 且 `len(flip_idx) == 4`（ultralytics 会校验长度）。
   **RoboFlow 的导出未必对**（常见 `[5,3]` + 全零第 5 点），先过
-  `1_prepare/prepare_pose_dataset.py` 再训，见上一节的"标完必做两步"。
+  `1_prepare/pose/prepare_pose_dataset.py` 再训，见上一节的"标完必做两步"。
 
 ## 3_export/ — 导出与量化
 

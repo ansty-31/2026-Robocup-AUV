@@ -28,8 +28,14 @@ except ImportError:
     HAS_CV2 = False
 
 # 门框外轮廓尺寸（§3 已定，单位 m）
-GATE_FRAME_W = 0.70
-GATE_FRAME_H = 0.50
+# **陆上实验（2026-09-22 21:00 前）确认的最终值：外缘 0.77 × 0.56 m**（卷尺 77×56 cm，管外径 5 cm；
+# `ruler_calib.py --gate` 反演 W_eff = 0.78~0.80，一致到 4%）→ 这是 PnP 深度的**唯一标尺**。
+# 这里是模块默认值（也是 `object_points()` 的默认参数、`gate_task._D_GEOM` 的来源）；
+# 运行期真值以 `cfg/vision.yaml → gate.geometry` 为准，两处必须同值
+# （有用例 test_gate_defaults_match_cfg 守着）。
+# ⚠️ 与 `cfg/comm.yaml → comm.gate.z.cross`（=0.77）是**同一个物理距离的两种写法**，改一个必须改另一个。
+GATE_FRAME_W = 0.77
+GATE_FRAME_H = 0.56
 
 # 位姿可信深度范围（§4.4 质量检查初值）
 Z_BOUNDS = (0.2, 15.0)

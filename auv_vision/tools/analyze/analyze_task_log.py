@@ -160,6 +160,20 @@ def main():
             print("   %-5s %4d 帧: p10=%+6.1f p50=%+6.1f p90=%+6.1f std=%5.1f°"
                   % (nm, len(v), v[int(0.1 * len(v))], st.median(v),
                      v[int(0.9 * len(v)) - 1], st.pstdev(v)))
+        # ⚠️ 2026-09-22 新加：居中达标却**跳过正航向**的原因（水里复盘第一条要看这个）
+        skips = {}
+        for r in rows:
+            sk = r.get("hdg_skip")
+            if sk:
+                skips[sk] = skips.get(sk, 0) + 1
+        if skips:
+            print("   ⚠️ 有 %d 帧记录了「居中达标但跳过正航向」：%s"
+                  % (sum(skips.values()),
+                     "；".join("%s×%d" % (k, v) for k, v in sorted(skips.items(), key=lambda x: -x[1]))))
+            print("      最常见是 mode=p3p/width（只有 full 帧的 psi 可用；width 档从不进 HDG）。"
+                  "想让它在原地等一帧新鲜 full：`comm.gate.hdg.wait_fresh_ms` 设 1500~2000")
+        elif not hd:
+            print("   （本段日志没有 hdg 也没有 hdg_skip：正航向根本没被触发过）")
         if len(full_h) >= 5:
             print("   => 这个中位数就是**正航向要消掉的姿态偏置**（相机安装偏置已包含在内）："
                   "%+.1f°" % st.median(full_h))

@@ -20,7 +20,7 @@ PROJECT_ROOT="$(cd "$TOOLS_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
 MANIFEST="$TOOLS_DIR/board_parity.md5"
-BOARD_DIR="${AUV_BOARD_DIR:-/home/sunrise/AUV}"
+BOARD_DIR="${AUV_BOARD_DIR:-/home/sunrise/Desktop/AUV_New}"
 AUV_SSH="${AUV_SSH:-ssh}"
 ONLY_VERIFIED=0
 SLOW=0

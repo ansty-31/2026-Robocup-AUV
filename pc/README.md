@@ -26,20 +26,47 @@ cd pc
 ./pc.sh --kill-stale --show               # 先清掉上次残留的录像进程（释放 UDP 端口）再启动
 ```
 
-录像产物默认落在 **`pc/record/`**：
+## 目录约定（2026-09-23 起）：`record/` = tmp，`raw-data/` = 保存区
 
-| 文件 | 说明 |
+**录制期间**写 `pc/record/`（tmp，可随手清）；**录完自动归档**：该段的视频流与它的
+`.timestamps` **一起**进 `RDKX5-YOLOv11n-/raw-data/<录像名>/`（子目录名就是时间戳，一眼对得上）。
+
+```
+pc/record/                                   ← tmp（中转；清掉不心疼）
+└── pc_<时间戳>.log                          ← 进程日志（收尾时会再拷一份进归档目录）
+
+RDKX5-YOLOv11n-/raw-data/
+└── auv_20260923_000228/                     ← 一段一个时间戳子目录
+    ├── auv_20260923_000228.mjpeg            ← 原始 MJPEG（或 .mp4，取决于模式）
+    ├── auv_20260923_000228.mjpeg.timestamps ← 逐帧到达时间轴（与视频永远同目录）
+    └── pc_20260923_000228.log               ← 该段日志副本（pc.sh 收尾时放进去）
+```
+
+| 项 | 说明 |
 |:---|:---|
-| **`auv_<时间戳>.mp4`** | **默认产物**：`ffmpeg -c:v copy` 零转码封装，画质与原始流完全一致（约 29 Mbps@720p30） |
-| `auv_<时间戳>.mjpeg` | 原始 MJPEG 流（仅 `--raw` / `--keep-raw` 时保留，VLC/ffplay 可直接播） |
-| `auv_<时间戳>.mjpeg.timestamps` | 逐帧到达时间轴（`帧号 到达时间 间隔ms`），便于离线分析/对齐日志 |
-| `pc_<时间戳>.log` | 录像进程日志 |
+| `--save-dir` | 保存区（默认 `<工程根>/RDKX5-YOLOv11n-/raw-data`） |
+| `--tmp-dir`（`--out-dir` 是旧名） | 中转目录（默认 `record/`） |
+| `--no-archive` | 关掉归档：产物就留在 tmp（老行为） |
+| `--no-adopt` | 不接管 tmp 里上次遗留的录像（默认会替它归档——进程被 kill/崩溃时来不及归档的，靠这个兜底） |
+| 视频格式 | 默认 `-c:v copy` 零转码封装 mp4，画质与原始流一致（约 29 Mbps@720p30）；`--raw`/`--keep-raw` 保留原始 `.mjpeg`（VLC/ffplay 可直接播） |
+| 0 字节录像 | **不归档**（启动即失败的残file 留在 tmp，不会污染保存区） |
+
+> ⚠️ **`--show`/`--view` 必须用带 GUI 的 cv2**。本机 `python3` 可能指向 conda base
+> （OpenCV 5.0.0 headless）⇒ `cv2.imshow` 抛异常、进程当场退出。正确用法：
+> ```bash
+> PYTHON=/home/ansty/anaconda3/envs/mate3.7/bin/python3.7 ./pc.sh --show
+> ```
+> 2026-09-22 的事故就是"用错解释器 → 启动失败"，而当时 `pc.sh` 还会 `rm -f record/auv_*`
+> 把历史录像一起删掉（该行已删除）。
+
+> 素材被误删后可以用 `pc/carve_mjpeg.py` 从磁盘空闲区按"连续 JPEG 链"雕刻回来
+> （只读扫盘；用法见脚本头部注释）。
 
 ```bash
 # 默认就会自动封 mp4；若手里只有 .mjpeg，可事后转（自动用 timestamps 的实测帧率）
-python3 pc_recorder.py --remux record/auv_xxx.mjpeg
+python3 pc_recorder.py --remux RDKX5-YOLOv11n-/raw-data/<录像名>/auv_xxx.mjpeg
 # 一行 ffmpeg 等价写法
-ffmpeg -f mjpeg -r <实测fps> -i record/auv_xxx.mjpeg -c:v copy record/auv_xxx.mp4
+ffmpeg -f mjpeg -r <实测fps> -i <保存区>/auv_xxx.mjpeg -c:v copy <保存区>/auv_xxx.mp4
 ```
 
 播放：任何播放器都能开 `.mp4`（编码为 MJPEG、无 B 帧，逐帧独立，便于逐帧核对）。
@@ -82,7 +109,9 @@ kill <PID>                   # Windows: taskkill /PID <PID> /F
   camera(MJPG 60fps, 零解码)
       │  原始 JPEG
       ▼
-  manual/stream.py ──UDP 5000──►  pc_recorder.py（直存/显示）──► pc/record/*.mjpeg
+  manual/stream.py ──UDP 5000──►  pc_recorder.py（直存/显示）
+                                        ├─ tmp:   pc/record/（录制期间）
+                                        └─ 保存:  RDKX5-YOLOv11n-/raw-data/<录像名>/*.mjpeg(+.timestamps)
   manual/udp_server.py ◄─UDP 9000── pc_keyboard_client.py（键盘）
       │ 0xA5 11B 帧
       ▼

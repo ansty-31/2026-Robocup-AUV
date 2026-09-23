@@ -54,13 +54,13 @@ ultralytics 在 `data/augment.py:1466-1469` 先 `instances.fliplr(w)`（镜像�
 ## 用法
 
     # 先看要改什么，不写文件
-    python scripts/1_prepare/prepare_pose_dataset.py data/AUV_4/PNP.yolov8 --dry-run
+    python scripts/1_prepare/pose/prepare_pose_dataset.py data/AUV_4/PNP.yolov8 --dry-run
 
     # 生成规范化数据集（默认 <src 同级>/PNP.kpt4.yolov8）
-    python scripts/1_prepare/prepare_pose_dataset.py data/AUV_4/PNP.yolov8
+    python scripts/1_prepare/pose/prepare_pose_dataset.py data/AUV_4/PNP.yolov8
 
     # 指定输出目录，然后做序列感知划分
-    python scripts/1_prepare/prepare_pose_dataset.py data/AUV_4/PNP.yolov8 \
+    python scripts/1_prepare/pose/prepare_pose_dataset.py data/AUV_4/PNP.yolov8 \
         --out data/AUV_4/PNP.kpt4.yolov8
     python scripts/1_prepare/resplit_dataset.py data/AUV_4/PNP.kpt4.yolov8 --dry-run
 

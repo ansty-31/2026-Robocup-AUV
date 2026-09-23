@@ -40,7 +40,12 @@ _D_HDG = dict(enable=True, tol_deg=8.0, measure_frames=5, max_iters=3,
               max_step_deg=0.0, settle_ms=400, settle_tol_deg=2.0,
               measure_timeout_ms=2000, timeout_ms=30000,
               # 一直没有遥测 yaw 时的等待上限（超过就放弃正航向，别白等总超时）
-              wait_tel_ms=3000.0, turn_timeout_s=8.0, fresh_ms=800.0)
+              wait_tel_ms=3000.0, turn_timeout_s=8.0, fresh_ms=800.0,
+              # 居中达标但"那一刻不是 full 帧"（thus 没有可用 psi）时，**原地等**多久再放弃正航向。
+              # 默认 0 = 旧行为（立刻进 APPROACH，带着残余航向）；
+              # 斜门/远距容易只在部分帧拿到 4 角，这时把它设成 1500~2000 更划算 ——
+              # 船本来就在 GOLDEN 停着（不下发 surge），等一帧新鲜 full 的代价只是时间。
+              wait_fresh_ms=0.0)
 
 # 开关键：其余键都是数值，只有 enable 是布尔 → 用 flag() 解析（别用 bool()）
 _BOOL_KEYS = ("enable",)

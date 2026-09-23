@@ -23,7 +23,7 @@ set -u
 TOOLS_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOCAL="$(cd "$TOOLS_DIR/../.." && pwd)"       # 工程根 = tools/deploy 的上两级（含 cfg/、main.py）
 BOARD_HOST="${AUV_BOARD_HOST:-sunrise@192.168.137.10}"
-BOARD="${AUV_BOARD_DIR:-/home/sunrise/AUV}"
+BOARD="${AUV_BOARD_DIR:-/home/sunrise/Desktop/AUV_New}"
 HELP_DIR="${AUV_HELP_DIR:-/home/ansty/RDKX5}"
 SSH="${AUV_SSH:-$HELP_DIR/.ssh_x5.sh}"
 STREAM="${AUV_STREAM:-$HELP_DIR/.ssh_x5_stream.sh}"   # 同 SSH 但保留 stdin（tar/管道用）

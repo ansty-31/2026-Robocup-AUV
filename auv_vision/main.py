@@ -39,6 +39,34 @@ STATE_TASK = {S.STATE_BALL: "ball", S.STATE_GATE: "gate"}
 TASK_STATE = {"ball": S.STATE_BALL, "gate": S.STATE_GATE}
 
 
+def psi_line(info, tol_deg=8.0):
+    """HUD 的「偏转角」一行（**纯函数**，便于用例）。返回 `(文本, BGR 颜色)`。
+
+    `psi`（`last_info["hdg"]`）= **门法向相对光轴的夹角**：0 = 机身正对门；
+    `+` = 门法向偏画面右（机身左偏）⇒ 该**右转**。只有 `full` 帧测得出来。
+
+    · 没有测量时显示 `--`（**别显示 0** —— 0 会被现场误读成"已经正了"）；
+    · `|psi| ≤ tol` → 绿（已收敛）；否则黄（还要转）；`hdg_skip` 有值 → 橙（这一趟跳过了正航向）。
+    """
+    psi = info.get("hdg")
+    st = info.get("hdg_state") or ""
+    it = info.get("hdg_i")
+    skip = info.get("hdg_skip")
+    if psi is None:
+        txt = "PSI  --   (tol %.1f)  %s" % (float(tol_deg), st or "no-full-frame")
+        col = (165, 165, 165)
+    else:
+        psi = float(psi)
+        txt = "PSI %+6.1f deg  (tol %.1f)  %s" % (psi, float(tol_deg), st or "-")
+        if it:
+            txt += "  it=%d" % int(it)
+        col = (0, 220, 0) if abs(psi) <= float(tol_deg) + 1e-9 else (0, 190, 255)
+    if skip:
+        txt += "   | SKIP: %s" % skip
+        col = (0, 140, 255)
+    return txt, col
+
+
 class AppController(object):
     def __init__(self, tasks=None):
         self.uart = UartController()
@@ -160,6 +188,7 @@ class AppController(object):
                 cv2.putText(img, "%d" % i, (px + kpt_r + 2, py - kpt_r),
                             cv2.FONT_HERSHEY_SIMPLEX, fs * 0.5, pc, 1,
                             cv2.LINE_AA)
+        psi_row = None
         lines = ["state=%s task=%s frame=%d"
                  % (self.state, list(self.tasks), self.frames)]
         if self.state in STATE_TASK:
@@ -173,14 +202,31 @@ class AppController(object):
                            "pass", "kpt", "kpt_raw",
                            # yaw 恒 0 是**正常**（居中只用 sway）；它只由正航向 ALIGN.HDG 产生
                            # → hdg/hdg_i 一起显示便于现场核对
-                           "yaw", "hdg", "hdg_i", "reason")]
+                           "yaw", "hdg", "hdg_i", "hdg_state", "reason")]
             lines.append(" ".join(parts))
+            if name == "gate":
+                # 偏转角单独一行、字号更大、带颜色 —— 现场最常盯的就是它
+                psi_row = psi_line(
+                    info, float(S.get("comm.gate.hdg.tol_deg", 8.0) or 8.0))
         lines.append(self._uart_status())
         y = 20
         for ln in lines:
             cv2.putText(img, ln, (10, y), cv2.FONT_HERSHEY_SIMPLEX,
                         fs * 0.7, (0, 255, 0), 1, cv2.LINE_AA)
             y += int(24 * fs)
+        if psi_row is not None:
+            txt, col = psi_row
+            # 深色描边：水面/倒影上白底文字容易糊
+            cv2.putText(img, txt, (10, y), cv2.FONT_HERSHEY_SIMPLEX,
+                        fs * 0.95, (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(img, txt, (10, y), cv2.FONT_HERSHEY_SIMPLEX,
+                        fs * 0.95, col, 2, cv2.LINE_AA)
+            # 右下角再放一份（画面大时左上容易看漏）
+            tw = int(len(txt) * fs * 11)
+            cv2.putText(img, txt, (max(10, w - tw - 10), h - 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, fs * 0.8, (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(img, txt, (max(10, w - tw - 10), h - 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, fs * 0.8, col, 2, cv2.LINE_AA)
         try:
             cv2.imshow("AUV", img)
             cv2.waitKey(1)

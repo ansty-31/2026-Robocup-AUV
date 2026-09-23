@@ -296,7 +296,7 @@ python -m pytest --cov=rdk_deployment tests/
 
 如果你有任何问题：
 
-- 查看[FAQ文档](docs/faq_zh.md)
+- 查看[根目录 README](../README.md)（目录分区 / 全流程命令 / 注意事项）与[部署教程](tutorial_zh.md)
 - 在[Discussions](https://github.com/your-username/RDKX5-YOLOv11n-/discussions)提问
 - 发送邮件到 your-email@example.com
 

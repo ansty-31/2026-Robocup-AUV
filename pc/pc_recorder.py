@@ -2,7 +2,11 @@
 """pc_recorder.py - PC-side recorder for the AUV front-camera stream.
 
 Runs on the water-surface PC (not on the RDK). It receives the MJPEG stream that
-the RDK pushes and saves it into a local folder (default `record/`).
+the RDK pushes.
+
+Layout (2026-09-23 起): **`record/` 只是 tmp（录制期间的中转）**，录完自动归档到
+`--save-dir`（默认 `<工程根>/RDKX5-YOLOv11n-/raw-data`）下的**时间戳子目录**
+`<save-dir>/<录像名>/`，视频流与它的 `.timestamps` **一起**搬过去。
 
 Two recording paths:
 
@@ -30,6 +34,7 @@ Companion scripts in this folder:
 """
 import argparse
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -113,6 +118,102 @@ class Stats(object):
         return self.frames / dt
 
 
+
+# ---------------------------------------------------------------------------
+# 归档：record/ 当 tmp（临时中转），raw-data/<时间戳子目录>/ 当保存区
+#   每段录像的产物（视频流 + 对应 .timestamps）**一起**放进一个以时间命名的子目录，
+#   子目录名 = 录像名（如 auv_20260923_000228）⇒ 一眼能对上，也不会和别的段混在一起。
+# ---------------------------------------------------------------------------
+def default_save_dir():
+    """保存区默认位置：<工程根>/RDKX5-YOLOv11n-/raw-data（与 pc/ 同级）。"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(root, "RDKX5-YOLOv11n-", "raw-data")
+
+
+def stem_of(path):
+    """去掉扩展名与 .timestamps 后缀，得到"录像名"。"""
+    base = os.path.basename(path)
+    for ext in (".mjpeg.timestamps", ".timestamps", ".mjpeg", ".mp4"):
+        if base.endswith(ext):
+            return base[:-len(ext)]
+    return os.path.splitext(base)[0]
+
+
+def archive_run(tmp_dir, save_dir, stem, also=()):
+    """把一段录像的所有产物搬进 `save_dir/<stem>/`，返回搬过去的路径列表。
+
+    视频（.mjpeg / .mp4）与它的 `.timestamps` 永远一起走 —— 这是本函数的唯一目的。
+    0 字节文件不搬（启动即失败的残file 留在 tmp 自生自灭）。
+    """
+    vsz = 0
+    for ext in (".mjpeg", ".mp4"):
+        q = os.path.join(tmp_dir, stem + ext)
+        if os.path.exists(q):
+            vsz = max(vsz, os.path.getsize(q))
+    if vsz <= 0:
+        print("[REC] 没录到数据（0 字节视频）→ 不归档，残file 留在 tmp：%s" % stem)
+        return []
+    sub = os.path.join(save_dir, stem)
+    os.makedirs(sub, exist_ok=True)
+    moved = []
+    for ext in (".mjpeg", ".mjpeg.timestamps", ".mp4", ".timestamps"):
+        src = os.path.join(tmp_dir, stem + ext)
+        if os.path.exists(src) and os.path.getsize(src) > 0:
+            dst = os.path.join(sub, os.path.basename(src))
+            shutil.move(src, dst)
+            moved.append(dst)
+    for p in also:
+        if p and os.path.exists(p):
+            dst = os.path.join(sub, os.path.basename(p))
+            try:
+                shutil.copy2(p, dst)
+                moved.append(dst)
+            except OSError:
+                pass
+    return moved
+
+
+def adopt_tmp(tmp_dir, save_dir, min_age_s=5.0, quiet=False):
+    """把 tmp 里**上一次**遗留的录像搬进保存区。
+
+    为什么需要：进程被 kill / 崩溃时来不及归档，文件会留在 tmp；而 tmp 是"可清"的目录，
+    不搬就等于把素材放在垃圾桶里（2026-09-22 那次 rm 事故就是这么丢的）。
+    `min_age_s` 内的新文件不动，避免误搬正在写的那个。
+    """
+    if not os.path.isdir(tmp_dir):
+        return []
+    now = time.time()
+    groups = {}
+    for fn in sorted(os.listdir(tmp_dir)):
+        if not fn.startswith("auv_"):
+            continue
+        p = os.path.join(tmp_dir, fn)
+        if os.path.isfile(p):
+            groups.setdefault(stem_of(fn), []).append(p)
+    out = []
+    for stem, paths in groups.items():
+        vids = [q for q in paths if q.endswith((".mjpeg", ".mp4")) and os.path.getsize(q) > 0]
+        if not vids:
+            continue                        # 没有非空视频（只有 timestamps / 0 字节残file）→ 不管
+        # "还在不在写"只看**视频**的新鲜度：sidecar 的 mtime 可能因为写入顺序略有差别，
+        # 按组判断才不会把视频搬走却把它的 timestamps 落下（那正是要防的事）。
+        try:
+            if now - max(os.path.getmtime(q) for q in vids) < min_age_s:
+                continue
+        except OSError:
+            continue
+        sub = os.path.join(save_dir, stem)
+        os.makedirs(sub, exist_ok=True)
+        for q in paths:
+            dst = os.path.join(sub, os.path.basename(q))
+            shutil.move(q, dst)
+            out.append(dst)
+        if not quiet:
+            print("[REC] tmp 里发现上次遗留的录像 → 已归档：%s（%d 个文件）→ %s/"
+                  % (stem, len(paths), sub))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # 录像器
 # ---------------------------------------------------------------------------
@@ -137,7 +238,10 @@ class Recorder(object):
             print("[REC] discard mode: no file will be written")
         else:
             self.raw = open(self.out_path, "wb")
-            self.ts = open(self.out_path + ".timestamps", "w")
+            # ⚠️ buffering=1（行缓冲）：`.timestamps` 是**每帧一行**写的，进程被 kill 时
+            #    块缓冲会丢掉尾部（2026-09-22 实测：真值只剩 882/1094 帧，静默少 8.5 s）。
+            #    行缓冲 = 每帧 flush，代价可忽略（25 fps × 一行文本）。
+            self.ts = open(self.out_path + ".timestamps", "w", buffering=1)
             self.ts.write("# frame_index\tarrival_unix\tdelta_ms\n")
             print("[REC] raw MJPEG -> %s  (zero-transcode, no frame drops)" % self.out_path)
         if self.show and cv2 is None:
@@ -160,6 +264,17 @@ class Recorder(object):
                 if cv2.waitKey(1) & 0xFF in (27, ord("q")):
                     raise KeyboardInterrupt
 
+    def archive(self):
+        """把本次产物搬进保存区（--discard / --no-archive 时不动）。"""
+        if getattr(self.args, "discard", False) or getattr(self.args, "no_archive", False):
+            return []
+        tmp_dir = os.path.dirname(os.path.abspath(self.out_path)) or "."
+        moved = archive_run(tmp_dir, self.args.save_dir, stem_of(self.out_path))
+        if moved:
+            print("[REC] 已归档 → %s/（%d 个文件：视频 + timestamps 一起）"
+                  % (os.path.dirname(moved[0]), len(moved)))
+        return moved
+
     def close_raw(self):
         if self.raw is not None:
             self.raw.close()
@@ -173,6 +288,7 @@ class Recorder(object):
         else:
             print("[REC] raw saved %d frames / %.1fs ~= %.2f fps -> %s" % (self.n, dt, fps, self.out_path))
             self._remux_after_record(fps)
+            self.archive()
         if self.show:
             try:
                 cv2.destroyAllWindows()
@@ -223,6 +339,7 @@ class Recorder(object):
         if self.writer is not None:
             self.writer.release()
             print("[REC] saved %d frames -> %s" % (self.n, self.out_path))
+            self.archive()
 
     # -- 统计 --------------------------------------------------------------
     def tick_stats(self, interval):
@@ -350,7 +467,13 @@ def run_ffmpeg(args, out_path):
     cmd += [out_path]
     print("[REC] ffmpeg (zero-transcode copy) -> %s" % out_path)
     print("      " + " ".join(cmd))
-    return subprocess.call(cmd)
+    rc = subprocess.call(cmd)
+    if rc == 0 and not getattr(args, "no_archive", False):
+        moved = archive_run(os.path.dirname(os.path.abspath(out_path)), args.save_dir,
+                            stem_of(out_path))
+        if moved:
+            print("[REC] 已归档 → %s/" % os.path.dirname(moved[0]))
+    return rc
 
 
 def remux(args):
@@ -395,7 +518,16 @@ def parse_args(argv=None):
     ap.add_argument("--rcvbuf", type=int, default=4 * 1024 * 1024,
                     help="UDP receive buffer (auto-degrades above net.core.rmem_max)")
     ap.add_argument("--http", default=None, help="pull HTTP MJPEG instead, e.g. http://<rdk>:8080/")
-    ap.add_argument("--out-dir", default="record", help="output folder (default: record)")
+    ap.add_argument("--tmp-dir", "--out-dir", dest="tmp_dir", default="record",
+                    help="中转目录（tmp）：录制期间写这里，结束后归档搬走（默认 record/；"
+                         "--out-dir 是它的旧名）")
+    ap.add_argument("--save-dir", default=default_save_dir(),
+                    help="保存目录：每段录像进 <save-dir>/<录像名>/ 子目录（默认 "
+                         "RDKX5-YOLOv11n-/raw-data）")
+    ap.add_argument("--no-archive", action="store_true",
+                    help="关掉归档：产物就留在 tmp（老行为）")
+    ap.add_argument("--no-adopt", action="store_true",
+                    help="不接管 tmp 里上次遗留的录像（默认会替它归档）")
     ap.add_argument("--name", default=None, help="file name without extension (default: auv_<timestamp>)")
     ap.add_argument("--mode", choices=["raw", "mp4"], default="raw",
                     help="raw = zero-transcode .mjpeg (default); mp4 = cv2 mp4 (may drop frames)")
@@ -421,18 +553,22 @@ def main(argv=None):
     if args.remux:
         return remux(args)
 
-    os.makedirs(args.out_dir, exist_ok=True)
+    os.makedirs(args.tmp_dir, exist_ok=True)
+    if not args.no_archive:
+        os.makedirs(args.save_dir, exist_ok=True)
+        if not args.no_adopt and not args.discard:
+            adopt_tmp(args.tmp_dir, args.save_dir)        # 上次崩溃/被杀留下的，先搬去保存区
     ts = time.strftime("%Y%m%d_%H%M%S")
     stem = args.name or ("auv_%s" % ts)
 
     if args.mp4_ffmpeg:
-        return run_ffmpeg(args, os.path.join(args.out_dir, stem + ".mp4"))
+        return run_ffmpeg(args, os.path.join(args.tmp_dir, stem + ".mp4"))
 
     if args.mode == "mp4" and cv2 is None:
         print("[REC] mp4 mode needs opencv-python; use --mp4 (ffmpeg) or raw mode", file=sys.stderr)
         return 2
 
-    out_path = os.path.join(args.out_dir, stem + (".mjpeg" if args.mode == "raw" else ".mp4"))
+    out_path = os.path.join(args.tmp_dir, stem + (".mjpeg" if args.mode == "raw" else ".mp4"))
     rec = Recorder(args, out_path)
     try:
         if args.http:

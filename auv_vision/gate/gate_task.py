@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """gate/gate_task.py — 任务三 过门（GateTask 相位机）
 
-门 = 对称平面矩形门框(0.70×0.50 m)，悬空，无朝向要求；任务 = 机身穿过开口。
+门 = 对称平面矩形门框(卷尺实测外缘 **0.77×0.56 m**，管外径 5cm)，悬空，无朝向要求；任务 = 机身穿过开口。
 
 相位：SEARCH → ALIGN → APPROACH → THROUGH(计数) → (下一门)/DONE
 ALIGN 子状态（按前端 mode 与门框占屏比仲裁）：
@@ -63,7 +63,8 @@ _D_ALIGN = dict(confirm_frames=4, px_x=0.20, px_y=0.25)
 # 没有这条就会在门口一直 creep）。实测记录见 md §3。
 _D_LOITER = dict(enable=True, timeout_ms=3000, dx_max=0.14, dy_max=0.20)
 # z.cross：实船验证过的穿门判据，**不要动**。near_lost_* 是"到门口了"的两条判据（见出口②）。
-_D_Z = dict(cross=0.7, cross_confirm_frames=2, slow_max=1.3, near_lost_m=1.0,
+# cross 取 **0.77** = 陆上实验（2026-09-22 21:00 前）确认的最终值，与标尺 0.77/0.56 配对。
+_D_Z = dict(cross=0.77, cross_confirm_frames=2, slow_max=1.3, near_lost_m=1.0,
             near_lost_ratio=0.60, z_stale_ms=1500)
 _D_SURGE = dict(creep=0.20, lost_backward=0.20, reacquire=0.25, through=0.6)
 # 进近两档 fast/slow 取自 comm.motion.surge_fast/surge_slow（与撞球共用同一份，见 _speed）。
@@ -167,12 +168,16 @@ class GateTask(object):
         self._hdg_f = None                # EMA 状态（只吃 full 帧，避免 p3p 垃圾污染）
         self._hdg_deg = None              # 最近一次 full 帧测到的航向误差（度）
         self._hdg_ms = None               # 上面那个值的时刻（新鲜度；离散正航向要用）
+        self._wait_hdg_ms = None          # 「原地等一帧新鲜 full」的起始时刻（wait_fresh_ms>0 用）
+        self._hdg_skip_logged = False     # 本门是否已报过"跳过正航向"的原因（每门一次）
 
         self.last_info = {"phase": PH_SEARCH, "substate": "", "mode": "",
                           "action": "stop", "z": 0.0, "dx": 0.0, "dy": 0.0,
                           "sway": 0.0, "heave": 0.0, "surge": 0.0, "yaw": 0.0,
                           "pass": 0, "kpt": 0, "kpt_raw": 0, "ratio": 0.0,
                           "hdg": None,          # 航向误差(度)：+ = 门法向偏画面右 = 机身左偏
+                          "hdg_skip": None,     # 居中达标却跳过正航向的原因（下一步：进近）
+                          "hdg_state": "",      # HDG 内部状态：idle/settle/measure/turn/done/giveup
                           "hdg_i": 0,           # 正航向已迭代次数（ALIGN.HDG）
                           "status": S.STATUS_RUNNING, "reason": ""}
         self.reset_state()
@@ -196,6 +201,8 @@ class GateTask(object):
         self._through_start_ms = None    # THROUGH 起始时间戳（时长判据）
         self._hdg.reset()
         self._hdg_done = not flag(self._hdg_cfg, "enable", True)
+        self._wait_hdg_ms = None
+        self._hdg_skip_logged = False
         self._loiter_start_ms = None     # 「已在门口」的起始时刻（超时兜底）
         self._reacquire_start = None
         self._reacquire_ratio0 = None    # 进入 REACQUIRE 时的框占比（闭环后退基准）
@@ -229,6 +236,34 @@ class GateTask(object):
         而且 yaw 是**方位**控制，把门拉到光轴上 ≠ 机身与门平行。姿态由 ALIGN.HDG 负责。
         """
         return _dof_clip(self._pid_sway_px.update(dxn, now_ms))
+
+    def _hdg_skip_reason(self, mode, now_ms):
+        """居中达标却没进正航向的**原因**（水里复盘看 `hdg_skip` 这个字段）。
+
+        ⚠️ `fresh_ms` 其实是空转的：**每个 full 帧都会刷新 `_hdg_ms`** ⇒
+        "psi 新鲜"真正等价于"**当前这一帧是 full**"。所以最常见的原因就是 mode 不是 full
+        （远距/斜门只在部分帧拿到 4 角）。另外 `_on_width` 的 ALIGN 分支从不启动 HDG。
+        """
+        if not flag(self._hdg_cfg, "enable", True) or not self._hdg.enabled:
+            return "off(未启用)"
+        if self._hdg_done:
+            return "done(本门已做过正航向)"
+        if mode != MODE_FULL:
+            return "mode=%s(只有 full 帧的 psi 可用)" % mode
+        if self._hdg_deg is None or self._hdg_ms is None:
+            return "no_psi(还没测到过 full 的 psi)"
+        age_s = (now_ms - self._hdg_ms) / 1000.0
+        return "stale(psi 已 %.2fs > fresh_ms=%.2fs)" % (
+            age_s, float(self._hdg_cfg.get("fresh_ms", 800.0)) / 1000.0)
+
+    def _note_hdg_skip(self, why):
+        """居中达标却跳过正航向 → 写进日志字段 + 终端报一次（每门一次）。"""
+        self.last_info["hdg_skip"] = why
+        if self._hdg_skip_logged:
+            return
+        self._hdg_skip_logged = True
+        print("[GATE] ⚠️ 居中达标但跳过正航向：%s ⇒ 带残余航向直接进近"
+              "（想让它等一帧新鲜 full：把 comm.gate.hdg.wait_fresh_ms 设成 1500~2000）" % why)
 
     def _hdg_abort(self, why):
         """中止正在进行的正航向转向（只有**整门丢失 / 进冲刺**才调）。
@@ -269,7 +304,12 @@ class GateTask(object):
     def _set_info(self, action, mode="", substate="",
                   z=None, dx=0.0, dy=0.0, sway=0.0, heave=0.0,
                   surge=0.0, yaw=0.0, kpt=0, ratio=None, kpt_raw=None,
-                  hdg=None):
+                  hdg=None, hdg_skip=None, hdg_state=None):
+        # hdg_skip：居中达标却跳过正航向的原因（只在那个瞬间有意义；传 None 表示本帧不涉及）
+        if hdg_skip is not None:
+            self.last_info["hdg_skip"] = hdg_skip
+        if hdg_state is not None:
+            self.last_info["hdg_state"] = str(hdg_state)
         self.last_info.update({
             "phase": self.phase, "substate": substate or self.substate,
             "mode": mode or self.mode, "action": action,
@@ -313,6 +353,8 @@ class GateTask(object):
         # 新的一门：重新允许正航向（每门只做一次）
         self._hdg.reset()
         self._hdg_done = not flag(self._hdg_cfg, "enable", True)
+        self._wait_hdg_ms = None
+        self._hdg_skip_logged = False
         self._search_entry_ms = None
         self._last_pose = None
         self._z_last = None
@@ -586,7 +628,7 @@ class GateTask(object):
                 self._set_info("hdg" if not self._hdg.finished() else "center",
                                mode=mode, z=z, dx=dx_m, dy=dy_m,
                                sway=0.0, heave=0.0, surge=0.0, yaw=yaw_cmd, kpt=kpt,
-                               hdg=self._hdg_deg)
+                               hdg=self._hdg_deg, hdg_state=self._hdg.state)
                 return
             self.substate = SUB_GOLDEN
             if self._loiter_commit(dxn, dyn, float(det.w) / float(self.w), now_ms):
@@ -596,20 +638,38 @@ class GateTask(object):
                 if self._center_cnt >= int(num(al, "confirm_frames", _D_ALIGN["confirm_frames"])):
                     if self._hdg_ready(mode, now_ms):
                         # 居中达标 → **先正航向**（离散：测→转→停稳→再测）
+                        self._wait_hdg_ms = None
+                        self.last_info["hdg_skip"] = None    # 已经进来了，清掉"跳过"标记免得日志误读
                         self.substate = SUB_HDG
                         self._hdg.start(now_ms)
                         self.last_info["hdg_i"] = self._hdg.iters
                         self._set_info("hdg", mode=mode, z=z, dx=dx_m, dy=dy_m,
                                        sway=0.0, heave=0.0, yaw=0.0, kpt=kpt,
-                                       hdg=self._hdg_deg)
+                                       hdg=self._hdg_deg, hdg_state=self._hdg.state)
                         return
+                    # 没进正航向：先看要不要"原地等一帧新鲜 full"（wait_fresh_ms>0）
+                    why = self._hdg_skip_reason(mode, now_ms)
+                    wait_ms = float(self._hdg_cfg.get("wait_fresh_ms", 0.0) or 0.0)
+                    if wait_ms > 0:
+                        if self._wait_hdg_ms is None:
+                            self._wait_hdg_ms = now_ms
+                        if (now_ms - self._wait_hdg_ms) < wait_ms:
+                            # GOLDEN 本来就不下发 surge ⇒"等"=原地保持对中（代价只是时间）
+                            self._set_info("wait_hdg", mode=mode, z=z, dx=dx_m, dy=dy_m,
+                                           sway=sway, heave=heave, yaw=0.0, kpt=kpt,
+                                           hdg=self._hdg_deg, hdg_skip=why,
+                                           hdg_state=self._hdg.state)
+                            return
+                    self._note_hdg_skip(why)
+                    self._wait_hdg_ms = None
                     self.phase = PH_APPROACH
                     self.substate = ""
             else:
                 self._center_cnt = 0
+                self._wait_hdg_ms = None       # 又偏出去 → 等待计时作废
             self._set_info("center", mode=mode, z=z, dx=dx_m, dy=dy_m,
                            sway=sway, heave=heave, yaw=yaw, kpt=kpt,
-                           hdg=self._hdg_deg)
+                           hdg=self._hdg_deg, hdg_state=self._hdg.state)
         elif self.phase == PH_APPROACH:
             # 进近两档（远→快 / 近→慢）；分档点 = z.slow_max。速度档与撞球共用（见 `_speed`）。
             # 注：z.fast_max / z.align_max 当前**未参与运算**（见 cfg 注释）
@@ -943,7 +1003,7 @@ class GateTask(object):
 
         结束条件优先**时长** `through.confirm_ms`（帧数语义下冲刺时长随 fps 漂，而"能不能
         冲出去"取决于跑了多远）；`confirm_ms<=0` → 退回旧的帧数语义 `confirm_frames`。
-        ⚠️ confirm_ms 要按实测航速标定：需要冲的距离 ≈ z.cross(0.7，z 高估 ~20% ⇒ 实际
+        ⚠️ confirm_ms 要按实测航速标定：需要冲的距离 ≈ z.cross(0.77，真 0.77 m 的触发点）
         ~0.58m) + 机身长度 → confirm_ms ≈ 1000·(0.58+L)/v，再留 30% 余量。
         """
         G = self._G

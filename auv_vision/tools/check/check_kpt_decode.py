@@ -141,7 +141,11 @@ def main():
 
     conf = a.conf if a.conf is not None else S.vision.model.score_threshold
     if a.per_cell:
-        per_cell_report(outs, labels, pre.size, conf=max(0.4, conf - 0.1))
+        # ⚠️ 老版本写的是 max(0.4, conf-0.1)：把 --conf 0.05 悄悄变成 0.40，
+        #    于是"没有 cell ≥0.40"被误读成"模型失效"。现在**按传入值**（默认 0.05）。
+        pc = float(os.environ.get("AUV_KPT_PERCELL_CONF", "0.05")) \
+            if a.conf is None else max(0.01, float(a.conf))
+        per_cell_report(outs, labels, pre.size, conf=pc)
         return
     # ① 用**真实解码器**得到"框"（你已确认框是对的）
     dets = decode_yolo11_kpt(outs, labels, w, h, conf=conf,
@@ -199,6 +203,25 @@ def main():
 
 
 # ------------------------------------------------------------------ 逐 cell 全局判定
+def raw_max_scores(outs):
+    """每个输出张量的最大值（原始值 + sigmoid）。
+
+    **刻意不假设通道布局**（NHWC 与 CHW 两种导出都见过）：只取全局最大值，
+    并把 shape 打出来便于识别哪个分支是类别。类别分支输出是 **logit**：
+    `>0` ⇒ 有响应（sigmoid>0.5）；`<= -4` ⇒ 基本等于没响应。**两者修法完全不同。**
+    """
+    rows = []
+    items = outs.items() if isinstance(outs, dict) else list(enumerate(outs))
+    for name, arr in items:
+        a = np.asarray(arr)
+        if a.size == 0 or a.dtype == object:
+            continue
+        mx = float(a.max())
+        rows.append((str(name), tuple(int(x) for x in a.shape), mx,
+                     1.0 / (1.0 + np.exp(-max(-50.0, min(50.0, mx))))))
+    return rows
+
+
 def per_cell_report(outs, labels, pre_size, conf=0.4, limit=200):
     """对每个"有输出的 cell"比较：该 cell 解出的**框** vs 各候选公式解出的**四角包围盒**。
 
@@ -238,6 +261,28 @@ def per_cell_report(outs, labels, pre_size, conf=0.4, limit=200):
                                pts[:, 0].max(), pts[:, 1].max()])
                 rows[t].append(float(np.mean(np.abs(qb - box))))
     print("=" * 70)
+    # ★ 先报"模型到底响不响应"（不假设布局：逐张量报最大值）
+    rows_ = raw_max_scores(outs)
+    print("模型响应自检（逐输出张量；类别分支的原始值是 logit）")
+    print("  %-10s %-22s %12s %12s" % ("输出名", "shape", "原始最大值", "sigmoid"))
+    smax = -99.0
+    for nm, shp, mx, sg in rows_:
+        print("  %-10s %-22s %12.3f %12.3f" % (nm, str(shp), mx, sg))
+        if min(shp) <= 4:                     # 通道/末维很小 ⇒ 可能是类别或回归分支
+            smax = max(smax, mx)
+    _sg = 1.0 / (1.0 + np.exp(-max(-50.0, min(50.0, smax))))
+    if smax < -4.0:
+        print("⇒ **没有响应**（候选类别分支最大 logit=%.2f ⇒ sigmoid %.4f）：先怀疑外观/域"
+              "（水质/光照/门色/太远），**不是解码**。拿一张旧的水下帧做对照"
+              "（同一权重应给 0.8+）即可定性。" % (smax, _sg))
+    elif smax < 0.0:
+        print("⇒ **弱响应**（最大 logit=%.2f ⇒ sigmoid %.3f）：模型「看到了」但没把握 —— "
+              "距离/模糊/光照/门色都可能是原因；降 score_threshold 能看到框但不稳，"
+              "别拿它当可用。" % (smax, _sg))
+    else:
+        print("⇒ 响应正常（最大 logit=%.2f ⇒ sigmoid %.3f）：接着看哪个解码公式误差最小。"
+              % (smax, _sg))
+    print()
     print("逐 cell 判定（conf>=%.2f，共 %d 个 cell）: |四角包围盒 - 框| 平均误差 px"
           % (conf, n_cell))
     print("%-6s %10s %10s %10s" % ("约定", "均值", "中位", "p90"))
@@ -247,8 +292,11 @@ def per_cell_report(outs, labels, pre_size, conf=0.4, limit=200):
             print("%-6s %10s" % (t, "n/a")); continue
         print("%-6s %10.1f %10.1f %10.1f" % (t, v.mean(), np.median(v),
                                              np.percentile(v, 90)))
-    best = min((t for t in VARIANTS if rows[t]),
-               key=lambda t: float(np.mean(rows[t])))
+    used = [t for t in VARIANTS if rows[t]]
+    if not used:
+        print("→ 没有 cell 达到 conf=%.2f，无法比较解码公式（看上面的模型响应）" % conf)
+        return None
+    best = min(used, key=lambda t: float(np.mean(rows[t])))
     print("→ 误差最小（最可能正确）: %s" % best)
     print("  参考：stride 量级 = 输入域 16/32 px（帧域 ×2 = 32/64 px）")
     return best

@@ -1,0 +1,32 @@
+%YAML:1.0
+---
+# ============================================================================
+# WATER-side calibration (dome on, calibrated underwater). The boat uses THIS file.
+# For air / on-shore work point vision.camera.front.calibration at
+# cfg/front_camera_air.yaml instead, and switch it back before launching.
+# Air effective focal length is ~1078 px vs 782.5 here (the dome refracts less in
+# water), so PnP depth reads ~28% low on shore if this file is used there.
+# Measurements and uncertainty: the experiment runbook in doc/ (sections A0b, A6).
+#
+# FILE-HEAD RULE (verified on the board 2026-09-22, cv2 4.11): the first byte of a
+# !!opencv-matrix yaml MUST be "%YAML:1.0". A leading comment line -- or even a
+# leading blank line -- makes cv2.FileStorage throw "Input file is invalid", which
+# crashes camera init (calibration_maps does not fall back). Comments are fine
+# AFTER the "---" marker, as here. Keep this header ASCII-only too, on principle.
+# ============================================================================
+image_width: 1280
+image_height: 720
+camera_matrix: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 782.53665643862632, 0., 633.79513388612997, 0.,
+       779.78802737768126, 386.91271578259824, 0., 0., 1. ]
+distortion_coefficients: !!opencv-matrix
+   rows: 1
+   cols: 5
+   dt: d
+   data: [ -0.49135774794986464, 0.3784425130001467,
+       -0.0091147825077391147, 0.0039697664172938119,
+       -0.22618736504492779 ]
+reprojection_error: 0.70509815140910803

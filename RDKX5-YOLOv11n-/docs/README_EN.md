@@ -35,13 +35,13 @@ The Softmax operator inside the new YOLO11 C2PSA block defaults to CPU, splittin
 ```
 data/xxx/data.yaml                    ① prepare dataset
         ↓
-scripts/train_yolo11n.py              ② fine-tune (pretrained yolo11n.pt)
+scripts/2_train/train_yolo11n.py              ② fine-tune (pretrained yolo11n.pt)
         ↓  best.pt → yolo11n.pt
-scripts/modify_ultralytics.py         ③ split head into 6 tensors (auto backup/verify)
-scripts/export_onnx.py                ④ export ONNX (6 outputs)
+scripts/3_export/modify_ultralytics.py         ③ split head into 6 tensors (auto backup/verify)
+scripts/3_export/export_onnx.py                ④ export ONNX (6 outputs)
         ↓  yolo11n.onnx
-scripts/prepare_calibration.py        ⑤ generate 100 calibration samples (.rgb)
-scripts/quantize.sh                   ⑥ hb_mapper PTQ quantization in Docker
+scripts/3_export/prepare_calibration.py        ⑤ generate 100 calibration samples (.rgb)
+scripts/3_export/quantize.sh                   ⑥ hb_mapper PTQ quantization in Docker
         ↓
 output/yolo11n_detect_bayese_640x640_nv12.bin   ⑦ scp → RDK X5
 ```
@@ -80,19 +80,19 @@ To make **training images and on-board inference images pixel-identical
 ```bash
 # 1) checkerboard (video or image folder) → intrinsics yaml (RMS<=0.8px gate)
 #    the board must cover corners/edges, otherwise edge distortion is extrapolated
-python scripts/calibrate_camera.py data/AUV_1/board \
+python scripts/1_prepare/calibrate_camera.py data/AUV_1/board \
     --cols 11 --rows 8 --square-mm 20 --output configs/front_camera.yaml
 
 # 2) recording → raw frames (auto-detects container video / raw MJPEG stream)
-python scripts/extract_frames.py data/AUV_2/auv_xxx.mjpeg     # raw MJPEG, lossless split
-python scripts/extract_frames.py data/AUV_1/rec_front.mp4 --step 5
+python scripts/1_prepare/extract_frames.py data/AUV_2/auv_xxx.mjpeg     # raw MJPEG, lossless split
+python scripts/1_prepare/extract_frames.py data/AUV_1/rec_front.mp4 --step 5
 
 # 3) sorted image set → training frames (undistort + WB/CLAHE/gamma + 640x640)
-python scripts/prepare_frames.py data/AUV_2/<class_dir> --config configs/vision.yaml
+python scripts/1_prepare/prepare_frames.py data/AUV_2/<class_dir> --config configs/vision.yaml
 
 # 4) (optional) filter with an existing model: drop unwanted classes + quality-weighted sampling
-python scripts/select_frames.py data/AUV_2/datay/origin \
-    --weights runs/detect/auv_v3/weights/best.pt --drop-classes red_ball \
+python scripts/1_prepare/select_frames.py data/AUV_2/datay/origin \
+    --weights weights/yolo11n.pt --drop-classes red_ball \
     --quality-dir data/AUV_2/origin --keep 2000 --out-dir data/AUV_2/selected_2000
 ```
 
@@ -104,7 +104,7 @@ steps are not commutative.)**
 ### ② Train (fine-tune from pretrained yolo11n.pt)
 
 ```bash
-python scripts/train_yolo11n.py --data data/auv/data.yaml --epochs 100 --imgsz 640 --device 0   # GPU
+python scripts/2_train/train_yolo11n.py --data data/auv/data.yaml --epochs 100 --imgsz 640 --device 0   # GPU
 ```
 
 best.pt is copied to `yolo11n.pt` for export, and the 6-output patch is re-applied automatically. Skip this step to use the official COCO-pretrained weights directly.
@@ -113,12 +113,12 @@ best.pt is copied to `yolo11n.pt` for export, and the 6-output patch is re-appli
 
 ```bash
 # detection (Detect head → 6 tensors: 3×bbox + 3×cls)
-python scripts/modify_ultralytics.py --task detect
-python scripts/export_onnx.py                     # yolo11n.onnx (opset 11, 640, 6 outputs)
+python scripts/3_export/modify_ultralytics.py --task detect
+python scripts/3_export/export_onnx.py                     # yolo11n.onnx (opset 11, 640, 6 outputs)
 
 # keypoints (Pose head → 9 tensors: per scale bbox64 + cls nc + kpt 12; gate 4 corners)
-python scripts/modify_ultralytics.py --task pose
-python scripts/export_onnx.py --task pose         # yolo11n-pose.onnx (9 outputs)
+python scripts/3_export/modify_ultralytics.py --task pose
+python scripts/3_export/export_onnx.py --task pose         # yolo11n-pose.onnx (9 outputs)
 ```
 
 > RoboFlow keypoint spec (4 points TL,TR,BR,BL / Keypoint Detection / export "YOLOv8 Pose"),
@@ -128,13 +128,13 @@ python scripts/export_onnx.py --task pose         # yolo11n-pose.onnx (9 outputs
 ### ⑤ Prepare calibration data (e.g. COCO val2017)
 
 ```bash
-python scripts/prepare_calibration.py --coco-path /path/to/coco/val2017 --num-images 100
+python scripts/3_export/prepare_calibration.py --coco-path /path/to/coco/val2017 --num-images 100
 ```
 
 ### ⑥ Quantize
 
 ```bash
-./scripts/quantize.sh                # hb_mapper makertbin with configs/yolo11n_config.yaml
+./scripts/3_export/quantize.sh                # hb_mapper makertbin with configs/yolo11n_config.yaml
 ```
 
 Key settings in `configs/yolo11n_config.yaml`:

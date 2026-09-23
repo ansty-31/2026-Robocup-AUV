@@ -1,0 +1,37 @@
+%YAML:1.0
+---
+# ============================================================================
+# AIR / on-shore calibration (dome on, in air). Point
+# vision.camera.front.calibration here for bench work and switch BACK to
+# cfg/front_camera.yaml before the boat goes into the water.
+#
+# fx was measured three independent ways on 2026-09-22:
+#   tape tick-period method (tools/analyze/tape_ticks.py)      1083 +- 7 px
+#   tape target + gate A1 joint fit (ruler_calib.py --gate)    1075 px
+#   "+-50 cm gate just leaves the frame" boundary requires    >= 1095 px
+# Re-running the hand-labelled A1 dumps with these intrinsics gives depth
+# 0.95 / 1.51 / 1.98 / 2.59 m against truth 1.00 / 1.50 / 2.00 / 2.50 m
+# (errors within 6%), and the 1.00 m dump -- which could not be solved at all
+# with the old 782.5 intrinsics -- now yields poses.
+#
+# distortion_coefficients are 0 on purpose: the k1=-0.49 fitted underwater does
+# not hold in air, so on shore we work in the raw domain (identity remap).
+# This is not a real calibration: it is an effective-intrinsics file derived from
+# two physical measurements plus one depth cross-check. A proper chessboard
+# calibration with the dome in air would supersede it.
+#
+# FILE-HEAD RULE: the first byte must be "%YAML:1.0" (see cfg/front_camera.yaml).
+# ============================================================================
+image_width: 1280
+image_height: 720
+camera_matrix: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 1078.0, 0., 633.79513388612997, 0.,
+       1074.2, 386.91271578259824, 0., 0., 1. ]
+distortion_coefficients: !!opencv-matrix
+   rows: 1
+   cols: 5
+   dt: d
+   data: [ 0., 0., 0., 0., 0. ]

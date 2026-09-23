@@ -36,35 +36,105 @@ python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 
 ## 目录分区
 
+> 整理时间 2026-09-23（晚：实验内容全部移入 `experiment/`）。顶层**九个区**（`configs` `weights`
+> `scripts` `docs` `data` `raw-data` `runs` `output` `experiment`）加一个**归档区** `_archive/`；
+> 散落文件已归位（原仓库根目录的 `yolov8n.pt` → `_archive/root/`）。
+> **`experiment/` = 只为「去畸变时机 / enhance」那一个问题服务的一切**（脚本+对照数据+结果），
+> 常规流水线不引用它 —— 分类索引见 [`experiment/README.md`](experiment/README.md)。
+> 归档规则与恢复方法见 [`_archive/README.md`](_archive/README.md)。
+
 ```
 RDKX5-YOLOv11n-/
 ├── README.md                  ← 本文件（项目总览 / 分区导航 / 全流程命令）
 ├── LICENSE · requirements.txt · .gitignore
-├── configs/                   配置（全部集中在此）
+├── configs/                   配置（全部集中在此，索引见 configs/README.md）
 │   ├── vision.yaml            ★ 板端图像链路参数镜像（预处理与推理一致性唯一来源）
-│   ├── front_camera.yaml      相机标定（calibrate_camera.py 产出，板端共用）
+│   ├── front_camera.yaml      ★ 当前生效标定（AUV_5 水下棋盘，即"标定 C"）
+│   ├── front_camera_air.yaml  空气/岸上标定（台架调试用，下水前必须切回上一份）
 │   ├── yolo11n_config.yaml    detect 模型 PTQ 量化配置
-│   └── gate_kpt_config.yaml   pose 模型 PTQ 量化配置
+│   ├── gate_kpt_config.yaml   pose 模型 PTQ 量化配置
+│   └── backup/                历史标定留档（只读，勿删；见 configs/README.md）
 ├── weights/                   权重与模型（★ 分区说明见 weights/README.md）
-│   ├── yolo11n.pt             检测权重（当前 = AUV v3 训练产物，3 类）
-│   ├── yolo11n-pose.pt        pose 预训练（官方 COCO，训练起点）
-│   └── yolo11n.onnx           最近一次 detect 导出（量化输入）
-├── scripts/                   脚本按阶段分三区（详见 scripts/README.md）
-│   ├── 1_prepare/             训练前：extract_frames · calibrate_camera · prepare_frames(+noundistort) · select_frames · prepare_pose_dataset · resplit_dataset
-│   ├── 2_train/               训练：train_yolo11n.py（--task detect|pose）
-│   └── 3_export/              导出+量化：modify_ultralytics · export_onnx · prepare_calibration · quantize.sh · test_decode_parity
-├── docs/                      文档（教程/介绍/贡献指南）
+├── scripts/                   脚本按阶段分三区，**只放常规流水线**（★ 索引见 scripts/README.md）
+│   ├── 1_prepare/             训练前：数据准备（分类详见 scripts/README.md）
+│   │   ├── (根) extract_frames · calibrate_camera · prepare_frames
+│   │   │        · select_frames · resplit_dataset          ← 共用 / 常用
+│   │   ├── pose/               ★ 门（4 角点）专用
+│   │   │   ├── prepare_pose_dataset.py  Roboflow pose 导出 → 可训练集（kpt_shape/flip_idx）
+│   │   │   ├── map_pose_dataset.py      跨去畸变域换算标注 + 生成 pose 训练集
+│   │   │   │                            （`Domain` 类也是各域渲染的公共库）
+│   │   │   └── make_mixed_gate_set.py   跨水质挑门图待标（新一版 selected_3000，内容去重）
+│   │   └── provenance/         素材溯源（已闭合，换数据集可复用）
+│   │       └── materialize_raw · provenance_{match,stream,nn,merge}.py
+│   ├── 2_train/               train_yolo11n.py（--task detect|pose）
+│   └── 3_export/              modify_ultralytics · export_onnx · prepare_calibration
+│                              · quantize.sh · test_decode_parity
+├── experiment/                ★ 实验专区（脚本+对照数据+结果，不在常规流水线上）
+│   ├── README.md              分类索引：里面每个目录装什么、怎么重建
+│   ├── scripts/               exp_distortion/（域对比主目录）· board/（板端对照）
+│   │                          · train_domain_arms.sh · dedup_ceiling.py
+│   ├── data/                  6 个对照数据集 pose_{B,C,D}{,_noenh}（各 1302 张，逐帧同划分）
+│   ├── runs/                  domain/（域实验全部结果，主报告 EXPERIMENT_REPORT_20260923.md）
+│   │                          · exp_distortion/（更早的畸变实验）· prov_intermediate/
+│   └── logs/                  实验日志
+├── docs/                      文档（教程 / 介绍 / 贡献指南）
 │   ├── tutorial_zh.md         完整部署教程（含踩坑记录）
 │   ├── README_ZH.md           中文项目介绍
 │   ├── README_EN.md           English overview
 │   └── CONTRIBUTING.md
 ├── data/                      数据集与素材（不进库）
-├── output/                    量化产物 *.bin（不进库）
-└── runs/                      训练输出（不进库）
+│   ├── AUV_1 … AUV_5/         各次下水的素材与数据集
+│   │   └── AUV_5/             selected_3000_Dwb/（待标图）· label_candidates_Dwb/（150 清水待标）
+│   ├── mapped/                跨域映射出的可训练集
+│   │   ├── raw/               映射前的原始帧（1303，provenance 的锚点）
+│   │   └── pose_D_wb/         ★ 定稿生产集（D 域 + WB 无 CLAHE，1302）——下一步重训用这份
+│   │                          （B/C/D 及 noenh 实验对照集已移入 experiment/data/）
+├── raw-data/                  ★ 素材抢救区：坏卡雕出的裸流（GB 级，不进库）
+├── runs/                      训练与实验输出（不进库）
+│   ├── prov/                  溯源表 provenance_*.csv（流水线依赖）
+│   ├── auv5_eval/             清水 16 帧回归评估集 · calib_auv5/ 标定记录
+│   ├── domain/ exp_distortion/  ← 已移入 experiment/runs/
+│   └── …                      其余为各阶段产物
+├── output/                    量化产物 *.bin（不进库，部署时拷到板端 models/）
+└── _archive/                  归档区：暂时不用但保留（不进库）
+    ├── README.md              逐项说明「是什么 / 为什么在这 / 怎么恢复」
+    ├── MOVES.tsv              机器可读搬移清单（含内容指纹，可据此校验恢复）
+    ├── root/ · output/ · data/ · runs/ · ide/   按原位置镜像存放
+    └── orphan_pyc/            ⚠️ 源文件已消失、仅存字节码的三个脚本（唯一副本，勿删）
 ```
 
-**分区原则**：`scripts/` 只放可执行脚本并按“训练前 / 训练 / 导出量化”三段分区；
-所有配置进 `configs/`；权重与模型产物进 `weights/`；说明性文档进 `docs/`；数据与产物不进库。
+### 各区状态（一眼看清哪里在动、哪里是留档）
+
+| 区 | 状态 | 说明 |
+|---|---|---|
+| `scripts/` `configs/` `weights/` `docs/` | **在用** | 随版本迭代，纳入 git |
+| `data/AUV_1..5` `data/mapped` `raw-data/` | **在跑** | 当前实验的输入素材与数据集，勿动 |
+| `experiment/` | **在跑** | 去畸变/增强实验的全部脚本、对照数据与结果；可整体删除而不影响流水线 |
+| `runs/prov` `runs/auv5_eval` `runs/calib_auv5` | **在跑** | 流水线依赖的溯源表、回归评估集、标定记录 |
+| `output/*.bin` | **在用** | 当前部署产物（`gate_kpt_*` = 09-17，`yolo11n_detect_*` = 09-12） |
+| `configs/backup/` | **留档** | 历史标定，只读 |
+| `_archive/` | **留档** | 暂时不用但保留；含唯一副本，删除前先读其 README |
+
+### 上一轮派生图：**保留在原位，不清理**（2026-09-23 决定）
+
+下面这些是**上一轮的派生图**（不是原始素材）。**决定：一个都不删、位置不动** ——
+它们仍可被脚本或人工引用，删掉只会让"当年这批图是怎么筛出来的"变得不可查。
+本表只作**备案**：哪天真的缺空间，按「回退方式」一列重生成即可。
+
+| 路径 | 大小 | 是什么 | 真删了的回退方式 |
+|---|---|---|---|
+| `data/AUV_4/selected_3000/` | 446M | AUV_4 当年的待标池（3353 张），标注在 `data/AUV_4/PNP.kpt4.yolov8/` | 从 `data/AUV_4/auv_4_frames/` 重抽 |
+| `data/AUV_2/selected_2000/` | 193M | AUV_2 旧筛图产物 | 从 `*_frames/` 重抽 |
+| `data/AUV_3/selected_2000/` | 251M | AUV_3 旧筛图产物 | 同上 |
+| `data/AUV_1/dataset/AUV_data.zip` | 451M | 与同目录解压结果重复 | 解压目录还在 |
+| `data/AUV_1/dataset/AUV.yolov11.zip` | 212M | 与 `AUV.yolov11/` 重复 | 同上 |
+| `data/AUV_1/board/` | 432M | 标定 A / 空气标定的**输入照片**（结果已存 `configs/backup/`） | ⚠️ **无法复算**那只标定，只能重拍棋盘 |
+
+合计 ≈ **1.98G**。**当前不回收。**
+
+**分区原则**：`scripts/` 只放可执行脚本并按"训练前 / 训练 / 导出量化"三段分区；
+所有配置进 `configs/`；权重与模型产物进 `weights/`；说明性文档进 `docs/`；
+数据与产物不进库；"暂时不用"的一律进 `_archive/` 而不是直接删。
 
 ---
 
@@ -97,8 +167,8 @@ python scripts/1_prepare/select_frames.py data/AUV_2/datay/origin \
 # 5) 标注（RoboFlow）：检测框 或 门 4 角点（规范见下）
 
 # 6) 从 RoboFlow 拿回 pose 导出后，**必做两步**（否则 kpt_shape / 划分都会出问题）
-python scripts/1_prepare/prepare_pose_dataset.py data/AUV_4/PNP.yolov8 --dry-run   # 先看要改什么
-python scripts/1_prepare/prepare_pose_dataset.py data/AUV_4/PNP.yolov8             # → PNP.kpt4.yolov8
+python scripts/1_prepare/pose/prepare_pose_dataset.py data/AUV_4/PNP.yolov8 --dry-run   # 先看要改什么
+python scripts/1_prepare/pose/prepare_pose_dataset.py data/AUV_4/PNP.yolov8             # → PNP.kpt4.yolov8
 python scripts/1_prepare/resplit_dataset.py data/AUV_4/PNP.kpt4.yolov8             # 序列感知划分
 ```
 
@@ -221,7 +291,7 @@ pose 关键点语义（板端 `gate/gate_decode.py::decode_yolo11_kpt` 按此解
 
 > **⚠️ 但导出的 `data.yaml` 不能直接用**：RoboFlow 项目里删掉的关键点槽位**不会从导出里消失**，
 > 常见 `kpt_shape: [5, 3]` 而第 5 点在**全部**标签里都是 `0 0 0`；`flip_idx` 也总是恒等值。
-> 先过 `python scripts/1_prepare/prepare_pose_dataset.py <导出目录>` 归一（截槽位 + 校验
+> 先过 `python scripts/1_prepare/pose/prepare_pose_dataset.py <导出目录>` 归一（截槽位 + 校验
 > TL,TR,BR,BL 顺序 + 定 flip_idx），再 `resplit_dataset.py` 做序列感知划分。
 > 现成示例：`data/AUV_4/PNP.kpt4.yolov8/`（`nc=1`、`names=['gate']`、`kpt_shape=[4,3]`、
 > `flip_idx=[0,1,2,3]`、train/valid/test = 1043/131/130）。

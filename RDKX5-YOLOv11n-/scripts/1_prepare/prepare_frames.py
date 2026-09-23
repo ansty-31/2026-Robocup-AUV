@@ -2,7 +2,7 @@
 """
 图片集 → YOLO 训练图集（去畸变 + 640x640 + 画面补偿）
 
-输入为【已经切好/分好类的原始图片】（配合 scripts/extract_frames.py 切帧、
+输入为【已经切好/分好类的原始图片】（配合 scripts/1_prepare/extract_frames.py 切帧、
 人工分类后的目录），逐张复刻板端推理（板端 `common/preprocess.py` 的
 `ModelPreprocessor.process()`）的预处理链路，
 保证【进入 YOLO 训练的图片】与【进入 YOLO 推理的图片】像素级一致：
@@ -54,6 +54,35 @@ IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp")
 
 
 # ---------- 与板端 common/preprocess.py 完全一致的函数 ----------
+
+def calibration_maps_640(path: str, size: int = 640):
+    """640 域去畸变映射：dest(去畸变 size×size) ← src(畸变 size×size)
+
+    与板端 common/preprocess.py 的 calibration_maps_640 逐行同式，也与
+    map_pose_dataset.py 的「D 域」同式：
+
+        S = diag(size/RAW_W, size/RAW_H, 1)
+        nk720 = getOptimalNewCameraMatrix(K, dist, (RAW_W,RAW_H), 0, (RAW_W,RAW_H))
+        nk640 = S · nk720 ;  K640 = S · K
+        initUndistortRectifyMap(K640, dist, None, nk640, (size,size))
+
+    几何上与「先 remap@输入分辨率 再缩放」等价（nk640 = S·nk720），但少一次整幅读写。
+    """
+    fs = cv2.FileStorage(path, cv2.FILE_STORAGE_READ)
+    if not fs.isOpened():
+        raise FileNotFoundError(f"camera calibration missing: {path}")
+    k = fs.getNode("camera_matrix").mat()
+    dist = fs.getNode("distortion_coefficients").mat()
+    w = int(fs.getNode("image_width").real() or 1280)
+    h = int(fs.getNode("image_height").real() or 720)
+    fs.release()
+    if k is None or dist is None:
+        raise ValueError(f"invalid camera calibration: {path}")
+    sc = np.diag([size / float(w), size / float(h), 1.0])
+    new_k, _ = cv2.getOptimalNewCameraMatrix(k, dist, (w, h), 0, (w, h))
+    return cv2.initUndistortRectifyMap(sc @ k, dist, None, sc @ new_k,
+                                       (size, size), cv2.CV_16SC2)
+
 
 def calibration_maps(path: str, width: int, height: int):
     """由标定 yaml 生成去畸变 remap 映射（按分辨率缓存，只算一次）"""
@@ -196,7 +225,7 @@ def collect_image_sets(inputs: list[str]):
 
 def prepare(groups, out_dir: Path, calibration: str | None,
             gains: list[float], clahe: float, gamma: float,
-            size: int) -> int:
+            size: int, chain_order: str = "new") -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     total_saved = 0
     maps_cache: dict[tuple[int, int], tuple] = {}
@@ -212,20 +241,34 @@ def prepare(groups, out_dir: Path, calibration: str | None,
                 continue
             h, w = raw.shape[:2]
 
-            if calibration:                          # 1) 去畸变（按分辨率缓存映射）
-                if (w, h) not in maps_cache:
-                    maps_cache[(w, h)] = calibration_maps(calibration, w, h)
-                    print(f"📐 生成去畸变映射 {w}x{h} <- {calibration}")
-                m0, m1 = maps_cache[(w, h)]
-                frame = cv2.remap(raw, m0, m1, cv2.INTER_LINEAR)
-            else:                                    # 未标定则原图直出（告警一次）
+            # 链路顺序必须与板端 common/preprocess.py 当前实现一致，否则训练/推理分布漂移。
+            #   new（2026-09-23 起，D 域/P2）：resize(640) → enhance → remap@640
+            #   old（历史 P1）           ：remap@输入分辨率 → resize(640) → enhance
+            if chain_order == "new":
                 frame = raw
-            if (w, h) != (size, size):               # 2) 先统一 640x640
-                frame = cv2.resize(frame, (size, size),
-                                   interpolation=cv2.INTER_LINEAR)
-            # 3) 再画面补偿（板端已改为在 640 上做，省 ~2/3 耗时；
-            #    顺序影响像素：CLAHE 是分块局部算子，必须与板端一致）
-            frame = enhance(frame, gains, clahe, gamma)
+                if (w, h) != (size, size):           # 1) 先统一 640x640
+                    frame = cv2.resize(frame, (size, size),
+                                       interpolation=cv2.INTER_LINEAR)
+                frame = enhance(frame, gains, clahe, gamma)      # 2) 640 上做补偿
+                if calibration:                      # 3) 再在 640 上去畸变
+                    if ("m640", size) not in maps_cache:
+                        maps_cache[("m640", size)] = calibration_maps_640(calibration, size)
+                        print(f"📐 生成 640 域去畸变映射 {size}x{size} <- {calibration}")
+                    m0, m1 = maps_cache[("m640", size)]
+                    frame = cv2.remap(frame, m0, m1, cv2.INTER_LINEAR)
+            else:
+                if calibration:                      # 1) 去畸变（按分辨率缓存映射）
+                    if (w, h) not in maps_cache:
+                        maps_cache[(w, h)] = calibration_maps(calibration, w, h)
+                        print(f"📐 生成去畸变映射 {w}x{h} <- {calibration}")
+                    m0, m1 = maps_cache[(w, h)]
+                    frame = cv2.remap(raw, m0, m1, cv2.INTER_LINEAR)
+                else:
+                    frame = raw
+                if (w, h) != (size, size):           # 2) 再统一 640x640
+                    frame = cv2.resize(frame, (size, size),
+                                       interpolation=cv2.INTER_LINEAR)
+                frame = enhance(frame, gains, clahe, gamma)
             dst = sub / f"frame_{saved + 1:06d}.jpg"
             cv2.imwrite(str(dst), frame,
                         [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -248,6 +291,9 @@ def main() -> None:
                     help="标定 yaml（calibrate_camera.py 的输出）；不传则跳过去畸变")
     ap.add_argument("--size", type=int, default=640,
                     help="输出/模型输入尺寸（板端 model.input_size）")
+    ap.add_argument("--chain-order", choices=["new", "old"], default="new",
+                    help="链路顺序：new=resize(640)→enhance→remap@640（板端 2026-09-23 起，D 域/P2）；"
+                         "old=remap@输入分辨率→resize→enhance（历史 P1）。必须与板端一致")
     ap.add_argument("--wb-gains", type=parse_gains, default=[1.0, 1.0, 1.0],
                     help="白平衡通道增益 B,G,R（板端 image.white_balance_bgr）")
     ap.add_argument("--clahe", type=float, default=2.0,
@@ -294,7 +340,7 @@ def main() -> None:
 
     groups = collect_image_sets(a.inputs)
     n = prepare(groups, a.out_dir, a.calibration, a.wb_gains, a.clahe,
-                a.gamma, a.size)
+                a.gamma, a.size, chain_order=a.chain_order)
     print(f"\n🎉 共生成 {n} 张训练图片（{a.size}x{a.size}），位于 {a.out_dir}/")
     print("下一步：标注后按 YOLO 格式组织（train/valid + data.yaml），再运行:")
     print("   python scripts/2_train/train_yolo11n.py --data data/<数据集>/data.yaml ...")

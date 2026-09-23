@@ -530,7 +530,7 @@ def _through_frames(ms, monkeypatch, dt=100, n=40):
     from gate.gate_task import PH_THROUGH
     monkeypatch.setitem(S.comm.gate, "through",
                         S.Y(dict(S.comm.gate.get("through", {}), confirm_ms=ms)))
-    # z=0.6 ≤ z.cross(0.7) 连 2 帧 → 出口① → THROUGH
+    # z=0.6 ≤ z.cross(0.77) 连 2 帧 → 出口① → THROUGH
     task = _task(lambda: _det(0.6))
     _st, hist = _run(task, n, dt=dt)
     return sum(1 for h in hist if h["phase"] == PH_THROUGH), task
@@ -741,3 +741,99 @@ def test_heading_turn_is_not_interrupted_by_degraded_mode(monkeypatch):
         "档位退化把转向卡在半路了（state=%s，psi 残余=%.1f°）" % (task._hdg.state, w.psi)
     assert abs(w.psi) <= float(S.comm.gate.hdg.tol_deg) + 1e-6, \
         "转向应走完并转正，残余 %.1f°" % w.psi
+
+
+# ---------------------------------------------- HDG 跳过原因 / wait_fresh_ms
+FULL_C = (0.95,) * 4
+P3P_C = (0.95, 0.95, 0.95, 0.02)          # 丢一个角 → 3 点 p3p（需要 prev 才解得出来）
+
+
+def _seq_hub(specs):
+    """按帧序喂检测：`specs` = [(px or None, kconf), ...]（超出后重复最后一帧）。"""
+    it = iter(specs)
+    last = {"v": specs[-1]}
+
+    def nxt():
+        try:
+            last["v"] = next(it)
+        except StopIteration:
+            pass
+        px, kc = last["v"]
+        return _det(1.5, px=px, kconf=kc)
+    return _Hub(nxt)
+
+
+def _offset_px(dx):
+    """把门心摆到偏离画面中心 dx 像素（用于"还没对中"的帧）。"""
+    return (CAM.width / 2.0 + dx, CAM.height / 2.0)
+
+
+def test_hdg_skip_reason_when_trigger_frame_is_p3p(monkeypatch):
+    """**2026-09-22 现场问题**：居中达标**那一刻**若不是 full 帧 → 正航向被跳过、直接进近。
+
+    帧序：2 帧"没对中但 full"（建立 prev 与 psi）→ 1 帧 full 对中 → 3 帧 p3p 对中
+    ⇒ 第 4 个对中帧是 p3p ⇒ 应记录 `hdg_skip=mode=p3p`、进 APPROACH、且全程不发 yaw。
+    """
+    monkeypatch.setitem(S.comm.gate, "hdg",
+                        S.Y(dict(S.comm.gate.get("hdg", {}), wait_fresh_ms=0)))
+    specs = [(_offset_px(320), FULL_C), (_offset_px(320), FULL_C),
+             (None, FULL_C), (None, P3P_C), (None, P3P_C), (None, P3P_C)]
+    task = GateTask(_Uart(), _seq_hub(specs), CAM.width, CAM.height)
+    st, hist = _run(task, 12)
+    skips = [h.get("hdg_skip") for h in hist if h.get("hdg_skip")]
+    assert skips, "应记录跳过正航向的原因（实际没有 hdg_skip；动作=%s）" % [h["action"] for h in hist]
+    assert "mode=p3p" in skips[0], "原因应指出帧模式，实际 %r" % skips[0]
+    assert task.phase == "APPROACH", "跳过正航向应直接进近，实际 %s" % task.phase
+    assert all(abs(f[3]) < 1e-9 for f in task.uart.frames), "跳过后不该发任何 yaw"
+
+
+def test_hdg_skip_reason_when_disabled(monkeypatch):
+    task = _task(lambda: [])
+    task._hdg_cfg = dict(task._hdg_cfg, enable=False, wait_fresh_ms=0)
+    assert "off" in task._hdg_skip_reason("full", 1000)
+    task._hdg_cfg = dict(task._hdg_cfg, enable=True)
+    task._hdg_done = True
+    assert "done" in task._hdg_skip_reason("full", 1000)
+    task._hdg_done = False
+    task._hdg_deg, task._hdg_ms = 3.0, 900
+    assert "stale" in task._hdg_skip_reason("full", 2000)
+
+
+def test_wait_fresh_holds_then_aligns_when_a_full_frame_arrives(monkeypatch):
+    """`wait_fresh_ms>0`：触发帧不是 full 时**原地等**（动作 wait_hdg、不下发 surge），
+    等到 full 帧就进正航向 —— 斜门/远距只在部分帧出 4 角时正需要这个。"""
+    monkeypatch.setitem(S.comm.gate, "hdg",
+                        S.Y(dict(S.comm.gate.get("hdg", {}), wait_fresh_ms=1500)))
+    specs = [(_offset_px(320), FULL_C), (_offset_px(320), FULL_C),
+             (None, FULL_C)] + [(None, P3P_C)] * 4 + [(None, FULL_C)] * 6
+    task = GateTask(_Uart(), _seq_hub(specs), CAM.width, CAM.height)
+    st, hist = _run(task, 30)
+    acts = [h["action"] for h in hist]
+    assert "wait_hdg" in acts, "应出现等待动作（实际 %s）" % acts[:12]
+    waits = [f for f, h in zip(task.uart.frames, hist) if h["action"] == "wait_hdg"]
+    assert all(abs(f[0]) < 1e-9 for f in waits), "等待期间不许下发 surge"
+    assert "hdg" in acts, "等到 full 后应进入正航向（实际 %s）" % acts[:16]
+
+
+def test_wait_fresh_times_out_then_proceeds(monkeypatch):
+    """等超时了仍然要往下走（不能卡死在 GOLDEN）。"""
+    monkeypatch.setitem(S.comm.gate, "hdg",
+                        S.Y(dict(S.comm.gate.get("hdg", {}), wait_fresh_ms=300)))
+    specs = [(_offset_px(320), FULL_C), (_offset_px(320), FULL_C),
+             (None, FULL_C)] + [(None, P3P_C)] * 10
+    task = GateTask(_Uart(), _seq_hub(specs), CAM.width, CAM.height)
+    st, hist = _run(task, 25)
+    acts = [h["action"] for h in hist]
+    assert "wait_hdg" in acts, "应先等待（实际 %s）" % acts[:12]
+    assert task.phase == "APPROACH", \
+        "等超时应进 APPROACH（动作尾部=%s，phase=%s）" % (acts[-5:], task.phase)
+
+
+def test_width_mode_never_starts_heading_align():
+    """**读代码发现的行为**：`_on_width` 的 ALIGN 分支只走 creep→APPROACH，**从不启动 HDG**
+    ⇒ 只剩对向 2 角时不会有正航向。这条守着它别被"顺手加上"。"""
+    import inspect
+    from gate import gate_task as GT
+    src = inspect.getsource(GT.GateTask._on_width)
+    assert "_hdg_ready" not in src and "SUB_HDG" not in src, \
+        "width 档不应启动正航向（若真要放开，先说明理由并改这条用例）"

@@ -13,7 +13,10 @@
 | 本地文件 | 来源 | 用途 |
 |---|---|---|
 | `vision.yaml` | 板子实机 `/home/sunrise/AUV/cfg/vision.yaml`（只读镜像） | 图像链路 / 相机 / 模型 / 任务参数；PC 端 `prepare_frames.py` 读取它，保证**训练图与板端推理同参数** |
-| `front_camera.yaml` | 板子实机 `/home/sunrise/AUV/cfg/front_camera.yaml`（只读镜像） | 前视相机标定（K / dist），训练侧去畸变与板端推理**共用同一份** |
+| `front_camera.yaml` | 板子实机 `/home/sunrise/AUV/cfg/front_camera.yaml`（只读镜像） | **前视相机标定（K / dist）＝ 水下 / 上机使用的那一份**，训练侧去畸变与板端推理**共用同一份**。2026-09-23 起内容为 AUV_5 良好水质重标结果（fx≈1207.6，RMS 0.546px），详见下节 |
+| `front_camera_air.yaml` | 板子实机 `/home/sunrise/AUV/cfg/front_camera_air.yaml`（只读镜像） | **岸上 / 空气有效内参**（fx≈1078，dist 全 0，由卷尺 + PnP 深度反推）。**不用于上机推理**，保留供 PnP 分析、折射因子与深度标尺解释 |
+| `backup/front_camera_AUV1_water_fx782.yaml` | 归档 | 旧的水下标定（fx=782.5，来自 `data/AUV_1/board`）。**已不参与任何链路**，仅留档 |
+| `backup/front_camera_board_A_fx782_20260923.yaml` | 归档（2026-09-23 换版前另存） | **与上一份是同一套内参**：`camera_matrix` 与 `distortion_coefficients` 逐项数值相同（fx=782.54、dist[0:2]=[-0.4914, 0.3784]），只是多了 `FILE-HEAD RULE` 等注释（32 行 vs 18 行）。换到 AUV_5 新标定（fx≈1207.6）前留的存底，**不参与任何链路** |
 | `yolo11n_config.yaml` | 本仓库（PC 侧） | detect 模型 PTQ 量化配置（onnx 路径 / Softmax node_info / 输出前缀） |
 | `gate_kpt_config.yaml` | 本仓库（PC 侧） | pose（gate 4 角点）模型 PTQ 量化配置 |
 
@@ -38,12 +41,48 @@ diff <(ssh "$BOARD_SSH" "cat $B/cfg/front_camera.yaml") configs/front_camera.yam
 python scripts/1_prepare/prepare_frames.py <图片目录> --config configs/vision.yaml
 ```
 
+## 前视标定换版记录（2026-09-23）
+
+**决策：C 上位，A 归档，B 保留。** 三份内参的来历与实测对比：
+
+| 代号 | 文件 | fx | 来历 |
+|---|---|---|---|
+| **A**（已归档） | `backup/front_camera_AUV1_water_fx782.yaml` | 782.5 | `data/AUV_1/board`（2298 张，水下），35 视图自拟合 RMS 0.705 |
+| **B**（保留） | `front_camera_air.yaml` | ≈1078 | 卷尺三等独立测法 + PnP 深度对标真值（≤6%）；dist 全 0 |
+| **C**（在用） | `front_camera.yaml` | **1207.6** | `data/AUV_5/raw-data/calibration-{1,2,3}`（1443 张，良好水质水下），83 视图，**RMS 0.546** |
+
+**判据一：棋盘网格直线度**（去畸变后角点偏离理想方格经单应变换的 RMS，px@1280；180 张 AUV_5 棋盘图）
+
+| 内参 | n | 中位 | p90 | 最大 | 无解/异常 |
+|---|---|---|---|---|---|
+| A 782.5 | 115 | 1.86 | **307.39** | **872.72** | 2 |
+| B 1078 | 117 | 1.10 | 1.35 | 1.71 | 0 |
+| **C 1207.6** | 117 | **0.39** | **0.49** | **1.27** | **0** |
+
+**判据二：逐图 solvePnP 重投影交叉验证**（新棋盘图 76 张）：A 中位 1.98px 且 **20 张 >5px、2 张 >50px**；B 1.63px / 0 离群；**C 0.33px / 0 离群**。A 在**它自己的**素材上也有 2 张 >5px、1 张 >50px —— 欠约束拟合的典型特征。
+
+**判据三：可用范围**（`experiment/scripts/exp_distortion/calib_diagnose.py`）
+
+| 指标 | A 782.5 | **C 1207.6** |
+|---|---|---|
+| 可逆的原始像素半径 | 520 px（画面角点 69%） | **749 px（94%）** |
+| 可去畸变的像素占比 | 63.5% | **93.7%** |
+| 局部放大倍率 ≤1.2 的覆盖 | 24.0% | **74.5%** |
+| 最外圈倍率最大值 | 6.34 | **2.04** |
+
+眼观对比图：`runs/calib_auv5/compare_dives/AUV_{1..5}.jpg`（五次下水各 10 张原帧 × 4 列）与 `runs/calib_auv5/compare_zoom/calibration-{1,2,3}_zoom.jpg`（棋盘区域放大，判读最直接）。
+
+**仍未定案的一点**：C 拟合出 fx≈1208，与板端卷尺+PnP 的空气值 1078 差 **+12%**（两者都远离 782.5）。要定案，需要在水下做一次**卷尺 / PnP 深度对标真值**（方法照 `front_camera_air.yaml` 注释里那套）。在此之前 C 仍是在水数据上表现最好的一份。
+
+**棋盘覆盖仍未到四角**：AUV_5 棋盘角点最远只到画面角点距离的 **86%**（判据要求 ≥90%），外圈畸变参数仍是多项式外推。见 `runs/calib_auv5/diag_new.json`。
+
+
 ## 一致性核对结论（2026-09-11）
 
 | 项目 | 板端权威实现 | 本仓库对应 | 结论 |
 |---|---|---|---|
 | 图像链路参数 | `cfg/vision.yaml`（`image.*`、`camera.front.*`、`model.input_size`） | `configs/vision.yaml` | **逐字节一致**（2026-09-11 已按板端实机状态重新同步） |
-| 前视标定 | `cfg/front_camera.yaml` | `configs/front_camera.yaml` | **逐字节一致** |
+| 前视标定 | `cfg/front_camera.yaml` | `configs/front_camera.yaml` | **逐字节一致**（2026-09-23 起内容为 AUV_5 重标结果 C；旧的 782.5 已归档到双方 `backup/`） |
 | 预处理链路 | `common/preprocess.py::ModelPreprocessor.process`：`calibration_maps`（`alpha=0` + `CV_16SC2`）→ `resize(640)` → `enhance`（gains → **clip>0 时** LAB-CLAHE(8×8，对象缓存) → gamma LUT（缓存）） | `scripts/1_prepare/prepare_frames.py`：同三函数、**同顺序** | **逐像素一致**（已在真实帧上验证 max diff = 0） |
 | detect 解码契约 | `common/detector.py::decode_yolo11_split`：每尺度 `C=64`(reg, DFL logits) + `C=nc`(cls logits)，`(1,g,g,C)` NHWC；sigmoid/softmax/DFL 板端还原 | `export_onnx.py --task detect` 导出 6 张量 | **一致** |
 | pose 解码契约 | `gate/gate_decode.py::decode_yolo11_kpt`：每尺度 64 / nc / `3*kpt_dim`，kpt `x,y=(raw*2+网格索引)`、`v` 为 logit | `export_onnx.py --task pose` 导出 9 张量 | **一致**（2026-09-12 修正了此前多写的 `-0.5`） |

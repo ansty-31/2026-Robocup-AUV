@@ -119,7 +119,7 @@ def export_onnx(model_path='yolo11n.pt', output_name='yolo11n.onnx', imgsz=640,
             else:
                 print(f"⚠️  输出结构异常（{len(outs)} 个，通道 {uniq}）")
                 print("   预期 9 个：3×C=64(reg) + 3×C=nc(cls) + 3×C=3*kpt_dim(kpt)")
-                print("   提示：python scripts/modify_ultralytics.py --task pose")
+                print("   提示：python scripts/3_export/modify_ultralytics.py --task pose")
                 return False
         else:
             if len(outs) == 6:
@@ -129,7 +129,7 @@ def export_onnx(model_path='yolo11n.pt', output_name='yolo11n.onnx', imgsz=640,
             else:
                 print(f"⚠️  警告：输出数量为 {len(outs)}")
                 print("   预期6个输出，请检查ultralytics是否正确修改")
-                print("   提示：运行 python scripts/modify_ultralytics.py --task detect")
+                print("   提示：运行 python scripts/3_export/modify_ultralytics.py --task detect")
                 return False
 
     except Exception as e:

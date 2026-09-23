@@ -35,7 +35,7 @@ image:
   # 识别前图像链路（推理统一入口）
   undistort: true                # true: cv2.remap 去畸变（需对应 camera.*.calibration）
   white_balance_bgr: [1.0, 1.05, 1.15]   # 白平衡通道增益（B,G,R）轻微
-  clahe_clip: 0.5                # LAB-L 通道 CLAHE clipLimit（0=关闭，轻微）
+  clahe_clip: 0                  # 2026-09-23 起关闭（与板端一致；实测精度无影响，省 ~8 ms/帧）
   gamma: 0.85                    # gamma LUT（<1 提亮，1.0=关闭）
 
 color:

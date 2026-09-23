@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
 """
 用已有权重筛选图片集：剔除含指定类别的画面 + 按画面质量加权随机抽样
-（可选）把「不去畸变」的变体图按比例混入，增强模型对几何畸变的韧性
+（可选）多目录混合：第 1 个是主集，其余按 `--mix-ratio` 掺入
 
 典型用途：把一批预处理后的帧集，用当前模型推理，
     1) 剔除检测到「不要的类别」（如 red_ball）的画面；
     2) 对剩余画面按质量分（清晰度为主、亮度异常惩罚）做**加权随机抽样**，
        保留 N 张作为下一轮训练/挖掘素材。
 
-## 混合「不去畸变」变体（本次新增）
-
-板端去畸变依赖标定文件；标定失效 / `undistort: false` / 相机变动时，
-推理看到的是未校正的桶形畸变图。把这些变体按比例混入训练集可提升韧性。
+## 多目录混合
 
 给多个输入目录即可：**第 1 个是主集，其余是混合集**，用 `--mix-ratio` 控制掺入比例：
 
     python scripts/1_prepare/select_frames.py \\
-        data/AUV_3/processed_640/auv_xxx_frames \\              # 主集（已去畸变）
-        data/AUV_3/processed_640_noundistort/auv_xxx_frames \\  # 混合集（未去畸变）
+        data/AUV_3/processed_640/auv_xxx_frames \\   # 主集
+        <第二个来源目录> \\                           # 混合集
         --weights weights/yolo11n.pt --drop-classes red_ball \
         --quality-dir data/AUV_3/auv_xxx_frames \
         --mix-ratio 0.35 --keep 2000 --out-dir data/AUV_3/selected_2000
@@ -25,7 +22,11 @@
 混合集的输出文件会加前缀（默认 `nd_`，见 `--mix-prefix`）避免与主集同名，
 例如 `frame_000123.jpg` 与 `nd_frame_000123.jpg`。
 
-⚠️ 不去畸变的图**保留几何畸变**，同一帧两版的标注框不通用，需**分别标注**。
+> **历史用途已废弃（2026-09-23）**：这个混合能力最初是为了把「不去畸变」变体掺进训练集，
+> 配套脚本 `prepare_frames_noundistort.py` **已删除**；去畸变位置已定稿为 **D 域**
+> （`resize(640) → enhance → remap@640`，见 `pose/map_pose_dataset.py`）。
+> 多目录混合本身仍可用（混任何第二来源都行）；若混的是几何不同的图，
+> **同一帧两版的标注框不通用，需分别标注**。
 
 注意：**只有给了 `--drop-classes` 才会加载模型推理**（需要**原始 head.py**）。
       若此前跑过 scripts/3_export/modify_ultralytics.py（6 输出补丁），请先恢复：
@@ -115,8 +116,8 @@ def collect_entries(dirs: list[Path], mix_prefix: str):
             paths.append(p)
             src_of.append(si)
             out_names.append(name)
-        # 用末两级目录名做标签：两套图叶子目录常同名（如 .../processed_640/<组>
-        # 与 .../processed_640_noundistort/<组>），只取末级会分不清来源
+        # 用末两级目录名做标签：不同来源的叶子目录常同名（如 .../xx/<组> 与
+        # .../yy/<组>），只取末级会分不清来源
         label = "/".join(d.parts[-2:]) if len(d.parts) >= 2 else (d.name or str(d))
         per_src.append((label, len(files)))
     return paths, src_of, out_names, per_src
@@ -142,7 +143,7 @@ def main() -> None:
     ap.add_argument("images", nargs="+", type=Path,
                     help="输入图片目录（可多个；第 1 个为主集，其余为混合集）")
     ap.add_argument("--weights", default=None,
-                    help="模型权重（如 runs/detect/*/weights/best.pt）；"
+                    help="模型权重（如 weights/yolo11n.pt；建议用当前 detect 权重）；"
                          "仅在给了 --drop-classes 时需要")
     ap.add_argument("--drop-classes", default="",
                     help="要剔除的类别名，逗号分隔（如 red_ball）；空=不按类别剔除")

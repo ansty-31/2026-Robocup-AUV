@@ -77,6 +77,10 @@ auv_vision/
 │                        #   feature_coverage.py(哪些功能没用到) · analyze_kpt_dump.py(角点可得率)
 │                        #   analyze_heading.py(PnP 安装角/航向噪声) · analyze_pnp_center.py(位姿中心 vs bbox)
 │                        #   **pnp_calib.py（PnP 位姿/深度标定：真值 dump → 误差表 + 尺寸反演 + 建议 cfg）**
+│                        #   **label_corners.py（手工标 4 角 → 同格式 dump；检测器不响应时的岸上路线；
+│                        #                      --measure = 卷尺刻度靶子，点 3 个刻度出 Δu/斜视）**
+│                        #   **ruler_calib.py（靶子读数 → 等效焦距 fx/fy 与距离口径 c；--gate 与门框联立）**
+│                        #   **tape_ticks.py（刻度周期法：不点鼠标，用卷尺自带 1cm 刻度测像素比例）**
 ├── cfg/                 # vision.yaml · comm.yaml · front_camera.yaml（参数唯一来源）
 │                        #   comm.yaml 的 **motion:** 段 = ball/gate **共用**的底层运动参数
 │                        #   （两套 PID / surge_fast·surge_slow / loss_inertia_surge / turn_pid），
@@ -87,7 +91,7 @@ auv_vision/
 │                        # **待研究-缺角位姿先验（三维信息复用）.md**（缺角时用存下来的三维补信息，**未实现**）
 │                        # 前视USB相机低延迟推流方案.md（推流/手动模式）
 ├── models/ · tests/     # 权重(.bin) · 无硬件测试套件（**按层分子目录**，见 tests/README.md）
-│                        #   tests/：80 例 / 7 个文件 + conftest
+│                        #   tests/：138 例 / 10 个文件 + conftest
 │                        #     platform/  test_base   平台：settings/11B 帧/遥测/限深保护/硬停
 │                        #                test_common 公共件：PID/图像链路(NV12·squish)/Det/cfgnode
 │                        #     tasks/     test_ball        撞球相位机
@@ -95,6 +99,9 @@ auv_vision/
 │                        #                test_gate_flow   档位仲裁/出口兜底/正航向接入/配置守卫
 │                        #                test_motion      额定转角 + 离散正航向
 │                        #     tooling/   test_pnp_calib   **PnP/深度标定工具**的合成往返（反演标尺/符号/CSV/报告）
+│                        #                test_label_corners 手工标注：吸附/坐标域/schema/端到端喂通 pnp_calib
+│                        #                test_ruler_calib   卷尺靶子：跨度/斜视诊断 + (fx,c) 合成往返 + 混合轴向
+│                        #                test_tape_ticks    刻度周期法：亚像素/透视梯度/谐波/交叉校验门
 │                        #   （`_bite_probe.py` 是"会咬"自检探针，**不被默认收集**，
 │                        #     需要时 `python3 -m pytest tests/_bite_probe.py -q`）
 │                        #   分层块：`pytest tests/platform -q` / `tests/tasks` / `tests/tooling`
@@ -106,7 +113,7 @@ auv_vision/
 ## 快速开始（本机，无硬件）
 
 ```bash
-python3 -m pytest tests/ -q              # 无硬件测试（80 例：base/common/ball/gate/标定工具）
+python3 -m pytest tests/ -q              # 无硬件测试（89 例：base/common/ball/gate/标定与标注工具）
 python3 main.py --task ball              # 只跑撞球（SIM/mock）
 python3 main.py --task gate              # 试跑过门（cfg model.mode: mock）
 python3 preview_detect.py --gate-kpt     # 下水前：门框 + 4 角点 + 置信度（船不动）
@@ -154,7 +161,7 @@ python3 preview_detect.py --gate-kpt         # 下水前：门框 + 4 角点 + �
 - **任务三 过门**（`gate/gate_task.py` 骨架；**扁平 v1.2，当前定版**，细则/参数见 `doc/算法说明-gate-PnP移植方案.md`）：
   keypoint 四角 → IPPE 6-DoF，深度 `Z=tvec.z`；
   RANGE_ALIGN 子状态 GOLDEN/**HDG(离散正航向)**/CREEP/HOLD/REACQUIRE → APPROACH → THROUGH（机身过门判据）。
-  门 = 闭合矩形框(红 PVC，0.70×0.50 m，悬空，对称无朝向要求)。
+  门 = 闭合矩形框(红 PVC，**实测外缘 0.77×0.56 m**，管外径 5cm，悬空，对称无朝向要求)。
   **直冲出口三条**：① `Z≤z.cross` 连续确认帧（实测有效，勿动）；② 近距(`Z≤z.near_lost_m` 且 z 新鲜
   **或** 框占比 ≥ `z.near_lost_ratio`) 丢失判过门（ALIGN 与 APPROACH 都生效）；③ 在门口超时兜底
   `loiter.*`（门口 + 安全带内停留超时 → 自己拍板直冲）。
@@ -239,7 +246,8 @@ cd ../pc
 - **遥测联通性**：下位机确认在按 `0xAA55` 14B 帧回传深度（板上应持续看到 `[UART←] depth=…`，
   看不到就是没回传、限深保护放行中）；并把下位机深度读数与人工卷尺/标尺核对（这是深度标定，
   **不是**去改 `min_depth_m` —— 它已被用户定死在 0.55，有不变量用例守着）；
-- **门框尺寸实测**：0.70×0.50 m 是外缘还是开孔内缘（管径 5cm → 深度差 ~12%，会平移所有米制阈值）；
+- ~~门框尺寸实测~~ **已实测（09-22）：外缘到外缘 77×56 cm** → `frame_w/frame_h=0.77/0.56`；
+  仍待陆上 A1 用 `a` 复核"模型眼里的门宽"是否等于外缘（可能落在管子中心线上）；
 - **DOF 极性与速度标定**：surge/sway/heave 方向、`norm→m/s` 曲线、REACQUIRE 后退方向；
 - **冲刺与兜底标定**：`surge.through`(0.6) 与 `through.confirm_ms`(2500) 决定"能不能冲出去"、
   `loiter.{timeout_ms,dx_max,dy_max}` 决定"在门口等多久才拍板"——
