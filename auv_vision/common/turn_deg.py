@@ -46,7 +46,24 @@ from common.cfgnode import nums                                     # noqa: E402
 # 代码内兜底（cfg 缺失时用；正常走 comm.motion.turn_pid）
 _D_TURN_PID = dict(kp=0.2, ki=0.0, kd=0.05, out_max=0.45,
                    deadzone_deg=6.0, norm_deg=15.0,
-                   blind_rate_dps=20.0)
+                   blind_rate_dps=20.0,
+                   # ---- 探向（PROBE）参数，2026-09-23 从硬编码搬进 cfg ----
+                   # ⚠️ 探向是**开环定时**：`probe_s` 秒 × `probe_dof` 舵，**与目标角度无关**。
+                   #   真实水域实测（板端日志）：目标 13.7°，探向 0.6s 就转了 **18.79° = 137%**
+                   #   ⇒ "按角度转"却在闭环开始前就转过头了。`probe_frac` 给它上闸：
+                   #   探向时长 ≤ probe_frac × deg / rate（默认半个目标角），探不到就缩短。
+                   probe_s=0.6, probe_dof=0.3, probe_frac=0.5, probe_min_s=0.15,
+                   # ---- 转向符号：**代码里定死 +1，不做探向**（2026-09-23 用户定）----
+                   # 依据（全部是既成事实，不需要再测）：
+                   #   · 手动挡 `dof_map.yaw.sign=+1` + `presets.turn_right=[0,0,0,+0.4]`
+                   #     ⇒ **+yaw 就是右转**（手动挡已验证，不许为转向去改它）；
+                   #   · 遥测忠实于真实转向（探向实测：+0.30 命令使遥测 yaw 下降，而当时
+                   #     dof_map 是 -1（物理=左转）⇒ yaw 下降=左转 ⇒ **yaw 增大=右转**）。
+                   #   ⇒ 闭环控制量取 `psi = +1 × 遥测 yaw`，与视觉 ψ 同号：
+                   #        ψ<0（门法向偏画面左 ⇒ 需左转）⇒ d=-1 ⇒ 负 yaw 命令 = 物理左转 ✓
+                   #      这样"视觉 ψ 的符号"与"turn 的符号"一一对应，无需任何探向。
+                   # ⚠️ 探向路径已停用（本文件 start() 里 imag_sign 永不为 None）。
+                   imag_sign=1.0, period=0.05)
 
 
 def wrap180(deg):
@@ -114,8 +131,8 @@ class TurnCore(object):
         "idle", "wait_tel", "probe", "run", "done", "timeout", "aborted", "blind")
 
     def __init__(self, deg=90.0, left=True, cfg=None, imag_sign=None,
-                 probe_s=0.6, probe_dof=0.3, wait_tel_s=3.0, timeout=20.0,
-                 blind_rate_dps=None, log=None):
+                 probe_s=None, probe_dof=None, wait_tel_s=3.0, timeout=20.0,
+                 blind_rate_dps=None, blind=False, log=None):
         c, src = turn_cfg()
         if cfg:
             c.update(cfg)
@@ -129,11 +146,28 @@ class TurnCore(object):
         self.nd = max(0.1, float(c["norm_deg"]))
         self.rate = max(1.0, float(blind_rate_dps if blind_rate_dps is not None
                                    else c.get("blind_rate_dps", 20.0)))
-        self.probe_s = float(probe_s)
-        self.probe_dof = float(probe_dof)
+        # blind：**没有遥测也要转**。`start()` 直接进 BLIND，按 deg/rate 定时开环转，
+        # 到头即 DONE（`done_deg` 只能按设定值记账）。上层（`gate/heading_align.py`）在
+        # "遥测缺失"时用它，转完**用视觉 psi 复核**再迭代 ⇒ 仍然收敛，只是精度靠 assumed rate。
+        self.blind = bool(blind)
+        # 探向参数（cfg: comm.motion.turn_pid）：显式实参 > cfg > 代码兜底
+        self.probe_s = float(probe_s if probe_s is not None
+                             else c.get("probe_s", 0.6))
+        self.probe_dof = float(probe_dof if probe_dof is not None
+                               else c.get("probe_dof", 0.3))
+        self.probe_frac = float(c.get("probe_frac", 0.5))
+        self.probe_min_s = float(c.get("probe_min_s", 0.15))
+        self.probe_s_eff = self.probe_s      # start() 里按目标角收窄（见下）
+        self.rate_probe = None               # 探向实测角速率(°/s)，供日志/回填 blind_rate_dps
+        self.probe_dy = None                 # 探向实测转角(°)
         self.wait_tel_s = float(wait_tel_s)
         self.timeout = float(timeout)
-        self.imag_sign = None if imag_sign in (None, 0, "auto") else float(imag_sign)
+        # 符号优先级：调用方显式传入 > cfg `motion.turn_pid.imag_sign` > 代码常量 +1。
+        # **永不进入探向**（用户定：不允许探向；探向会白转 0.6s 且会把 g 与 s 混成一个积）。
+        cfg_sign = float(c.get("imag_sign", 0.0) or 0.0)
+        if imag_sign in (None, 0, "auto"):
+            imag_sign = cfg_sign if cfg_sign else 1.0
+        self.imag_sign = float(imag_sign)
         self.log = log or (lambda *a: None)
         self.state = self.IDLE
         self.pid = None
@@ -151,10 +185,25 @@ class TurnCore(object):
 
     # ------------------------------------------------------------------
     def start(self, now_ms):
-        self.state = self.WAIT_TEL if self.imag_sign is None else self.PROBE
-        if self.imag_sign is not None:
-            self._begin_run(now_ms, yaw_telemetry=None)   # 用第一帧遥测定基准
         self.t_start = now_ms
+        if self.blind:
+            # 开环盲转：不探向、不等遥测；时长 = 角度 ÷ 假设角速率
+            self.state = self.BLIND
+            self.blind_until = now_ms + (self.deg / self.rate) * 1000.0
+            self.done_deg = self.deg * self.d
+            self.log("[TURN] 盲转（**无遥测**）：%.1f° @ 假设 %.1f°/s ≈ %.1fs（转完由上层视觉复核）"
+                     % (self.deg, self.rate, self.deg / self.rate))
+            return self.state
+        if self.imag_sign is not None:
+            # **符号已知 ⇒ 不探向**（2026-09-23 用户定）：探向是开环的，要白转 0.6s，
+            #   实测目标 13.7° 时它自己就转了 18.79°（137%）⇒ 对运动有害。
+            #   符号来源：cfg `motion.turn_pid.imag_sign`（用户自己规定）或本趟已探到的值。
+            self.state = self.RUN
+            self.log("[TURN] 符号已知 imag_sign=%+.0f ⇒ **跳过探向**，直接闭环 %.1f°"
+                     % (self.imag_sign, self.deg))
+            return self.state
+        # 探向路径**已停用**（imag_sign 永不为 None）⇒ 不会走到这里；保留仅为兼容旧调用
+        self.state = self.WAIT_TEL
         return self.state
 
     def finished(self):
@@ -166,6 +215,11 @@ class TurnCore(object):
         if not self.finished():
             self.state = self.ABORTED
             self.out = 0.0
+
+    def _make_pid(self):
+        """转向 PID（out 限幅 = ±out_max；deadzone 用角度阈值归一化）。"""
+        return PID(kp=self.cfg["kp"], ki=self.cfg["ki"], kd=self.cfg["kd"],
+                   out_min=-self.om, out_max=self.om, deadzone=self.dz / self.nd)
 
     def _begin_run(self, now_ms, yaw_telemetry):
         self.psi0 = wrap180((self.imag_sign or 1.0) * (yaw_telemetry or 0.0))
@@ -192,29 +246,40 @@ class TurnCore(object):
                 return self.state, 0.0
             self.y_probe = yaw_telemetry
             self.t_probe = now_ms
+            # 自动探向（只在 imag_sign 未定时才会走到）：时长按目标角收窄，避免开环段超调
+            self.probe_s_eff = max(self.probe_min_s,
+                                   min(self.probe_s, self.probe_frac * self.deg / self.rate))
             self.state = self.PROBE
-            self.log("[TURN] 探向：给 yaw=%+.2f × %.1fs（判定遥测正方向）"
-                     % (self.probe_dof * self.d, self.probe_s))
+            self.log("[TURN] 探向：给 yaw=%+.2f × %.2fs（判定遥测正方向；已按目标 %.1f° 收窄）"
+                     % (self.probe_dof * self.d, self.probe_s_eff, self.deg))
             return self.PROBE, self.probe_dof * self.d
 
         # ---- 探向（给一小段固定舵，看遥测 yaw 往哪边动）----
         if self.state == self.PROBE:
-            if now_ms - self.t_probe < self.probe_s * 1000.0:
+            if now_ms - self.t_probe < self.probe_s_eff * 1000.0:
                 return self.PROBE, self.probe_dof * self.d
             dy = wrap180((yaw_telemetry if yaw_telemetry is not None
                           else self.y_probe) - self.y_probe)
+            self.probe_dy = dy
+            self.rate_probe = abs(dy) / max(1e-6, self.probe_s_eff)
             if abs(dy) < 0.3:
                 self.log("[TURN] ⚠️ 探向 Δyaw=%.2f°（几乎没动）→ 舵效不足或遥测不更新" % dy)
                 self.imag_sign = 1.0
             else:
                 self.imag_sign = 1.0 if (dy * self.d) > 0 else -1.0
-                self.log("[TURN] 探向结果：Δyaw=%+.2f° → 遥测正方向=%s"
-                         % (dy, "与 +yaw(右转) 同向" if self.imag_sign > 0 else "与 +yaw(右转) 反向"))
+                self.log("[TURN] 探向结果：Δyaw=%+.2f° in %.2fs（实测角速率 ≈%.0f°/s；"
+                         "cfg blind_rate_dps=%.0f）→ 遥测正方向=%s"
+                         % (dy, self.probe_s_eff, self.rate_probe, self.rate,
+                            "与 +yaw(右转) 同向" if self.imag_sign > 0 else "与 +yaw(右转) 反向"))
+                # 探向本身就转过头了 ⇒ 闭环必须反向修正（"按角度转"却在开环段超调）
+                if abs(dy) > self.deg:
+                    self.log("[TURN] ⚠️ 探向自己就转了 %.1f° > 目标 %.1f°（开环段超调）"
+                             "⇒ 闭环会反向修回来；下次把 probe_s/probe_frac 调小"
+                             % (abs(dy), self.deg))
             # 探向也转掉了一点：基准取**探向之前**那个角度，把它计入总量
             self.psi0 = wrap180(self.imag_sign * self.y_probe)
             self.psi_tgt = wrap180(self.psi0 + self.deg * self.d)
-            self.pid = PID(kp=self.cfg["kp"], ki=self.cfg["ki"], kd=self.cfg["kd"],
-                           out_min=-self.om, out_max=self.om, deadzone=self.dz / self.nd)
+            self.pid = self._make_pid()
             self.state = self.RUN
             return self.RUN, 0.0                      # 本帧先回中性（探向刚结束）
 
@@ -228,7 +293,18 @@ class TurnCore(object):
 
         # ---- 闭环转到目标角 ----
         if self.state == self.RUN:
-            if yaw_telemetry is None:                 # 遥测中断：保持中性等，不盲转
+            if self.pid is None:
+                # 符号由 cfg 固定 ⇒ 没走探向，PID 在这里补建（2026-09-23）
+                self.pid = self._make_pid()
+            if yaw_telemetry is None:
+                # 遥测中断：保持中性等，不盲转。**符号定死后 WAIT_TEL 不再可达**，
+                # 所以原来由它承载的「无遥测 ⇒ 拒转(rc=5)、一根舵都不发」守卫搬到这里
+                # （2026-09-23；行为与旧路径一致，不是新功能）。
+                if now_ms - self.t_start > self.wait_tel_s * 1000.0:
+                    self.state = self.ABORTED
+                    self.out = 0.0
+                    self.log("[TURN] ⛔ %.1fs 内没拿到遥测 yaw → **拒绝转向**（闭环量缺失）"
+                             % self.wait_tel_s)
                 return self.RUN, 0.0
             if self.psi0 is None:
                 self.psi0 = wrap180(self.imag_sign * yaw_telemetry)

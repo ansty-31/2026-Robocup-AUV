@@ -130,12 +130,18 @@ python scripts/2_train/train_yolo11n.py --task pose --data <data.yaml> --epochs 
 | `modify_ultralytics.py` | 输出头补丁：`--task detect`=6 输出 / `--task pose`=9 输出；`--restore` 回退原版（自动备份 `head.py.backup`） | `--task`、`--restore` |
 | `export_onnx.py` | 导出 ONNX（opset 11 / 640）并校验张量结构 | `--task`、`--model`、`--output`、`--imgsz` |
 | `prepare_calibration.py` | 生成 PTQ 校准数据（RGB float32 CHW 640 的 `.rgb`） | `--coco-path`、`--output-dir`、`--num-images` |
-| `quantize.sh` | Docker 内 `hb_mapper makertbin` PTQ 量化（自动切到项目根，容器内 `/data`=项目根）；**onnx 路径、校准目录、输出前缀都从配置文件里读**，detect/pose 通用 | `[config.yaml]`（默认 `configs/yolo11n_config.yaml`） |
+| `quantize.sh` | Docker 内 `hb_mapper makertbin` PTQ 量化（自动切到项目根，容器内 `/data`=项目根）；**onnx 路径、校准目录、输出前缀都从配置文件里读**，detect/pose 通用 | `[config.yaml]`（默认 `configs/yolo11n_config.yaml`；pose 用 `configs/gate_kpt_config.yaml`） |
+| `check_quant.sh` | Docker 内 `hb_mapper checker`：看**节点放置（BPU/CPU）、量化阈值、数据类型**。⚠️ **它不算余弦**（"Cosine Similarity" 列恒为 `--`），别当精度指标用 | `[config.yaml]` |
+| `check_quant_cos.py` | **余弦校验（真正的精度验收）**：容器内用 `HB_ONNXRuntime` 跑 `*_original_float_model.onnx` vs `*_calibrated_model.onnx`（同一批校准图），逐输出张量算余弦；并读 `*_quant_info.json` 给出逐节点余弦用于定位。**判定：9 个输出的余弦最小值 ≥ 0.95** | 容器内跑：`--prefix`、`--out-dir`、`--cal-dir`、`--n`、`--thresh` |
 | `test_decode_parity.py` | **端到端对拍**（改解码/换导出方式后必跑）：同一张 640 图，(A) 板端 `common/preprocess.py` vs `1_prepare/prepare_frames.py` 逐像素差；(B) 板端 `gate/gate_decode.py:decode_yolo11_kpt`(ONNX 输出) vs ultralytics 预测的逐角点差(px)；(C) `+index` / `+index-0.5` 两种网格项对照（-0.5 陷阱）。**要原版 head**（predict 用） | `--onnx`、`--board`、`--frames`、`--n` |
 
 > **校准集按任务分开放**：detect → `calibration_data_detect/`（检测训练集图片），
-> pose → `calibration_data/`（PNP 门图）。两者分布不同，**混用会静默掉点**；
+> pose → `calibration_data/`。两者分布不同，**混用会静默掉点**；
 > `quantize.sh` 会按配置里的 `cal_data_dir` 校验对应目录，缺了会直接报错而不是拿错数据。
+>
+> pose 校准集的口径（2026-09-23 起）：**用与训练/部署同链路的 640 图**（当前 = D + LUT 白平衡、无 CLAHE），
+> 从 `data/AUV_5/selected_3000_Dwb/` 抽（跨水质、清水偏多），**不要**再用旧的 `PNP.kpt4` 原图
+> （那是 A-old 链路，分布对不上）。张数 300、`calibration_type: max` 是当前达标配置。
 >
 > 校准数据建议取**训练集图片**（与推理同分布）：`prepare_calibration.py --coco-path <数据集>/train/images --output-dir <对应目录>`。
 > 注意它对非方形图会 letterbox 补灰边，而板端推理是直接 squish 到 640×640；

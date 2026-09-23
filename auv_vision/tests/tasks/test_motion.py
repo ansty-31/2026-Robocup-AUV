@@ -77,7 +77,7 @@ def test_turn_left_reaches_rated_angle(imag_sign):
     """
     b = _FakeBoat(imag_sign=imag_sign)
     y0 = b.telemetry.yaw_deg
-    rc, logs = _run_turn(b, deg=90.0, left=True, timeout=20.0)
+    rc, logs = _run_turn(b, deg=90.0, left=True, timeout=20.0, imag_sign=imag_sign)
     assert rc == 0, "应到达目标角，logs=%s" % logs[-3:]
     got = wrap180(b.telemetry.yaw_deg - y0)
     want = -90.0 * imag_sign
@@ -222,7 +222,9 @@ def _run_hd(aligner, world, frames=1200, psi_fresh=True, lost_after=None,
 def test_converges_with_one_turn(imag_sign):
     """psi=+20°（门法向偏画面右 = 机身左偏）→ 应**右转** ~20° → 重测后 |psi|≤阈值 → DONE。"""
     w = _World(psi0=20.0, imag_sign=imag_sign)
-    al = HeadingAligner(log=lambda *a: None)
+    # 极性经 turn_kwargs 传给转角原语（探向已停用，不再靠它自动测）
+    al = HeadingAligner(log=lambda *a: None,
+                        turn_kwargs={"imag_sign": float(imag_sign)})
     states, logs, _now = _run_hd(al, w, frames=1200, cfg_over=dict(tol_deg=8.0))
     assert al.state == DONE, "应收敛，实际 %s（logs=%s）" % (al.state, logs[-3:])
     assert al.iters == 1, "一次转向应够（实际 %d 次）" % al.iters
@@ -354,12 +356,23 @@ def test_stale_measurement_is_not_used():
     assert all(abs(c) < 1e-9 for c in w.cmds), "不该有任何转向指令"
     assert any("没攒够" in s for s in logs)
 
-    # 没有遥测（既无法确认停稳、也无法闭环）同样只能放弃，且一根舵都不发
+    # 没有遥测：2026-09-23 起**默认盲转**（`blind_enable=true`）—— 照样把航向转正，
+    # 只是单次转角精度取决于假设角速率（`motion.turn_pid.blind_rate_dps`），转完用 psi 复核再迭代。
+    # 现场依据：板端日志里唯一的 HDG 尝试在 settle 停了 2.98s ≈ wait_tel_ms 就 giveup，
+    # 此后本门 hdg_skip=done 再没转过（"hdg 一直 giveup"）。
     w2 = _World(psi0=20.0)
     al2 = HeadingAligner(log=lambda *a: None)
-    _run_hd(al2, w2, frames=5000, telemetry=False)
-    assert al2.state == GIVEUP
-    assert all(abs(c) < 1e-9 for c in w2.cmds)
+    _run_hd(al2, w2, frames=8000, telemetry=False)
+    assert al2.state in (DONE, GIVEUP), "无遥测盲转也要走完，不能卡死，实际 %s" % al2.state
+    assert any(abs(c) > 1e-9 for c in w2.cmds), "盲转模式必须真的发转向指令"
+    assert al2.iters >= 1, "盲转同样要记账迭代次数"
+
+    # 想回到旧行为（无遥测 ⇒ 一根舵都不发、直接放弃）：把开关关掉
+    w3 = _World(psi0=20.0)
+    al3 = HeadingAligner(log=lambda *a: None)
+    _run_hd(al3, w3, frames=8000, telemetry=False, cfg_over={"blind_enable": False})
+    assert al3.state == GIVEUP, "blind_enable=false 应保持旧行为，实际 %s" % al3.state
+    assert all(abs(c) < 1e-9 for c in w3.cmds), "旧行为下不该有任何转向指令"
 
 def test_p3p_frames_do_not_feed_the_filter():
     """**p3p 的 psi 不许进滤波器**（3 点解欠定，实测航向 std 64~69°）。
@@ -405,8 +418,12 @@ def test_p3p_frames_do_not_feed_the_filter():
     assert task._hdg_deg == kept and task._hdg_ms == kept_ms, \
         "p3p 帧污染了航向测量（%.1f → %.1f）" % (kept, task._hdg_deg)
 
-    # 同一份新鲜度判据：刚测到算新鲜、超过 fresh_ms 算过期、p3p 任何时候都不算样本
-    fresh_ms = float(task._hdg_cfg.get("fresh_ms", 800.0))
+    # 样本判据只有一条：**必须 full 帧**。
+    # ⚠️ 2026-09-23（用户定）：`fresh_ms` 的过期比较已删 —— 它本来就是空转的
+    #    （full 帧当帧就把 `_hdg_ms` 刷成 now ⇒ age≡0；非 full 帧在 mode 判据就 return False）
+    #    ⇒ 现在**时间不再影响**样本可用性，只有 mode 影响。
     assert task._hdg_fresh("full", kept_ms) is True
-    assert task._hdg_fresh("full", kept_ms + fresh_ms + 1) is False, "超过 fresh_ms 必须判过期"
+    assert task._hdg_fresh("full", kept_ms + 10 * 3600 * 1000) is True, \
+        "过期不再判死（fresh_ms 已不参与判据，见 gate/gate_task.py::_hdg_fresh 注释）"
     assert task._hdg_fresh("p3p", kept_ms) is False, "p3p 任何时候都不算可用测量"
+    assert task._hdg_fresh("coarse", kept_ms) is False, "coarse 同样不算可用测量"

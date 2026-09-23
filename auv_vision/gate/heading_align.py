@@ -41,14 +41,29 @@ _D_HDG = dict(enable=True, tol_deg=8.0, measure_frames=5, max_iters=3,
               measure_timeout_ms=2000, timeout_ms=30000,
               # 一直没有遥测 yaw 时的等待上限（超过就放弃正航向，别白等总超时）
               wait_tel_ms=3000.0, turn_timeout_s=8.0, fresh_ms=800.0,
+              # ⚠️ 2026-09-23 `fresh_ms` 实测**是空转的**：mode==full 的帧当帧就把
+              #   `_hdg_ms` 刷成 now ⇒ age≡0；mode!=full 时 `_hdg_fresh` 在比 age 之前
+              #   就 return False。⇒ 这个数从来不影响结果，留着只为日志/向后兼容。
+              #   （现场日志实测：hdg_skip 从未出现过 stale(...) 原因。）
               # 居中达标但"那一刻不是 full 帧"（thus 没有可用 psi）时，**原地等**多久再放弃正航向。
               # 默认 0 = 旧行为（立刻进 APPROACH，带着残余航向）；
               # 斜门/远距容易只在部分帧拿到 4 角，这时把它设成 1500~2000 更划算 ——
               # 船本来就在 GOLDEN 停着（不下发 surge），等一帧新鲜 full 的代价只是时间。
-              wait_fresh_ms=0.0)
+              wait_fresh_ms=0.0,
+              # ---- 2026-09-23 新增：把"能不能转"从遥测上解耦 ----
+              # entry_stale_ok：进 HDG 是否允许"本帧不是 full"。
+              #   **2026-09-23 用户定：默认 false** —— 顺序必须是「先居中、居中确认达标
+              #   之后再调 yaw」，而且触发的那一帧必须是 full（p3p 的 psi std 64~69°）。
+              #   true 会让"居中那一刻恰好是 p3p/coarse"也能起转（少等一帧），但会让
+              #   HDG 在没真正看清门的时候就开始转 ⇒ 现场表现"一上来就调 yaw"。要试可以开。
+              entry_stale_ok=False,
+              # blind_enable：遥测缺失时**允许开环盲转**（角度÷`motion.turn_pid.blind_rate_dps`
+              #   换算时长），转完回 SETTLE 再测 psi 迭代 ⇒ 无遥测也能收敛（精度受假设速率限制）。
+              #   false = 旧行为：`wait_tel_ms` 内没遥测就 giveup（且此后本门不再转）。
+              blind_enable=True)
 
-# 开关键：其余键都是数值，只有 enable 是布尔 → 用 flag() 解析（别用 bool()）
-_BOOL_KEYS = ("enable",)
+# 开关键：其余键都是数值，只有这几个是布尔 → 用 flag() 解析（别用 bool()）
+_BOOL_KEYS = ("enable", "entry_stale_ok", "blind_enable")
 
 
 def hdg_cfg(node=None):
@@ -100,6 +115,12 @@ class HeadingAligner(object):
         self._t_meas = None
         self._core = None
         self._no_tel_logged = False
+        self._tel_seen = False        # 本门内是否**收到过**遥测 yaw（决定能不能闭环转）
+        self._blind_logged = False
+        self._psi_prev = None         # 上一次测得的 psi（转向前）→ 用于**转向方向自检**
+        self.last_probe_deg = None    # 探向实测转角(°)（写进日志：判断开环段是否超调）
+        self.last_rate_dps = None     # 探向实测角速率(°/s)（用来回填 blind_rate_dps）
+        self.dir_suspect = 0          # 「转完 |psi| 没变小」的次数（方向疑似反向）
 
     @property
     def enabled(self):
@@ -174,6 +195,8 @@ class HeadingAligner(object):
             return self.state, 0.0
         if self.state == IDLE:
             self.start(now_ms)
+        if yaw_telemetry is not None:
+            self._tel_seen = True        # 本门内是否出现过遥测（决定转的时候闭环还是盲转）
 
         if gate_lost:
             return self.abort("整门丢失"), 0.0
@@ -189,11 +212,30 @@ class HeadingAligner(object):
                 if not self._no_tel_logged:
                     self._no_tel_logged = True
                     self.log("[HDG] ⚠️ 没有遥测 yaw：无法确认停稳、也无法闭环转向")
-                wait_ms = float(self.cfg.get("wait_tel_ms", 3000.0))
-                if now_ms - (self._t_settle if self._t_settle is not None
-                             else now_ms) > wait_ms:
-                    return self._giveup("%.0fs 内一直没有遥测 yaw"
-                                        % (wait_ms / 1000.0))
+                # 2026-09-23：**遥测缺失不再直接放弃**（现场实证：唯一的 HDG 尝试在
+                # settle 停了 2.98s ≈ wait_tel_ms 就 giveup，此后本门 hdg_skip=done 再没转过）。
+                # blind_enable=true → 按 settle_ms 计时当作"已停稳"（无遥测本就无法验证），
+                # 去测 psi，转向交给 TurnCore 盲转（角度 ÷ blind_rate_dps），转完再回来测 psi
+                # 复核 ⇒ 无遥测也能迭代收敛，代价是单次转角精度取决于假设速率。
+                if not flag(self.cfg, "blind_enable", True):
+                    wait_ms = float(self.cfg.get("wait_tel_ms", 3000.0))
+                    if now_ms - (self._t_settle if self._t_settle is not None
+                                 else now_ms) > wait_ms:
+                        return self._giveup("%.0fs 内一直没有遥测 yaw（blind_enable=false）"
+                                            % (wait_ms / 1000.0))
+                    return SETTLE, 0.0
+                settle = float(self.cfg.get("settle_ms", 400.0))
+                if self._t_settle is None:
+                    self._t_settle = now_ms
+                if not self._blind_logged:
+                    self._blind_logged = True
+                    self.log("[HDG] ➡️ 盲转模式：无遥测时按 %.0fms 视为停稳 → 测 psi → 开环转"
+                             % settle)
+                if now_ms - self._t_settle >= settle:
+                    self.state = MEASURE
+                    self._samples = []
+                    self._t_meas = now_ms
+                    return MEASURE, 0.0
                 return SETTLE, 0.0
             if self._yaw_ref is None:
                 self._yaw_ref = yaw_telemetry
@@ -219,6 +261,20 @@ class HeadingAligner(object):
             if len(self._samples) >= need:
                 self.psi_meas = float(st.median(self._samples))
                 self.log("[HDG] 测量 %d 帧 → psi=%+.1f°（中位数）" % (len(self._samples), self.psi_meas))
+                # ---- 转向方向自检（2026-09-23）----
+                # 转完重测时 |psi| **必须变小**。若没变小 ⇒ "命令符号→物理转向"与
+                # "物理转向→遥测符号"的关系把船转反了：探向只能测到二者之积（g·s），
+                # 闭环在 g·s=-1 时照样"收敛"（收敛在遥测上），但物理方向是镜像的
+                # ——现场现象就是"左转之后机身反而不平行"。只报警、不改行为。
+                if self._psi_prev is not None and self.iters >= 1:
+                    eps = float(self.cfg.get("dir_check_eps_deg", 1.0))
+                    if abs(self.psi_meas) >= abs(self._psi_prev) - eps:
+                        self.dir_suspect += 1
+                        self.log("[HDG] ⚠️ 转向后 |psi| 没变小（%.1f° → %.1f°）→ "
+                                 "**转向方向疑似反向**：核对遥测 yaw 符号"
+                                 "（comm.telemetry.yaw_sign，或下位机混控/推进器接线）"
+                                 % (self._psi_prev, self.psi_meas))
+                self._psi_prev = self.psi_meas
                 if abs(self.psi_meas) <= self.cfg["tol_deg"]:
                     self.state = DONE
                     self.log("[HDG] ✅ 已与光轴平行（|psi|=%.1f° ≤ %.1f°）→ 锁定 yaw"
@@ -239,6 +295,9 @@ class HeadingAligner(object):
             st_, out = self._core.step(now_ms, yaw_telemetry)
             if self._core.imag_sign is not None:
                 self.imag_sign = self._core.imag_sign        # 探向结果复用给后续迭代
+            if getattr(self._core, "probe_dy", None) is not None:
+                self.last_probe_deg = self._core.probe_dy
+                self.last_rate_dps = self._core.rate_probe
             if st_ == TurnCore.DONE:
                 self.iters += 1
                 self.log("[HDG] 第 %d 次转向完成（目标 %.1f°）→ 回静止窗重测"
@@ -278,12 +337,21 @@ class HeadingAligner(object):
         left = bool(self.psi_meas < 0)
         self.last_dir = "左转" if left else "右转"
         self.last_target_deg = deg
+        # ⚠️ 2026-09-23 用户定：**转向下传形式必须与 `task1_2/run_ball_reverse.sh` 完全同形**
+        #   —— 那边就是 `common/turn_deg.py --deg N --dir left|right [--timeout] [--blind]`，
+        #   **不注入任何"记住的/配置的"符号**，符号由转角原语自己（探向）搞定。
+        #   历史教训：这里曾 `kw.setdefault("imag_sign", self.imag_sign)` 把上层记住的符号
+        #   灌进原语 ⇒ 一但那次记忆/配置反了，闭环变正反馈，船一路顶到限幅转 100°+ 还丢门。
+        #   视觉侧职责只有一条：**把 ψ 变成 (deg, left/right) 交下去**，其余不干预。
         kw = dict(self.turn_kwargs)
-        kw.setdefault("imag_sign", self.imag_sign)
         # 单次转向的超时（默认 8s：25° 在 10~20°/s 下只需 1.2~2.5s，8s 很宽裕）。
         # 预算关系：max_iters × (turn_timeout + settle + measure) 应 < timeout_ms，
         # 否则总超时会先触发（那时 iterations 用不满 —— 也是安全的，只是日志会显示放弃）。
         kw.setdefault("timeout", float(self.cfg.get("turn_timeout_s", 8.0)))
+        # `--blind` 与 .sh 的 AUV_TURN_BLIND 同义：**只在显式开启且确实没有遥测时**才带
+        if flag(self.cfg, "blind_enable", False) and not self._tel_seen:
+            kw["blind"] = True
+            self.log("[HDG] 本门内没有遥测 yaw → 本次转向带 --blind（角度 ÷ blind_rate_dps）")
         self._core = TurnCore(deg=deg, left=left, log=self.log, **kw)
         self._core.start(now_ms)
         self.log("[HDG] 第 %d 次转向：%s %.1f°（按冻结的测量值；转完停稳再重测）"

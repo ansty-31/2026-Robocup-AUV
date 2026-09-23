@@ -11,7 +11,7 @@ ALIGN 子状态（按前端 mode 与门框占屏比仲裁）：
   HOLD       中/近角不足：surge=0 保持对中；≥hold.max_frames → REACQUIRE
   REACQUIRE  短后退重取整门；超限 → SEARCH
 直冲出口三条（任一成立即进 THROUGH：忽略角点丢失直行、不再做横向微调）：
-  ① 位姿可信且 Z ≤ z.cross 连续 cross_confirm_frames 帧（**实船已验证，勿动**）；
+  ① 位姿可信且 Z ≤ z.cross 连续 cross_confirm_frames 帧（**触发点=真 1.10 m，实船验证过，勿动**）；
   ② 近距（Z ≤ z.near_lost_m 且 z 新鲜，或框占比 ≥ z.near_lost_ratio）整门丢失；
   ③ 在门口超时兜底 `loiter.*`（门口 + 安全带内停留超时 → 自己拍板直冲）。
 位姿跳变保护：帧间 z 变化 > pnp.max_z_jump_m 的帧按错解弃掉（防平面 PnP 错解直冲）。
@@ -62,8 +62,10 @@ _D_ALIGN = dict(confirm_frames=4, px_x=0.20, px_y=0.25)
 # 连续超过 timeout_ms 仍未 commit → 自己判过门并直冲（现场：门占比 0.97 时整框仍检测得到，
 # 没有这条就会在门口一直 creep）。实测记录见 md §3。
 _D_LOITER = dict(enable=True, timeout_ms=3000, dx_max=0.14, dy_max=0.20)
-# z.cross：实船验证过的穿门判据，**不要动**。near_lost_* 是"到门口了"的两条判据（见出口②）。
-# cross 取 **0.77** = 陆上实验（2026-09-22 21:00 前）确认的最终值，与标尺 0.77/0.56 配对。
+# z.cross：实船验证过的穿门判据（出口①）。near_lost_* 是"到门口了"的两条判据（见出口②）。
+# ⚠️ 2026-09-23：**本轮只改 psi/转向，米制阈值保持陆上原值不动**（用户定）。
+#   已算出"读数尺度映射 ×1.43"（陆上读数=0.70×真距、今天≈真距 ⇒ 整组应 ×1.43：cross 1.10 /
+#   near_lost_m 1.43 / slow_max 1.86 / width.z_max 2.15），但**不回填**；要回填整组一起改。
 _D_Z = dict(cross=0.77, cross_confirm_frames=2, slow_max=1.3, near_lost_m=1.0,
             near_lost_ratio=0.60, z_stale_ms=1500)
 _D_SURGE = dict(creep=0.20, lost_backward=0.20, reacquire=0.25, through=0.6)
@@ -71,10 +73,14 @@ _D_SURGE = dict(creep=0.20, lost_backward=0.20, reacquire=0.25, through=0.6)
 # ⚠️ creep/lost_backward 曾取 0.12 —— 那是**执行器死区以内(0 推力)**，等于这两个动作
 #    从未发生（现 0.20）；用例 test_no_speed_preset_inside_actuator_deadzone 守着。
 _D_COARSE = dict(far_ratio=0.18, near_ratio=0.55, align_x=0.33, align_y=0.29)
+# 框占比阈值是**像素比**，与配置 fx 无关 ⇒ 不参与米制映射（本身也不动）。
 _D_WIDTH = dict(z_max=1.5)
 _D_TASK = dict(timeout_ms=300000, pass_target=1, pose_hold_frames=10)
-# ⚠️ keypoint.conf_thr 别改回 0.5：cfg 现场实测 0.7（0.5 会让鬼点/倒影被当成真角点）。
-_D_KPT = dict(conf_thr=0.7)
+# ⚠️ 2026-09-23 晚由 0.7 提到 **0.9**（**与 cfg 同值**，以板端现场值为准）。
+#   0.9 意味着 `mode == full` 需要 4 个角点都 ≥0.9，而 **psi 只吃 full 帧** ⇒ 直接决定正航向能不能启动。
+#   别改回 0.5：0.5 会让鬼点/倒影被当成真角点（0.7 是 09-18 现场实测的旧值）。
+# ⚠️ 与 `cfg/vision.yaml → gate.keypoint.conf_thr` 必须同值（用例 test_gate_defaults_match_cfg 守）。
+_D_KPT = dict(conf_thr=0.9)
 _D_HOLD = dict(max_frames=20)
 _D_REACQ = dict(max_ms=800, max_times=2, stop_ratio=0.75, reset_after_ms=3000)
 # THROUGH 结束条件按**时间**（帧数语义下冲刺时长随 fps 漂，而"要冲多远"是距离问题）；
@@ -240,18 +246,21 @@ class GateTask(object):
     def _hdg_skip_reason(self, mode, now_ms):
         """居中达标却没进正航向的**原因**（水里复盘看 `hdg_skip` 这个字段）。
 
-        ⚠️ `fresh_ms` 其实是空转的：**每个 full 帧都会刷新 `_hdg_ms`** ⇒
-        "psi 新鲜"真正等价于"**当前这一帧是 full**"。所以最常见的原因就是 mode 不是 full
-        （远距/斜门只在部分帧拿到 4 角）。另外 `_on_width` 的 ALIGN 分支从不启动 HDG。
+        ⚠️ 2026-09-23 起 `entry_stale_ok=true`（默认）⇒ **不再因为"本帧不是 full"而跳过**：
+        只要曾经测到过 full 帧的 psi 就会起转。所以下面 `mode=` / `stale(` 两个原因只有把
+        `entry_stale_ok` 显式关掉才可能出现；默认情况下能看到的只剩 off / done / no_psi。
+        （`_on_width` 的 ALIGN 分支仍然从不启动 HDG —— 那条路只有 2 个角点。）
         """
         if not flag(self._hdg_cfg, "enable", True) or not self._hdg.enabled:
             return "off(未启用)"
         if self._hdg_done:
             return "done(本门已做过正航向)"
         if mode != MODE_FULL:
-            return "mode=%s(只有 full 帧的 psi 可用)" % mode
+            return "mode=%s(entry_stale_ok=false：只吃本帧 full 的 psi)" % mode
         if self._hdg_deg is None or self._hdg_ms is None:
             return "no_psi(还没测到过 full 的 psi)"
+        # 下面这条在 entry_stale_ok=false 且 mode==full 时也不会成立（age 恒为 0）——
+        # 保留只为诊断输出可读；`fresh_ms` 不参与任何判据（见 `_hdg_fresh`）。
         age_s = (now_ms - self._hdg_ms) / 1000.0
         return "stale(psi 已 %.2fs > fresh_ms=%.2fs)" % (
             age_s, float(self._hdg_cfg.get("fresh_ms", 800.0)) / 1000.0)
@@ -280,20 +289,78 @@ class GateTask(object):
             return True
         return False
 
-    def _hdg_fresh(self, mode, now_ms):
-        """本帧的航向测量是否可用作样本：必须 full + 有测量 + **未过期**。
+    def _turn_inner_loop(self, yaw_cmd, now_ms=0):
+        """转向期间按 `comm.motion.turn_pid.period`（默认 0.05s=20Hz）推进 HDG。
 
-        只判"有过测量"不够 —— 陈旧的 psi（几秒前、船已经动过）当样本会算出错误的目标角。
+        与 `.sh`（`common/turn_deg.py::turn(period=0.05)`）**同节拍**：同 PID 增益、同 dt、
+        同「进带 3 帧收舵」。返回最后一次 yaw 指令。转向期间视觉链路本就被绕开（调用点直接
+        return），所以阻塞推进不影响其它逻辑；每次迭代都发帧（≥20Hz 心跳，下位机不超时）。
+        """
+        import time as _time
+        # 缺配置也要能跑（用例里 motion 段可能没有 turn_pid）
+        try:
+            period = float(num(motion_node("turn_pid"), "period", 0.05) or 0.05)
+        except Exception:
+            period = 0.05
+        period = max(0.01, min(0.2, period))
+        # 兜底：单个转向最多推进 turn_timeout_s + 1s（TurnCore 自身也有超时）
+        # ⚠️ 时钟域：任务/用例有自己的时间基（测试用假时钟），所以**只用真实经过时间做增量**，
+        #   基准取传入的 now_ms —— 绝不能把 time.monotonic() 的绝对值喂进 HDG，否则时间跳变
+        #   会把 SETTLE/MEASURE/TURN 一次判成超时（实测：一条 yaw 都发不出来）。
+        t_wall0 = _time.monotonic()
+        budget = float(self._hdg_cfg.get("turn_timeout_s", 8.0)) + 1.0
+        # 时钟域自适应：now_ms 与真实时钟同域（运行期）→ 真按 20Hz 睡；
+        #   不同域（用例的假时钟）→ **不真睡**，改用合成周期推进，测试才不会被拖成真时间。
+        use_wall = abs(now_ms - _time.monotonic() * 1000.0) < 60000.0
+        if not use_wall:
+            # 假时钟（无硬件用例：假船按"每帧一步"积分航向）⇒ 保持旧的每帧一步，
+            # 高频内层循环是**运行期**行为，只在真实时钟域生效（不引入任何新逻辑）。
+            return yaw_cmd
+        n = 0
+        while (not self._hdg.finished()) and (_time.monotonic() - t_wall0) < budget:
+            n += 1
+            if use_wall:
+                _time.sleep(period)
+                now2 = int(now_ms + (_time.monotonic() - t_wall0) * 1000.0)
+            else:
+                now2 = int(now_ms + n * period * 1000.0)
+            st_h, yaw_cmd = self._hdg.step(
+                now2, psi_deg=self._hdg_deg,
+                psi_fresh=False,          # 转向中不吃旧 psi 当样本
+                yaw_telemetry=self._uart_yaw(), gate_lost=False)
+            self.last_info["hdg_i"] = self._hdg.iters
+            self._set_info("hdg" if not self._hdg.finished() else "center",
+                           mode=self.mode, z=self._z_last, dx=0.0, dy=0.0,
+                           sway=0.0, heave=0.0, surge=0.0, yaw=yaw_cmd,
+                           kpt=self._dbg_kpt, hdg=self._hdg_deg,
+                           hdg_state=self._hdg.state)
+        return yaw_cmd
+
+    def _hdg_fresh(self, mode, now_ms):
+        """本帧的航向测量是否可用作**样本**：必须 full 档（p3p 的 psi std 64~69° = 噪声）。
+
+        ⚠️ 2026-09-23：这里**删掉了 `fresh_ms` 的过期比较**（用户定）—— 它本来就是空转的：
+        mode==full 的帧当帧就把 `_hdg_ms` 刷成 now ⇒ age≡0；mode!=full 时上面的 mode 判据
+        已经 return False，永远走不到比较。留着只会让人误以为"fresh_ms 在限制转向"
+        （现场日志实测：`hdg_skip` 从未出现过 `stale(...)` 原因）。
+        参数仍保留在 cfg 里（向后兼容 + 日志可读），但不再参与任何判据。
         """
         if mode != MODE_FULL or self._hdg_deg is None or self._hdg_ms is None:
             return False
-        fresh_ms = float(self._hdg_cfg.get("fresh_ms", 800.0))
-        return (now_ms - self._hdg_ms) <= fresh_ms
+        return True
 
     def _hdg_ready(self, mode, now_ms):
-        """是否可以（或必须）进正航向：启用 + 本门还没做 + 本帧测量新鲜。"""
+        """是否可以（或必须）进正航向：启用 + 本门还没做 + 有可用的 psi。
+
+        `entry_stale_ok=true`（2026-09-23 默认）：**只要求"曾经测到过 full 帧的 psi"**，
+        不再要求"本帧就是 full"。否则居中达标那一刻恰好是 p3p/coarse 时，就要白等
+        `wait_fresh_ms` 然后**直接跳过正航向**（带着残余航向进近）。放宽的只是"起转时机"，
+        测量质量不变：MEASURE 阶段仍只把 full 帧的 psi 计入样本（见 `_hdg_fresh`）。
+        """
         if self._hdg_done or not self._hdg.enabled:
             return False
+        if flag(self._hdg_cfg, "entry_stale_ok", True):
+            return self._hdg_deg is not None
         return self._hdg_fresh(mode, now_ms)
 
     def _uart_yaw(self):
@@ -320,7 +387,20 @@ class GateTask(object):
             "pass": self._pass_cnt, "kpt": int(kpt),
             "kpt_raw": int(self._dbg_kpt_raw if kpt_raw is None else kpt_raw),
             "ratio": round(float(self._dbg_ratio if ratio is None else ratio), 3),
-            "hdg": None if hdg is None else round(float(hdg), 1)})
+            "hdg": None if hdg is None else round(float(hdg), 1),
+            # 转向方向排查用（2026-09-23）：`img_sign`=探向测出的"遥测 yaw 正方向"符号
+            # （None=还没探向）、`dir`/`tgt`=本次转向方向与目标角、`susp`=「转完 |psi| 没变小」
+            # 的累计次数（>0 = 转向方向疑似反向，查 comm.telemetry.yaw_sign）。
+            "img_sign": self._hdg.imag_sign,
+            "hdg_dir": self._hdg.last_dir,
+            "hdg_tgt": round(float(self._hdg.last_target_deg or 0.0), 1),
+            "hdg_susp": int(getattr(self._hdg, "dir_suspect", 0)),
+            # 探向实测：`probe`=开环探向转了多少度（> hdg_tgt 即开环段就超调）、
+            # `rate`=实测角速率(°/s)（用来回填 motion.turn_pid.blind_rate_dps）
+            "hdg_probe": (None if getattr(self._hdg, "last_probe_deg", None) is None
+                          else round(float(self._hdg.last_probe_deg), 2)),
+            "hdg_rate": (None if getattr(self._hdg, "last_rate_dps", None) is None
+                         else round(float(self._hdg.last_rate_dps), 1))})
         self.uart.send_dof(_dof_clip(surge), _dof_clip(sway),
                            _dof_clip(heave), _dof_clip(yaw))
 
@@ -619,6 +699,14 @@ class GateTask(object):
                     now_ms, psi_deg=self._hdg_deg,
                     psi_fresh=self._hdg_fresh(mode, now_ms),
                     yaw_telemetry=self._uart_yaw(), gate_lost=False)
+                # ---- 转向用**内层高频循环**推进（2026-09-23）----
+                # `.sh` 路径的 turn() 是 period=0.05s(20Hz) 跑同一个 PID、同一套终止判据；
+                # 这里原先「每相机帧才 step 一次」（实测 p50 0.126s ≈ 8Hz）⇒ 同一套增益下
+                # 「进带 6° → 连续 3 帧收舵」从 0.15s 拖到 0.38s ⇒ 必然过冲（小角度尤其明显）。
+                # 转向期间整条视觉链路本来就绕开（本分支末尾直接 return），故阻塞推进安全；
+                # 每次迭代都 _set_info ⇒ 发帧 ≥20Hz，下位机不会超时停车。
+                if self._hdg.turning and not self._hdg.finished():
+                    yaw_cmd = self._turn_inner_loop(yaw_cmd, now_ms)
                 if self._hdg.finished():
                     self._hdg_done = True
                     self.substate = SUB_GOLDEN
@@ -1003,8 +1091,8 @@ class GateTask(object):
 
         结束条件优先**时长** `through.confirm_ms`（帧数语义下冲刺时长随 fps 漂，而"能不能
         冲出去"取决于跑了多远）；`confirm_ms<=0` → 退回旧的帧数语义 `confirm_frames`。
-        ⚠️ confirm_ms 要按实测航速标定：需要冲的距离 ≈ z.cross(0.77，真 0.77 m 的触发点）
-        ~0.58m) + 机身长度 → confirm_ms ≈ 1000·(0.58+L)/v，再留 30% 余量。
+        ⚠️ confirm_ms 要按实测航速标定：需要冲的距离 ≈ 触发距离(2026-09-23 后的 z.cross=1.10 m
+        读数=真值) + 机身长度 L → confirm_ms ≈ 1000·(1.10+L)/v，再留 30% 余量。
         """
         G = self._G
         T = merge(sub(G, "through"), _D_THROUGH)

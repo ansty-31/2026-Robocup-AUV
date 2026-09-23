@@ -1,6 +1,22 @@
 # AUV 视觉导航项目（RDK X5 / Ubuntu 22.04 / Python）
 
-> **当前状态（20260920）**
+> **当前状态（20260923 晚）** —— 当天全部改动/分叉/未验证项见 **`doc/2026-09-23-改动记录-review.md`**
+> - **门 pose 权重已换代到 AUV_5**：`models/gate_kpt_bayese_640x640_nv12.bin`（md5 `945fdd01…`；
+>   板端 `~/Desktop/AUV_New/models/`、本地镜像、训练工程 `output/` **三处同 md5**）。
+>   配套图像链路 = **D 链序（`resize@640 → enhance → remap@640`）+ `clahe_clip: 0`** ——
+>   **权重与链路必须一起换**（单换一样 = 跨域掉点）。板端实测：`detect()` **31.27 ms ≈ 32 FPS**、
+>   int8 vs GT 角点中位 **13.94 px@720p**（旧方案 24.55）；训练/量化/实测全表见
+>   `../RDKX5-YOLOv11n-/runs/auv5/REPORT_auv5_pose.md`。
+> - **ALIGN.HDG（正航向）2026-09-23 修了 4 个症状**（转不动 / 转反 / 转过头 / 节拍慢）：
+>   符号在代码里定死（`dof_map.yaw.sign: +1` + `motion.turn_pid.imag_sign: +1`，**不再探向**），
+>   转向下传与 `task1_2/run_ball_reverse.sh` 同形；顺序固定为"先居中 → 达标且本帧是 full → 才起转"
+>   （`gate.hdg.entry_stale_ok: false`）；转向期间由 `gate_task._turn_inner_loop` 按
+>   `motion.turn_pid.period = 0.05 s`（**20 Hz**）推进，与 `.sh` 路径同节拍（原先跟着 8 Hz 相机帧 ⇒ 过冲）。
+>   ⚠️ **这条链路尚未在真实水域跑通过**（最新一趟板端日志里 `mode == full` 出现 0 次 ⇒ psi 一次都没测到），
+>   诊断与下一步见 review 文档 §5。
+> - **角点阈值已按"以板端现场值为准"统一为 `keypoint: {conf_thr: 0.9, vis_thr: 0.7}`**（板端与本地镜像同值，
+>   含代码兜底 `gate_task._D_KPT`；2026-09-23 晚板端先改、本地随后同步）。⚠️ 这意味着 `mode == full`
+>   要求 **4 个角点都 ≥0.9**，而 psi 只吃 full 帧 ⇒ 直接压低位姿可得率。**cfg 不要整份推板端**（`comm.yaml` 仍有 4 处台架分叉）。
 > - **任务三 过门（gate）= 扁平 v1.2 版**（`gate/*.py`，**9 个文件**；来自 `bak/gate_before_enhance_20260915_182038/`
 >   的 v1.2 原版 + 2026-09-18 新增 `heading_align.py`），这是**定版方案**，不再有分层结构。
 > - `kpt_memory`（门角点逐点软融合）是**可选开关、2026-09-18 起默认关闭**：
@@ -34,7 +50,7 @@ RoboCup AUV 赛事视觉代码。平台：**RDK X5（3.5.0）**，前视 USB + �
 识别：YOLO 蓝/红球 + gate（**keypoint 四角 + PnP** 新前端）；串口 11B 帧向 STM32 下发 DOF，
 STM32 回传 14B 遥测帧（深度/姿态 → 限深保护）。
 
-> 先读：`README.md`（用法）→ `doc/算法说明.md`（总体）→ `gate/过门-状态机与参数.md`（**状态/运动/参数/逻辑树速查；§9 是现场实测记录汇总**）→ `doc/算法说明-gate-PnP移植方案.md`（gate 设计与移植）→ `doc/算法说明-gate-角点逐点融合滤波.md`（角点逐点数据处理）→ `doc/实验待测-runbook.md`（**下水前后的实测阶梯与判据**）。
+> 先读：`README.md`（用法）→ `doc/算法说明.md`（总体）→ `gate/过门-状态机与参数.md`（**状态/运动/参数/逻辑树速查；§9 是现场实测记录汇总**）→ `doc/算法说明-gate-PnP移植方案.md`（gate 设计与移植）→ `doc/算法说明-gate-角点逐点融合滤波.md`（角点逐点数据处理）→ `doc/实验待测-runbook.md`（**下水前后的实测阶梯与判据**）→ `doc/2026-09-23-改动记录-review.md`（**当天全记录：模型换代 + psi/转向修复 + 板端分叉 + 未验证**）。
 > 参数怎么改：`cfg/*.yaml` 注释只写"是什么 + 当前值 + 调它的后果"；**数值是怎么来的、现场发生过什么，都在 `gate/过门-状态机与参数.md` §9**。
 
 ## 目录分区（英文分区命名）
@@ -87,11 +103,12 @@ auv_vision/
 │                        #   任务段只放各自特有的旋钮；共用值不在两处各写一份
 ├── doc/                 # 算法说明.md · 算法说明-gate-PnP移植方案.md（移植总体方案）
 │                        # 算法说明-gate-角点逐点融合滤波.md（kpt_memory 的数据处理）
+│                        # **2026-09-2X-改动记录-review.md（当天改动的全记录：改了什么/分叉/未验证/回退）**
 │                        # 实验待测-runbook.md（**PnP 位姿/深度标定实验**：步骤/判据/记录表/报告模板）
 │                        # **待研究-缺角位姿先验（三维信息复用）.md**（缺角时用存下来的三维补信息，**未实现**）
 │                        # 前视USB相机低延迟推流方案.md（推流/手动模式）
 ├── models/ · tests/     # 权重(.bin) · 无硬件测试套件（**按层分子目录**，见 tests/README.md）
-│                        #   tests/：138 例 / 10 个文件 + conftest
+│                        #   tests/：**168 例 / 10 个文件 + conftest**（2026-09-23 实测，以输出为准）
 │                        #     platform/  test_base   平台：settings/11B 帧/遥测/限深保护/硬停
 │                        #                test_common 公共件：PID/图像链路(NV12·squish)/Det/cfgnode
 │                        #     tasks/     test_ball        撞球相位机
@@ -113,7 +130,7 @@ auv_vision/
 ## 快速开始（本机，无硬件）
 
 ```bash
-python3 -m pytest tests/ -q              # 无硬件测试（89 例：base/common/ball/gate/标定与标注工具）
+python3 -m pytest tests/ -q              # 无硬件测试（**168 例**，2026-09-23 实测；base/common/ball/gate/标定与标注工具）
 python3 main.py --task ball              # 只跑撞球（SIM/mock）
 python3 main.py --task gate              # 试跑过门（cfg model.mode: mock）
 python3 preview_detect.py --gate-kpt     # 下水前：门框 + 4 角点 + 置信度（船不动）
@@ -242,16 +259,32 @@ cd ../pc
 另外 `cv2.VideoCapture` 默认协商 YUYV（本相机 720p 只有 9 fps），`base/camera.py` 已强制 MJPG（60 fps 档）。
 
 ## 联调 TODO
-- gate keypoint `.bin` 上板前：解码自检（§6）+ **卷尺深度曲线 0.5~6m**（判据 |误差|≤10%）；
+- 🔴 **真实水域"有位姿可用率"（当前第一优先）**：最新一趟板端日志 `mode == full` 出现 **0 次**（ALIGN 95 帧里有
+  17 帧拿到 4 个 ≥0.7 的角点，却一帧都没解出位姿；口径 = 当时板端 `conf_thr`，22:03 快照为 0.7）⇒ psi 测不到 ⇒ HDG 整趟没被触发。
+  本轮已实测排除 `pnp.reproj_px=20`（板端 20 帧里 13/14 通过）⇒ 先给逐帧日志补"位姿拒因 + 四点 conf + 重投影 RMS"
+  字段，再带录像跑一趟（判据与命令见 `doc/2026-09-23-改动记录-review.md` §5）；
+- 🔴 **角点阈值要用实测复核**：现取 `keypoint: {conf_thr: 0.9, vis_thr: 0.7}`（板端现场值，本地/板端已统一）。
+  这个值会直接压低位姿可得率（full 要求 4 个角点都 ≥0.9）。定稿前先用 `preview_detect.py --gate-kpt`
+  （不建串口、船不动）看真实水域的 `kpt_conf` 分布；
+- ~~gate keypoint `.bin` 上板前：解码自检~~ **已做**（09-23：ONNX 9 张量核对 + 板端域自证 8/8 PASS）；
+  仍待 **卷尺深度曲线 0.5~6m**（判据 |误差|≤10%）；
+- **米制阈值 ×1.43 映射未回填**（陆上读数=0.70×真距、今天水里≈真距 ⇒ `z.cross` 1.10 / `near_lost_m` 1.43 /
+  `slow_max` 1.86 / `width.z_max` 2.15）；**本轮只写注释不生效**。当前 `z.cross=0.77` 的实际触发点 ≈ 真 0.77 m
+  （比陆上验证点晚 ~33 cm，冲门更贴门）。要回填就**整组一起改**；
 - **遥测联通性**：下位机确认在按 `0xAA55` 14B 帧回传深度（板上应持续看到 `[UART←] depth=…`，
   看不到就是没回传、限深保护放行中）；并把下位机深度读数与人工卷尺/标尺核对（这是深度标定，
   **不是**去改 `min_depth_m` —— 它已被用户定死在 0.55，有不变量用例守着）；
 - ~~门框尺寸实测~~ **已实测（09-22）：外缘到外缘 77×56 cm** → `frame_w/frame_h=0.77/0.56`；
   仍待陆上 A1 用 `a` 复核"模型眼里的门宽"是否等于外缘（可能落在管子中心线上）；
-- **DOF 极性与速度标定**：surge/sway/heave 方向、`norm→m/s` 曲线、REACQUIRE 后退方向；
+- **DOF 极性与速度标定**：surge/sway/heave 方向、`norm→m/s` 曲线、REACQUIRE 后退方向。
+  工具：`tools/check/check_dof_sign.py`（用**视觉**当独立真值——相机是唯一不受 DOF/遥测符号影响的量）；
+  yaw 侧已按手动挡既成事实定死 `+yaw = 右转`（`dof_map.yaw.sign: +1`），**不要再为转向去改它**；
 - **冲刺与兜底标定**：`surge.through`(0.6) 与 `through.confirm_ms`(2500) 决定"能不能冲出去"、
   `loiter.{timeout_ms,dx_max,dy_max}` 决定"在门口等多久才拍板"——
-  判据 = 通过时无接触（30 分）且不超时；
-- **SEARCH 平移扫视标定**：`gate.search.sway`(0.45≈25% 推力) 是否真的能把船左右挪动、
+  判据 = 通过时无接触（30 分）且不超时；**换模型后 `confirm_ms` 尚未按新航速复核**；
+- **小角度过冲的收尾（要动控制律，等下水数据）**：`turn_pid.deadzone_deg=6` 按目标缩放 /
+  加最小舵效地板 `max(0.15,|out|)`（执行器死区 0.138 ⇒ 误差 <10.4° 时现在一点舵效都没有）/ 加大 `kd`；
+- **SEARCH 平移扫视标定**：`gate.search.sway`(**0.3** ≈ 25% 推力档) 是否真的能把船左右挪动、
   以及一趟来回后**有没有净漂移**（开环、无横向位置反馈，见 cfg 注释里标为未验证的那条）；
-- 高低门编排（`pass_target` 语义：每轮一门）；相机—机身偏置 `body_center_offset` 标定后再决定是否接进对准。
+- 高低门编排（`pass_target` 语义：每轮一门；板端台架目前设 2）；相机—机身偏置 `body_center_offset`
+  标定后再决定是否接进对准。

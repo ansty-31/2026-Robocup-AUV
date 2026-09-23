@@ -49,9 +49,16 @@ def test_camera_yaml_loads_and_has_sane_intrinsics(path):
 
 
 def test_water_and_air_differ_by_dome_factor():
-    """空气侧等效焦距必须明显大于水下标定值（罩外折射本领 0.49 vs 0.16）。"""
+    """水下标定的等效焦距应比空气大 ~12%（罩+折射把视场收窄 ⇒ fx 变大）。
+
+    2026-09-23 修正方向：本用例原先断言"空气 fx 明显大于水下 fx（比值 1.25~1.55）"，
+    那是拿**旧水下标定 fx=782.5**（错的那份）比出来的。新水下标定（棋盘、水下、83 视角、
+    RMS 0.546 px）给 fx=1207.6，空气侧三法互证 fx≈1078（tape 1083±7 / ruler+gate 1075 /
+    出框边界 ≥1095，且四档深度误差 ≤6%）⇒ 实测比值 **1078/1207.6 = 0.893**，
+    即水/空气 = 1.12 ✓ 与"罩+水收窄视场"一致（runbook §B4b/§B4c）。
+    """
     from gate.geometry import CameraModel
     w = CameraModel.from_yaml(os.path.join(ROOT, "cfg", "front_camera.yaml"))
     a = CameraModel.from_yaml(os.path.join(ROOT, "cfg", "front_camera_air.yaml"))
-    ratio = a.fx / w.fx
-    assert 1.25 < ratio < 1.55, "空气/水 焦距比 = %.3f，不像罩介质差" % ratio
+    ratio = w.fx / a.fx
+    assert 1.05 < ratio < 1.20, "水/空气 焦距比 = %.3f，不像罩+折射的介质差" % ratio

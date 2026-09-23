@@ -93,11 +93,15 @@ gate:                         # 过门（§3 几何 / keypoint / PnP 参数）
              #   ⚠️ 水下还要用水下那份内参（`cfg/front_camera.yaml`，fx=782.5）验证折射因子 k。
              # body_center_offset：相机—机身安装偏置(m)，**只读入、不参与运算**（未标定）。
              # bar_width/sym_bars：未参与运算（keypoint 只标外轮廓四角，留作记录）。
-  keypoint: {conf_thr: 0.7, vis_thr: 0.5}
-      # ⚠️ 以**板端现场值**为准写回本地（曾两次因"本地整份覆盖板端"把现场值冲掉）。
-      # conf_thr：**任务侧**阈值——判 mode / 选门 / 计数（gate_task）。⚠️ 别改回 0.5（鬼点/倒影会被当真角点）。
+  keypoint: {conf_thr: 0.9, vis_thr: 0.7}
+      # ★ 2026-09-23 晚：**以板端现场值为准**（板端先改成 0.9/0.7，本地镜像随后同步 ⇒ 两边同值）。
+      # conf_thr：**任务侧**阈值——判 mode / 选门 / 计数（gate_task）。0.9 是严值：
+      #   要让 `mode == full` 成立，必须 4 个角点都 ≥0.9（**psi 只吃 full 帧** ⇒ 直接决定正航向能不能启动）。
+      #   ⚠️ 别改回 0.5（鬼点/倒影会被当真角点）；0.7 是 09-18 的现场实测旧值（≥3 角可用帧占比 94%）。
       # vis_thr ：**解码期**硬门限——低于它的角点在解码阶段就被清 0，下游（含预览）看不到。
-      #   null = 沿用 conf_thr（历史行为）；数值 = 两者解耦（现用：解码 0.5 宽松、模式 0.7 严）。
+      #   现与 conf_thr 解耦（0.7 < 0.9）：0.7~0.9 之间的角点仅用于预览/诊断，不参与 mode 判定。
+      #   null = 沿用 conf_thr（历史行为）。
+      # ⚠️ 代码兜底 `gate_task._D_KPT` 必须与 conf_thr 同值（有用例 test_gate_defaults_match_cfg 守）。
       # 阈值实测依据见 gate/过门-状态机与参数.md §9.2；挑阈值用
       #   `preview_detect.py --gate-kpt`（它按 vis_thr=0.0 显示模型原始置信度，不受这里影响）。
   kpt_mem: {enable: false, alpha: 0.4, beta: 0.1, valid_ms: 800,

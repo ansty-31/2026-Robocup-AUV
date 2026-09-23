@@ -121,12 +121,25 @@ class TelemetryReceiver(object):
             self.buf.extend(data)
         stats = {"ok": 0, "bad": 0}
         rows = parse_telemetry_frames(self.buf, stats)
+        # 姿态符号归一（`comm.telemetry.yaw_sign`，默认 +1 = 不改行为）。
+        # ⚠️ 为什么需要它：2026-09-23 板端真实日志（SIM=false）里，转向探向给出
+        #   「命令 yaw=-0.30（左转档）×0.6s → 遥测 Δyaw=+18.79°」⇒ 必然是"命令符号→物理转向"
+        #   与"物理转向→遥测符号"两者之一反了（探向只能测到二者之积 g·s=-1）。
+        #   闭环在 g·s=-1 时**仍然稳定**（都收敛在遥测上），但只有"遥测忠实于真实转向"时
+        #   物理方向才对 —— 否则 `heading_align` 驱动的是镜像量，船会**朝反方向转**
+        #   （现场现象：左转后机身反而不平行）。把 yaw_sign 设成 -1 归一，重跑后
+        #   探向应报 `imag_sign=+1`，且 `[HDG] 转向后 |psi| 应变小`。
+        try:
+            import base.settings as _S
+            sign = float(_S.get("comm.telemetry.yaw_sign", 1.0) or 1.0)
+        except Exception:
+            sign = 1.0
         for depth, target, roll, pitch, yaw in rows:
             self.depth_m = depth
             self.target_m = target
             self.roll_deg = roll
             self.pitch_deg = pitch
-            self.yaw_deg = yaw
+            self.yaw_deg = None if yaw is None else sign * yaw
             self.last_ms = now_ms if now_ms is not None else _now_ms()
         self.frames += stats["ok"]
         self.bad += stats["bad"]

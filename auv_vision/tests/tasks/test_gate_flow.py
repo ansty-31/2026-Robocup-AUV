@@ -769,22 +769,32 @@ def _offset_px(dx):
 
 
 def test_hdg_skip_reason_when_trigger_frame_is_p3p(monkeypatch):
-    """**2026-09-22 现场问题**：居中达标**那一刻**若不是 full 帧 → 正航向被跳过、直接进近。
+    """触发帧是 p3p 时怎么办 —— **新旧两套语义都在这里守**。
 
-    帧序：2 帧"没对中但 full"（建立 prev 与 psi）→ 1 帧 full 对中 → 3 帧 p3p 对中
-    ⇒ 第 4 个对中帧是 p3p ⇒ 应记录 `hdg_skip=mode=p3p`、进 APPROACH、且全程不发 yaw。
+    2026-09-23（用户定）：`entry_stale_ok=true`（默认）⇒ 只要曾经测到过 full 帧的 psi 就
+    **起转**，不再因为"这一刻不是 full"而跳过正航向（旧行为会 skip → APPROACH → 带着残余航向进近）。
+    旧行为用 `entry_stale_ok=false` 显式关掉即可复现（记录 `hdg_skip=mode=p3p` 并进 APPROACH）。
     """
-    monkeypatch.setitem(S.comm.gate, "hdg",
-                        S.Y(dict(S.comm.gate.get("hdg", {}), wait_fresh_ms=0)))
     specs = [(_offset_px(320), FULL_C), (_offset_px(320), FULL_C),
              (None, FULL_C), (None, P3P_C), (None, P3P_C), (None, P3P_C)]
+    hdg_base = dict(S.comm.gate.get("hdg", {}), wait_fresh_ms=0)
+
+    # ---- 新语义（默认）：进 HDG，不再跳过 ----
+    monkeypatch.setitem(S.comm.gate, "hdg", S.Y(dict(hdg_base, entry_stale_ok=True)))
     task = GateTask(_Uart(), _seq_hub(specs), CAM.width, CAM.height)
-    st, hist = _run(task, 12)
-    skips = [h.get("hdg_skip") for h in hist if h.get("hdg_skip")]
-    assert skips, "应记录跳过正航向的原因（实际没有 hdg_skip；动作=%s）" % [h["action"] for h in hist]
+    _st, hist = _run(task, 12)
+    acts = [h["action"] for h in hist]
+    assert "hdg" in acts, "entry_stale_ok=true 时 p3p 触发帧也应进正航向（实际 %s）" % acts
+
+    # ---- 旧语义（显式关掉）：skip 原因=mode，直接进近，且全程不发 yaw ----
+    monkeypatch.setitem(S.comm.gate, "hdg", S.Y(dict(hdg_base, entry_stale_ok=False)))
+    task2 = GateTask(_Uart(), _seq_hub(specs), CAM.width, CAM.height)
+    _st2, hist2 = _run(task2, 12)
+    skips = [h.get("hdg_skip") for h in hist2 if h.get("hdg_skip")]
+    assert skips, "关掉开关后应记录跳过原因（动作=%s）" % [h["action"] for h in hist2]
     assert "mode=p3p" in skips[0], "原因应指出帧模式，实际 %r" % skips[0]
-    assert task.phase == "APPROACH", "跳过正航向应直接进近，实际 %s" % task.phase
-    assert all(abs(f[3]) < 1e-9 for f in task.uart.frames), "跳过后不该发任何 yaw"
+    assert task2.phase == "APPROACH", "跳过正航向应直接进近，实际 %s" % task2.phase
+    assert all(abs(f[3]) < 1e-9 for f in task2.uart.frames), "跳过后不该发任何 yaw"
 
 
 def test_hdg_skip_reason_when_disabled(monkeypatch):
@@ -816,9 +826,14 @@ def test_wait_fresh_holds_then_aligns_when_a_full_frame_arrives(monkeypatch):
 
 
 def test_wait_fresh_times_out_then_proceeds(monkeypatch):
-    """等超时了仍然要往下走（不能卡死在 GOLDEN）。"""
+    """等超时了仍然要往下走（不能卡死在 GOLDEN）。
+
+    ⚠️ 这条路径只在 `entry_stale_ok=false`（旧语义）下可达：默认 `true` 时"曾经有 full 帧
+    测量"就起转，压根不会走 wait_fresh_ms 的等待分支。
+    """
     monkeypatch.setitem(S.comm.gate, "hdg",
-                        S.Y(dict(S.comm.gate.get("hdg", {}), wait_fresh_ms=300)))
+                        S.Y(dict(S.comm.gate.get("hdg", {}),
+                                 wait_fresh_ms=300, entry_stale_ok=False)))
     specs = [(_offset_px(320), FULL_C), (_offset_px(320), FULL_C),
              (None, FULL_C)] + [(None, P3P_C)] * 10
     task = GateTask(_Uart(), _seq_hub(specs), CAM.width, CAM.height)

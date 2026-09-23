@@ -294,6 +294,25 @@ class AppController(object):
             for k, v in info.items():
                 if isinstance(v, bool) or v is None or isinstance(v, (int, float, str)):
                     rec[k] = v
+            # 下位机遥测也写进日志（2026-09-23）：**转向方向/ 摆动极性这些只能靠
+            # "命令 vs 遥测 vs 视觉"三者对齐来判**，stdout 的 `[UART←]` 没有时间戳、
+            # 事后对不上帧；写进 JSONL 后就能逐帧核对（`tyaw`=遥测绝对航向(°)、
+            # `ttel`=遥测帧年龄(ms)、`tdep`=深度(m)、`trol`/`tpit`=横滚/俯仰）。
+            try:
+                tel = getattr(getattr(task, "uart", None), "telemetry", None)
+                if tel is not None:
+                    if tel.yaw_deg is not None:
+                        rec["tyaw"] = round(float(tel.yaw_deg), 2)
+                    if tel.depth_m is not None:
+                        rec["tdep"] = round(float(tel.depth_m), 3)
+                    if tel.roll_deg is not None:
+                        rec["trol"] = round(float(tel.roll_deg), 2)
+                    if tel.pitch_deg is not None:
+                        rec["tpit"] = round(float(tel.pitch_deg), 2)
+                    age = tel.age_ms(now_ms)
+                    rec["ttel"] = None if age is None else int(age)
+            except Exception:
+                pass
             self._task_log_fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
         except Exception as e:
             print("[MAIN] 任务日志写入失败：%s" % e)

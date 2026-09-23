@@ -35,6 +35,15 @@ estop:
 ramp:
   speed_per_s: 220.0       # 轴字节平滑速率(字节/秒)：速度连续变化到目标，不是直接激增；0=关闭直跳
 
+telemetry:                 # 下位机上行姿态/深度的**符号归一**（2026-09-23）
+  yaw_sign: 1.0            # 遥测 yaw × 它。默认 1.0 = 不改行为。
+                           #   为什么有这个旋钮：**转向探向只能测到「命令符号→物理转向」
+                           #   与「物理转向→遥测符号」之积**（实测 g·s = -1：命令 -0.30（左转档）
+                           #   → 遥测 Δyaw=+18.79°）。闭环在 g·s=-1 时照样收敛（收敛在遥测上），
+                           #   但**只有遥测忠实于真实转向时物理方向才对**；否则 `heading_align`
+                           #   驱动的是镜像量、船会朝反方向转（现场：左转后机身反而不平行）。
+                           #   判据：设成 -1 后重跑，探向应报 `img_sign=+1`（日志字段），
+                           #   且 `[HDG] 转向后 |psi| 应变小`（日志字段 hdg_susp 保持 0）。
 depth_guard:               # 限深保护：只压上浮，不动前进/转向（base/uart.py::_apply_depth_guard）
   enable: true             #   当前深度 ≤ min_depth_m → 本帧 heave 清零并当帧回中，机身顶不出水面
   min_depth_m: 0.55        # ⚠️ **现场定死 = 0.55，不准改**（有不变量用例守着）；**别再整份覆盖板端 cfg**
@@ -58,7 +67,22 @@ motion:                    # **ball / gate 共用的底层运动参数**（同�
   pid_heave: {kp: 1.0, ki: 0.0,  kd: 0.15, out_max: 1.0,  deadzone: 0.04}
                            # 升降居中：ball CENTER 的 heave / gate 的 heave
   turn_pid: {kp: 0.2, ki: 0.0, kd: 0.05, out_max: 0.45, deadzone_deg: 6.0, norm_deg: 15.0,
-             blind_rate_dps: 20.0}
+             blind_rate_dps: 20.0,
+             probe_s: 0.6, probe_dof: 0.3, probe_frac: 0.5, probe_min_s: 0.15,
+             imag_sign: +1,
+             # period：转向闭环推进周期(s)，必须与 .sh 路径 turn(period=0.05) 一致。
+             #   gate 的 ALIGN.HDG 原先是每相机帧 step 一次（实测 p50 0.126s 约 8Hz），
+             #   同一套增益下 进带6度到连续3帧收舵 从 0.15s 拖成 0.38s 以致过冲。
+             #   现在转向期间由 gate_task._turn_inner_loop 按这个周期阻塞推进。
+             period: 0.05}            # imag_sign=+1：代码常量（+yaw=右转、遥测忠实）
+       # ---- 探向（PROBE）：**开环定时**，2026-09-23 从硬编码搬到这里 ----
+       # ⚠️ 实测（板端真实水域日志）：目标转角 13.7°，探向 0.6s × 0.30 舵就转了 **18.79°
+       #    = 目标的 137%** ⇒ "按角度转"却在闭环开始前就转过头了 —— 这就是"转多了"的主因。
+       #   （闭环本身是按遥测角度收的，探向是唯一开环段；它的转角会被记账，但不被阻止。）
+       # probe_frac：探向时长上限 = probe_frac × 目标角 ÷ 角速率 ⇒ 探向最多转目标的一半。
+       #   probe_min_s：目标角很小时的下限（低于它探不出方向）。
+       # probe_dof/probe_s：探向舵量与时长上限。**想更省可以再降**（0.2 / 0.3）。
+       # blind_rate_dps：开环（盲转/探向收窄）用的角速率假设；**用日志 hdg_rate 回填**。
        # 「额定转角」PID（`common/turn_deg.py` + 下位机遥测 yaw 闭环）：gate 的 ALIGN.HDG 与转向脚本共用。
        # kp 管"多早开始收力/收敛多紧"，out_max 管"最大转速"（想整体更慢就降它，别只降 kp）。
        # ⚠️ out_max 别降到 0.15 那一档：15% 推力恰卡在执行器死区边上 ⇒ 转大角度会"还剩二十几度就没推力"。
@@ -134,12 +158,26 @@ gate:                      # 过门（相位机 SEARCH→ALIGN→APPROACH→THRO
   # 居中**只有 sway 平移、没有 yaw**（2026-09-20 用户定）：姿态修正由下面的 hdg.* 负责，那是 gate 唯一的 yaw 通道。
   hdg: {enable: true, tol_deg: 8.0, measure_frames: 5, max_iters: 3, max_step_deg: 0.0,
         settle_ms: 400, settle_tol_deg: 2.0, measure_timeout_ms: 2000, timeout_ms: 30000,
-        wait_tel_ms: 3000, turn_timeout_s: 8.0, fresh_ms: 800, wait_fresh_ms: 0}
+        wait_tel_ms: 3000, turn_timeout_s: 8.0, fresh_ms: 800, wait_fresh_ms: 0,
+        entry_stale_ok: false, blind_enable: true}
+       # ---- 2026-09-23 两个新开关：把"能不能转"从遥测上解耦 ----
+       # 现场实证（板端 log/gate_two_20260923.jsonl 第二趟，1876 帧）：唯一的 HDG 尝试在
+       #   settle 停了 **2.98s ≈ wait_tel_ms(3000)** 之后就 giveup，状态从没进 measure；
+       #   此后 1771 帧 hdg_skip=done(本门已做过正航向) ⇒ **一次放弃把本门的正航向彻底锁死**，
+       #   画面里 dx 一直是 +0.45(饱和右修) 也从没转一下。← "hdg 一直 giveup"的真因。
+       # entry_stale_ok：**默认 false（2026-09-23 用户定）** —— 顺序必须是
+       #   「先居中 → 居中确认达标 → 再调 yaw」，且触发帧必须是 full 帧。
+       #   true 会让"居中那一刻恰好是 p3p/coarse"也起转（现场表现为"一上来就调 yaw"）；
+       #   采样在任何情况下都只吃 full 帧（p3p 的 psi std 64~69°）。
+       # blind_enable：**没有遥测 yaw** 时用开环盲转：角度 ÷ `motion.turn_pid.blind_rate_dps`
+       #   = 时长，转完回 SETTLE 再用 psi 复核、迭代（max_iters 内收敛）。
+       #   true = 台架/SIM/遥测断线也能转（代价：单次转角精度取决于假设角速率 20°/s）；
+       #   false = 旧行为：wait_tel_ms 内无遥测就 giveup（且本门不再转）。想回到旧行为改这里。
        # wait_fresh_ms：居中达标但**那一刻不是 full 帧**（拿不到可用 psi）时，原地等多久再跳过正航向。
        #   0（默认）= 立刻进 APPROACH（带着残余航向走）；斜门/远距只在部分帧出 4 角时，
        #   设 1500~2000 更划算：GOLDEN 本来就不下发 surge，等的代价只是时间。
-       #   ⚠️ 注意 fresh_ms 实际是**空转**的：每个 full 帧都会刷新 psi 时间戳 ⇒
-       #   "新鲜"真正等价于"当前帧是 full"。所以卡人的是帧的模式，不是 800ms 这个数。
+       #   ⚠️ fresh_ms **不参与任何判据**（2026-09-23 核实：full 帧当帧就把时间戳刷成 now ⇒
+       #   age≡0；非 full 帧在比 age 之前就 return False）⇒ 它从来不是"限制转向"的原因，留着只为日志。
        # 「正航向」（ALIGN 的子状态 HDG；实现 `gate/heading_align.py`）：让机身与门法向平行。
        # 离散做法（用户定）：居中达标 → 测 psi（连续 measure_frames 帧 full 取中位数）→ 按测得量转
        #   （`common/turn_deg.py` 按遥测 yaw 精确闭环）→ 停稳(settle_ms) → 再测 → 迭代
@@ -154,10 +192,12 @@ gate:                      # 过门（相位机 SEARCH→ALIGN→APPROACH→THRO
        #   ②在安全带内（|dx|≤dx_max、|dy|≤dy_max）③连续持续 ≥ timeout_ms → 自己拍板：判过门 + 直冲。
        # 调参：等太久 → 减小 timeout_ms；误判太多（没对准就冲）→ 收紧 dx_max/dy_max。完全不要 → enable: false。
   z: {align_max: 4.0, fast_max: 3.0, slow_max: 1.3, cross: 0.77,
-      # cross：**陆上实验（2026-09-22 21:00 前）确认的最终值 = 0.77**，与
-      #   `vision.gate.geometry.frame_w/h = 0.77/0.56` 是"同一物理距离的两种写法"（真 0.77 m 触发）。
-      #   旧组合（标尺 0.70 + cross 0.7）也是在真 0.77 m 触发 ⇒ 现场验证过的触发点没变，
-      #   变的只是标尺写对了。⚠️ 两个值必须同进同退，只改一个 = 触发点漂 7 cm。
+      # cross = 0.77：**陆上 2026-09-22 21:00 前确认的原值，2026-09-23 本次未改**。
+      #   ⚠️ 已算出但不回填（用户定：这一轮只动 psi/转向）：陆上调参时在水标定文件
+      #   (fx=782.5) 下读数 = **0.70 × 真距**，今天水下读数 ≈ 真距 ⇒ 想保持"陆上验证过的
+      #   物理触发点"，整组米制阈值要 ×1.43（cross 1.10 / near_lost_m 1.43 / slow_max 1.86 /
+      #   width.z_max 2.15）。当前保持原值 ⇒ z.cross=0.77 的实际触发点 ≈ 真 0.77 m
+      #   （比陆上验证点晚 33 cm，冲门更贴门）。要回填见 doc/实验待测-runbook.md §B4c。
       cross_confirm_frames: 2,   # 连续 z≤cross 帧数才判过门(防单帧 PnP 错解冲出去)
       near_lost_m: 1.0,          # 进近中已到该近距后整门丢失 → 判过门
       near_lost_ratio: 0.60,     # 框宽/屏宽 ≥ 它且整门丢失 → 判过门（与 near_lost_m 是 OR）
@@ -179,6 +219,7 @@ gate:                      # 过门（相位机 SEARCH→ALIGN→APPROACH→THRO
                              #   注：判"该不该判过门"用 z.near_lost_ratio（框占比），不是这里
   coarse: {far_ratio: 0.18, near_ratio: 0.55, align_x: 0.33, align_y: 0.29}
          # 没有位姿时的走位仲裁：far/near_ratio=门框宽/屏宽 远近判定(0.18≈2.4m / 0.55≈0.78m @fx782)；
+         #   ⚠️ 2026-09-23 复核：@fx782 是旧标注；占比是像素比、与配置 fx 无关 ⇒ **本次不动此值**。
          # align_x/y=对中阈值(归一化像素)，决定"creep 靠近"还是"HOLD → REACQUIRE 后退"；
          #   coarse 的框心是最粗的估计 ⇒ 刻意比 align.px_* 略松（有不变量用例守这个形状）。
          # 仲裁要点：**只有未对准才 HOLD/后退**；对准就 creep 靠近。

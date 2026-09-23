@@ -23,14 +23,23 @@ tools/
 ├── check/                        # ② 自检（上板前 / 离线跑一次看结论；只读，不动船）
 │   ├── check_kpt_decode.py       #   keypoint 解码约定自检（-0.5 陷阱、通道布局）——**上板前必跑**
 │   ├── check_gate_pose.py        #   PnP 位姿自检：为什么位姿被拒（角点/候选 RMS/tz）
-│   └── check_pipeline_identity.py#   训练/推理**同域**自证（去畸变↔回投↔解码同一条链，勿改图像链路）
+│   ├── check_pipeline_identity.py#   训练/推理**同域**自证（去畸变↔回投↔解码同一条链，勿改图像链路）
+│   ├── check_paths.py            #   路径/配置落点自检
+│   ├── auv_kpt_meter.py          #   只读相机、不碰串口：实时看门框 + 4 角点 + 置信度
+│   └── check_dof_sign.py         #   **DOF 通道物理符号自检**（2026-09-23）：用**视觉**当独立真值定
+│                                 #   `dof_map.{yaw,sway}.sign`；**必须显式 --go 才发推力**，任何退出路径补发中性帧
 │
 └── analyze/                      # ③ 离线判读与标定（吃日志/dump/录制数据，出结论与参数建议）
     ├── analyze_task_log.py       #   逐帧日志判读 ①~⑧（相位/出口/水平通道能动力/进 THROUGH 偏了多少）
+    │                             #   ⚠️ 2026-09-23 新增的 `img_sign/hdg_susp/hdg_probe/hdg_rate/tyaw` 等
+    │                             #     字段它还没纳入（要看这几个用手工 python 或看 stdout）
     ├── feature_coverage.py       #   **这轮哪些功能没被用到**（相位/子状态/档位/动作 + ✔✘ 清单）
     ├── analyze_kpt_dump.py       #   preview --dump 的角点可得率 / PnP 命中率（标定 conf_thr/vis_thr/reproj_px）
     ├── analyze_heading.py        #   PnP 安装角（bias）与航向噪声底（静态 dump）
     ├── analyze_pnp_center.py     #   位姿中心 vs bbox 中心的偏差证据
+    ├── label_corners.py          #   手工标 4 角 → 同格式 dump（检测器不响应时的岸上路线）
+    ├── ruler_calib.py            #   靶子读数 → 等效焦距 fx/fy 与距离口径 c（--gate 与门框联立）
+    ├── tape_ticks.py             #   刻度周期法：卷尺自带 1cm 刻度测像素比例
     └── pnp_calib.py              #   **PnP 位姿/深度标定**：真值 dump → 误差表 + 门框尺寸反演 + cfg 建议
 ```
 
@@ -48,6 +57,7 @@ tools/
 | 板端 `bak/` 堆太多 | `deploy/tidy_board_bak.sh` |
 | 权重要上板了，怕解码约定不对 | `check/check_kpt_decode.py` |
 | 位姿老是解不出来 | `check/check_gate_pose.py` |
+| 怀疑"该右转却左转 / 该右移却左移"（DOF 或遥测符号反了） | `check/check_dof_sign.py`（板端、水里，**加 `--go` 才发推力**） |
 | 换了相机/畸变/分辨率，怕训练与推理不同域 | `check/check_pipeline_identity.py` |
 | 下水回来复盘这一轮哪里不对 | `analyze/analyze_task_log.py log/<tag>gate.jsonl` |
 | 想知道"这轮有哪些功能根本没被触发" | `analyze/feature_coverage.py log/<tag>gate.jsonl` |

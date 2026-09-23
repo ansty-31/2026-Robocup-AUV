@@ -48,7 +48,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--weights", required=True)
-    ap.add_argument("--domain", default="B", choices=["B", "C", "D", "AOLD"])
+    ap.add_argument("--domain", default="B", choices=["B", "C", "D", "DWB", "AOLD"])
     ap.add_argument("--n", type=int, default=120)
     ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--seed", type=int, default=0)
@@ -73,7 +73,10 @@ def main():
     print(f"清水 gate 帧池 {len(pool)} 张，抽样 {len(picks)} 张；域={a.domain}，权重={a.weights}")
 
     # A-old 域 = P1 链路 + 标定 A（Domain 里用 "C" 形态表示 P1）
-    dom = Domain("C" if a.domain == "AOLD" else a.domain, calib_for(a.domain), True)
+    # DWB = D 域几何 + wb（无 CLAHE）—— 定稿训练/部署链路，新模型必须按它探针
+    dom_name = {"AOLD": "C", "DWB": "D"}.get(a.domain, a.domain)
+    dom = Domain(dom_name, calib_for(a.domain),
+                 "wb" if a.domain == "DWB" else True)
     out_dir = Path(PROJECT_ROOT / a.render_dir) if a.render_dir else None
     if out_dir:
         out_dir.mkdir(parents=True, exist_ok=True)
