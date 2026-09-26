@@ -34,7 +34,7 @@ import prepare_frames as pf  # noqa: E402
 
 WB, CLAHE, GAMMA = [1.0, 1.05, 1.15], 0.5, 0.85
 CALIB = "configs/front_camera.yaml"
-RAW = PROJECT_ROOT / "data/mapped/raw"
+RAW = PROJECT_ROOT / "data/frames/mapped_anchors"
 
 
 def main():

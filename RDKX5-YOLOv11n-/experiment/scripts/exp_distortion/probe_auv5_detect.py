@@ -58,13 +58,13 @@ def main():
     a = ap.parse_args()
 
     deleted = set()
-    dl = PROJECT_ROOT / "data/AUV_5/raw-data/_deleted_gray_frames.txt"
+    dl = PROJECT_ROOT / "data/frames/AUV_5_gate_calib/_deleted_gray_frames.txt"
     if dl.exists():
         for line in dl.read_text().splitlines():
             if line.strip():
                 deleted.add(line.strip())
     pool = []
-    for d in sorted((PROJECT_ROOT / "data/AUV_5/raw-data").glob("gate-*")):
+    for d in sorted((PROJECT_ROOT / "data/frames/AUV_5_gate_calib").glob("gate-*")):
         for p in sorted(d.glob("*.jpg")):
             if p.name not in deleted:
                 pool.append(p)

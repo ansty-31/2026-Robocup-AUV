@@ -227,7 +227,10 @@ def test_converges_with_one_turn(imag_sign):
                         turn_kwargs={"imag_sign": float(imag_sign)})
     states, logs, _now = _run_hd(al, w, frames=1200, cfg_over=dict(tol_deg=8.0))
     assert al.state == DONE, "应收敛，实际 %s（logs=%s）" % (al.state, logs[-3:])
-    assert al.iters == 1, "一次转向应够（实际 %d 次）" % al.iters
+    # ★ 2026-09-26：改成**逐步收敛**（默认每步 ≤15°）⇒ 20° 的目标要 2 步；只要求"收敛"不再要求"一步到位"
+    assert al.iters >= 1, "至少转一次（实际 %d 次）" % al.iters
+    assert al.last_target_deg <= float(hdg_cfg()["max_step_deg"]) + 1e-6, \
+        "每步目标不得超过 max_step_deg（实际 %.1f°）" % al.last_target_deg
     assert al.last_dir == "右转", "psi>0 应右转，实际 %s" % al.last_dir
     assert abs(w.psi) <= 8.0 + 1e-6, "转完残余 psi=%.1f° 应 ≤ 阈值" % w.psi
     # 转向命令是正（右转）且不超过限幅
@@ -278,24 +281,35 @@ def test_gives_up_after_max_iters_and_continues():
         "转向次数应正好等于 max_iters=%d，实际 %d" % (al.cfg["max_iters"], al.iters)
     assert any("带残余航向继续走" in s for s in logs)
 
-def test_no_cap_by_default_and_cap_when_configured():
-    """**单次转角不设限是默认**（用户定：测多少就一次转多少）；只有显式配 >0 才限幅。"""
-    # **出厂配置必须是「不限制」**（用户定）：只测代码默认不够，配置被改回去也要报红
+def test_step_cap_is_10_by_default_and_zero_means_unlimited():
+    """**逐步收敛是新默认**：出厂 cfg 每次只转 10°（转完重测再转下一档）。
+
+    2026-09-26 晚改：09-18 定的是"不设限"（测多少一次转多少），但真机实测 yaw=0.45 下转速
+    **86~106°/s**：命令 52.6° 却总共转了 ≈126°（驱动 65° + 惯性 61°），门被甩出画面。
+    现在 `max_step_deg=15` 恢复"逐步收敛"；显式配 0 仍可回到不设限的旧行为。
+    """
     from base.settings import comm as _C
-    assert float(_C.gate.hdg.max_step_deg) == 0.0, \
-        "出厂 cfg 的 gate.hdg.max_step_deg 应为 0（=不限制）"
-    # 默认（配置里 max_step_deg=0）→ 一帧就按测得的 60° 转，不分次
+    assert float(_C.gate.hdg.max_step_deg) == 10.0, \
+        "出厂 cfg 的 gate.hdg.max_step_deg 应为 10（逐步收敛）"
+    assert int(_C.gate.hdg.max_iters) >= 5, "步长 15° 时迭代上限要够（≥5）"
+    # max_step_deg=0（显式）→ 回到"不设限"：一帧就按测得的 60° 转
     w = _World(psi0=60.0, stuck=True)
     al = HeadingAligner(cfg=dict(hdg_cfg(), max_step_deg=0.0), log=lambda *a: None)
     _run_hd(al, w, frames=200)
     assert al.last_target_deg == pytest.approx(60.0), \
-        "默认不设限：首次目标应等于测得的 60°，实际 %.1f°" % al.last_target_deg
-    # 显式配成 25° → 恢复限幅（安全阀还在）
+        "max_step_deg=0 = 不设限：首次目标应等于测得的 60°，实际 %.1f°" % al.last_target_deg
+    # 显式配成 25° → 每步限到 25°
     w2 = _World(psi0=60.0, stuck=True)
     al2 = HeadingAligner(cfg=dict(hdg_cfg(), max_step_deg=25.0), log=lambda *a: None)
     _run_hd(al2, w2, frames=200)
     assert al2.last_target_deg == pytest.approx(25.0), \
         "配了 max_step_deg=25 应限幅到 25°，实际 %.1f°" % al2.last_target_deg
+    # 默认（cfg = 15）→ 每步 15°
+    w3 = _World(psi0=60.0, stuck=True)
+    al3 = HeadingAligner(log=lambda *a: None)
+    _run_hd(al3, w3, frames=200)
+    assert al3.last_target_deg == pytest.approx(10.0), \
+        "默认应逐步转（10°），实际 %.1f°" % al3.last_target_deg
 
 def test_settle_waits_until_rotation_stops():
     """静止窗：遥测 yaw 还在变时**不许**进入测量（转完还没停稳就测会得到坏角度）。"""

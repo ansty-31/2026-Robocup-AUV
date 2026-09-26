@@ -67,7 +67,7 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
 
-    raw_root = PROJECT_ROOT / "data/mapped/raw"
+    raw_root = PROJECT_ROOT / "data/frames/mapped_anchors"
     rng = np.random.default_rng(a.seed)
     frames = []
     for d in sorted(p for p in raw_root.iterdir() if p.is_dir()):

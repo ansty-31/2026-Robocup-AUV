@@ -34,11 +34,14 @@ def board_camera():
                                cy=float(front.height) / 2.0)
 
 
-def build_gate_backend():
+def build_gate_backend(conf=None, vis_thr=None):
     """返回 gate 检测后端或 None。
 
     mode=mock → MockGateBackend（无硬件闭环调试）
     其它     → 真实 keypoint 后端（需 vision.model.task_models.gate 且权重存在）
+
+    conf/vis_thr：显式覆盖（预览工具用，如 `--conf`）；None = 走 cfg
+    （`vision.gate.det.conf` / `vision.gate.keypoint.*`）。
     """
     if S.vision.model.mode == "mock":
         from gate.mock import MockGateBackend
@@ -57,4 +60,6 @@ def build_gate_backend():
         path=path,
         labels=list(task_cfg.get("labels", ["gate"])),
         kpt_order=list(task_cfg.get("kpt_order", ["TL", "TR", "BR", "BL"])),
-        camera=board_camera())
+        camera=board_camera(),
+        vis_thr=vis_thr,
+        det_conf=conf)

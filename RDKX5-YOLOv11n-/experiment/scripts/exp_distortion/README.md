@@ -68,7 +68,7 @@ S ∘ undistort(K, newK720)  ==  undistort(S·K, S·newK720) ∘ S      S = diag
 | 可逆的原始像素半径上限 | **≈ 520 px** |
 | 画面四角到主点的半径 | **753 px** |
 | B 组画面里"存在去畸变解"的像素占比 | **63.5 %** |
-| 棋盘观测到的归一化半径（`data/AUV_1/board`，1496 角点） | p50 0.245 / p95 0.451 / **max 0.636** |
+| 棋盘观测到的归一化半径（`data/calib/AUV_1_board`，1496 角点） | p50 0.245 / p95 0.451 / **max 0.636** |
 
 两件事同时成立：
 
@@ -136,7 +136,7 @@ S ∘ undistort(K, newK720)  ==  undistort(S·K, S·newK720) ∘ S      S = diag
 ### 2.2 当前 pose 模型
 
 `weights/yolo11n-pose.pt`（2026-09-17）是在**去畸变域**的 AUV_4 数据集
-（`data/AUV_4/PNP.kpt4.yolov8`，1 类 `gate`、4 点、顺序 `TL,TR,BR,BL`）上训的，
+（`data/datasets/AUV_4_PNP.kpt4.yolov8`，1 类 `gate`、4 点、顺序 `TL,TR,BR,BL`）上训的，
 也就是 **A 域**。所以：
 
 - "检查当前模型能否兼容三种情况" = 直接拿它跑 A/B/C 三组，比较角点几何一致性，
@@ -153,10 +153,10 @@ S ∘ undistort(K, newK720)  ==  undistort(S·K, S·newK720) ∘ S      S = diag
 AUV_1/2/3 的原始帧已按 ~1fps 切好（`--step 25`）：
 
 ```
-data/AUV_1/rec_front_frames/                     709 张
-data/AUV_2/auv_20260910_172208_frames/           995 张
-data/AUV_3/auv_20260911_201754_frames/           508 张
-data/AUV_4/auv_4_frames/                       10118 张（全量）
+data/frames/AUV_1_rec_front_frames/                     709 张
+data/frames/AUV_2_auv_20260910_172208_frames/           995 张
+data/frames/AUV_3_auv_20260911_201754_frames/           508 张
+data/frames/AUV_4_auv_4_frames/                       10118 张（全量）
 ```
 
 > 注意 AUV_2/3 是裸 mjpeg 且**没有 `.timestamps`**，所以只能用 `--step`，
@@ -167,12 +167,18 @@ data/AUV_4/auv_4_frames/                       10118 张（全量）
 ```bash
 PY=/home/ansty/anaconda3/envs/yolov8/bin/python
 $PY experiment/scripts/exp_distortion/make_contact_sheet.py \
-    data/AUV_2/auv_20260910_172208_frames data/AUV_3/auv_20260911_201754_frames \
+    data/frames/AUV_2_auv_20260910_172208_frames data/frames/AUV_3_auv_20260911_201754_frames \
     --out experiment/runs/exp_distortion/sheets/pick.jpg --tile 200 --cols 8 --per-sheet 96
 ```
 
 产物旁边有 `.csv`（格子 → 文件名）。把挑中的帧**复制**到
 `data/exp_distortion/picked/<下水名>/`（一个目录一次下水，目录名会变成输出文件前缀）。
+
+> ⚠️ **路径迁移说明（2026-09 目录归整）**：本文件 §3、§6 里的 `data/exp_distortion/...`
+> （`data/exp_distortion/picked/...`、`data/exp_distortion/processed`、`data/exp_distortion/labels_*`）
+> **均已不存在** —— 它们是这次早期畸变实验的中间产物，2026-09-24 已清理
+> （`cleanup_record/CLEANUP_2026-09-24.md`；`experiment/data/exp_distortion/` 亦不存在）。
+> 下文保留原命令以便复算，**重跑会重新生成这些目录**；现状映射见 `experiment/README.md` 的迁移表。
 
 挑图口径：门框四角都在画面内；**不同画面位置**（中心/偏左/偏右/偏上/偏下）与
 不同距离都留几张 —— 畸变误差是径向的，只有偏心样本才测得出来。
@@ -225,7 +231,7 @@ $PY experiment/scripts/exp_distortion/transform_pose_labels.py \
 > 想三套各自独立人工标注也行（测的是"人眼在哪种几何下标得更一致"），
 > 但两种口径别混着用，报告里要写清是哪种。
 
-**这套换算已经验证过**（用现有 `data/AUV_4/PNP.kpt4.yolov8` 的 A 域标注，
+**这套换算已经验证过**（用现有 `data/datasets/AUV_4_PNP.kpt4.yolov8` 的 A 域标注，
 挑出与 A 组图逐像素相同的帧）：
 
 - A↔B 往返 0.014 px；A 域 vs C 域 0.016 px；
@@ -301,7 +307,7 @@ $PY experiment/scripts/exp_distortion/compare_kpt_spacing.py \
    1.09，偏心越远越大）。用 `e_opp`/`r_tb`/`r_lr` 这类尺度无关量。
 6. **AUV_2/3 的裸 mjpeg 没有 `.timestamps`**，`extract_frames.py --every-seconds`
    会直接失败，只能用 `--step`。
-7. **现有 `data/AUV_4/PNP.kpt4.yolov8` 的帧号不能可靠回推 `auv_4_frames` 的帧号**：
+7. **现有 `data/datasets/AUV_4_PNP.kpt4.yolov8` 的帧号不能可靠回推 `auv_4_frames` 的帧号**：
    抽查 12 帧里 7 帧与 A 组图逐像素一致、5 帧与 A/B/C 都不匹配（应另有来源）。
    拿这个数据集做验证时，先确认图能对上再用。
 8. **别把 `(0,0)` 当坐标**：YOLO 对没把握的关键点输出 `(0,0)`，
@@ -316,10 +322,11 @@ $PY experiment/scripts/exp_distortion/compare_kpt_spacing.py \
 
 ## 6. 本次实跑记录（2026-09-22，32 张挑选帧）
 
-输入 `experiment/runs/exp_distortion/data_raw/`（32 张 1280×720，全部与原始帧**逐字节相同**，
+输入 `experiment/runs/exp_distortion/data_raw/`（⚠️ 该路径已不存在，见本文件 §3 的迁移说明）（32 张 1280×720，全部与原始帧**逐字节相同**，
 来源：AUV_4 18 / AUV_3 5 / AUV_2 5 / AUV_1 4，逐张 md5 溯源见同目录
 `_provenance.csv`）→ 输出 `experiment/runs/exp_distortion/processed/{A_undistort_first,
 B_no_undistort,C_undistort_last}/`（各 32 张，三组同名）。
+（⚠️ 上述 `data_raw/` 与 `processed/` 两个目录均已不存在，见本文件 §3 的迁移说明。）
 
 用 `weights/yolo11n-pose.pt`（`--device 0`）跑四组的**初步**结果
 （`experiment/runs/exp_distortion/eval_model/`，`--restrict-mappable --kpt-conf 0.5`）：

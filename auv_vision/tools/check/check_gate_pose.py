@@ -33,13 +33,16 @@ except ValueError:
 cam = board_camera()
 obj3 = object_points()
 V = S.vision.gate
-# 兜底值 == 当前 cfg（别在这里抄旧值：0.5/8.0 是改配置前的历史字面量）
-conf_thr = float(S.get("vision.gate.keypoint.conf_thr", 0.7))
+# 兜底值 == 当前 cfg（别在这里抄旧值：0.5/0.7/0.9 都是改配置前的历史字面量）
+conf_thr = float(S.get("vision.gate.keypoint.conf_thr", 0.8))
 pnp = V.get("pnp", {}) or {}
 reproj_thr = float(pnp.get("reproj_px", 20.0))
 zb = (float(pnp.get("z_min", 0.2)), float(pnp.get("z_max", 15.0)))
 
-backend = build_gate_backend()                 # 板端 cfg 的 vis_thr(0.5) 已能看到原始置信度
+# 诊断工具要**看见全部**角点：显式 vis_thr=0.0 绕开解码期硬门限（cfg 现为 0.5），
+# 否则"低于 0.5 的角点"根本不会出现在这张表里，就看不出"位姿为什么被拒"。
+# ⚠️ 后处理（去重/几何）仍按 cfg 生效 —— 这里打印的就是**任务会看到的那批实例**。
+backend = build_gate_backend(vis_thr=0.0)
 if backend is None:
     print("后端不可用")
     sys.exit(3)

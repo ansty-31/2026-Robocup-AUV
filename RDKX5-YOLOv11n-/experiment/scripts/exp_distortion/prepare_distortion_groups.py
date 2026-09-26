@@ -139,7 +139,7 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("inputs", nargs="+", help="挑好的原始 720p 帧目录（可多个，按目录名分组）")
     ap.add_argument("--out-root", type=Path,
-                    default=PROJECT_ROOT / "data" / "exp_distortion" / "processed",
+                    default=PROJECT_ROOT / "experiment" / "data" / "exp_distortion" / "processed",
                     help="输出根目录（每组一个子目录）")
     ap.add_argument("--config", type=Path,
                     default=PROJECT_ROOT / "configs" / "vision.yaml",

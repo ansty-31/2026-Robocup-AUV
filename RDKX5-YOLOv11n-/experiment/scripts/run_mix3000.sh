@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 PY=/home/ansty/anaconda3/envs/yolov8/bin/python
-OUT=data/AUV_5/selected_3000_Dwb
+OUT=data/derived/AUV_5_selected_3000_Dwb
 LOCK=experiment/logs/.mix3000.lock
 
 exec 9>"$LOCK"

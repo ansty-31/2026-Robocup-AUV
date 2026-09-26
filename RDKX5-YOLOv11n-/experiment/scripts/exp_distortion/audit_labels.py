@@ -18,7 +18,7 @@
     python experiment/scripts/exp_distortion/audit_labels.py --dataset experiment/data/pose_B \
         --domain B --sheet experiment/runs/domain/label_audit_sheet.jpg
     # AUV_5 评估集用的是 eval split
-    python experiment/scripts/exp_distortion/audit_labels.py --dataset runs/auv5_eval/pose_B \
+    python experiment/scripts/exp_distortion/audit_labels.py --dataset runs/auv5/eval/pose_B \
         --domain B --splits eval
 """
 from __future__ import annotations

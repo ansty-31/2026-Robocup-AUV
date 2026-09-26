@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-"""
-准备PTQ量化的校准数据集
-从图片目录中提取代表性图片，转换为640x640的RGB float32格式（.rgb文件）
+"""准备 PTQ 量化的校准集：从图片目录均匀抽样，转成 640×640 RGB float32 的 `.rgb`。
 
 用法：
-    # 用任意代表性图片目录（如本项目切出的帧集 AUV_data_1，比 COCO 更贴近场景）
-    python scripts/3_export/prepare_calibration.py --coco-path data/AUV_1/AUV_data_1
+    python scripts/3_export/prepare_calibration.py --coco-path <代表性图片目录>
+    # 例：data/datasets/AUV_1_AUV.yolov11（比 COCO 更贴近场景）或 /path/to/coco/val2017
 
-    # 或使用 COCO val2017
-    python scripts/3_export/prepare_calibration.py --coco-path /path/to/coco/val2017
+约定：letterbox 保持宽高比、补 114 灰边（与 YOLO 训练预处理一致）；输出目录默认
+<项目根>/calibration_data，detect / pose 用各自的 --output-dir，别混用。
 """
 
 import argparse
@@ -68,15 +66,14 @@ def prepare_calibration_data(image_dir, output_dir, target_size=640,
         if (i + 1) % 10 == 0:
             print(f"  进度: {i + 1}/{len(image_files)}")
 
-    print(f"\n✅ 校准数据准备完成")
-    print(f"   输出目录: {output_dir}")
+    print(f"\n✅ 校准数据准备完成 → {output_dir}")
     print(f"   文件数量: {len(image_files)}")
     print(f"   文件格式: RGB float32, shape=(3, {target_size}, {target_size})")
     return True
 
 
 def main():
-    ap = argparse.ArgumentParser(description='准备PTQ量化校准数据集')
+    ap = argparse.ArgumentParser(description='准备 PTQ 量化校准集（RGB float32 CHW .rgb）')
     ap.add_argument('--coco-path', type=str, required=True,
                     help='代表性图片目录（含 *.jpg/*.png），如 COCO val2017 或本项目帧集')
     ap.add_argument('--output-dir', type=str, default=str(PROJECT_ROOT / 'calibration_data'))

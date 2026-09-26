@@ -436,7 +436,7 @@ def main():
         print(f"\n→ {shown}")
     (PROJECT_ROOT / "experiment/runs/domain").mkdir(parents=True, exist_ok=True)
     stem = Path(a.out).stem if a.out else "eval"
-    json.dump(detail, open(PROJECT_ROOT / f"experiment/runs/domain/eval_detail_{stem}.json", "w"),
+    json.dump(detail, open(PROJECT_ROOT / f"experiment/runs/domain/tables/eval_detail_{stem}.json", "w"),
               indent=1)
 
 

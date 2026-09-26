@@ -181,17 +181,27 @@ timeout 60 "$SSH" "$(cat "$TMPD/rcmd")" </dev/null 2>/dev/null | grep -E '^[0-9a
 declare -A RM=()
 while read -r m p; do RM["$p"]="$m"; done < "$TMPD/remote"
 
-n_same=0; n_new=0; n_diff=0; n_miss_local=0
+n_same=0; n_new=0; n_diff=0; n_miss_local=0; n_skip=0
 : > "$CHANGED"
+# ---- 「本地/板端故意分叉」的跳过表（**当前为空**，2026-09-26 用户定"全部以本地为准"）----
+#   历史教训：这条规则原先只写在文档里（"cfg 不要整份推板端"），每次部署都要人工记着排除；
+#   漏一次就把现场值冲掉 —— `depth_guard.min_depth_m=0.55` 被冲掉过两次、
+#   板端 `SIM_MODE=False` 也差点被本地 True 覆盖。要**再**制造分叉时，把路径写进下面这个数组。
+#   曾经的两条（现已统一为本地值）：
+#     base/settings.py    # SIM_MODE：本地 True / 板端 False（真驱动）
+#     cfg/comm.yaml       # 板端台架分叉：pass_target=2 / timeout=500000 / wait_fresh_ms=1000 / sweep_s=3.0
+SKIP_FILES=()
+is_skip() { local x="$1" s; for s in "${SKIP_FILES[@]}"; do [ "$s" = "$x" ] && return 0; done; return 1; }
 while IFS=$'\t' read -r _m f _v; do
   [ -f "$LOCAL/$f" ] || { n_miss_local=$((n_miss_local+1)); continue; }
   lm=$(md5sum "$LOCAL/$f" | cut -d' ' -f1)
   r="${RM[$f]:-}"
   if [ "$r" = "$lm" ]; then n_same=$((n_same+1)); continue; fi
+  if is_skip "$f"; then n_skip=$((n_skip+1)); echo "[skip] $f（本地≠板端是**故意的**，不自动上传）"; continue; fi
   if [ -z "$r" ]; then n_new=$((n_new+1)); echo "[new ] $f"; else n_diff=$((n_diff+1)); echo "[diff] $f"; fi
   echo "$f" >> "$CHANGED"
 done < "$ALL"
-step "差异：上传 $(wc -l < "$CHANGED") 个（新 $n_new / 改 $n_diff）· 已一致 $n_same · 本地缺 $n_miss_local"
+step "差异：上传 $(wc -l < "$CHANGED") 个（新 $n_new / 改 $n_diff）· 已一致 $n_same · 本地缺 $n_miss_local · 故意跳过 $n_skip"
 
 if [ "$DRY" = "1" ]; then
   step "--dry-run：不动板端。将删除："
@@ -240,7 +250,7 @@ step "废弃文件处理完成"
 # ---- 5) 板端自检 ----
 {
   echo "cd $BOARD"
-  echo "python3 -m py_compile main.py preview_detect.py base/settings.py base/camera.py base/uart.py base/telemetry.py common/detector.py common/PID.py common/preprocess.py manual/recorder.py manual/stream.py manual/udp_server.py task1_2/ball.py gate/__init__.py gate/gate_task.py gate/gate_detector.py gate/gate_decode.py gate/gate_frontend.py gate/geometry.py gate/kpt_memory.py gate/mock.py && echo COMPILE-OK"
+  echo "python3 -m py_compile main.py preview_detect.py base/settings.py base/camera.py base/uart.py base/telemetry.py common/detector.py common/PID.py common/preprocess.py common/turn_deg.py manual/recorder.py manual/stream.py manual/udp_server.py task1_2/ball.py gate/__init__.py gate/gate_task.py gate/gate_postproc.py gate/gate_detector.py gate/gate_decode.py gate/gate_frontend.py gate/geometry.py gate/kpt_memory.py gate/mock.py && echo COMPILE-OK"
   [ "$NO_TEST" = "1" ] || echo "echo '--- 全量 pytest ---'; timeout 600 python3 -m pytest tests/ -q > /tmp/auv_pytest.log 2>&1; tail -3 /tmp/auv_pytest.log; if grep -qE '[0-9]+ passed' /tmp/auv_pytest.log && ! grep -qE '[0-9]+ (failed|error)' /tmp/auv_pytest.log; then echo PYTEST-OK; else echo PYTEST-FAIL; fi"
   cat <<'PYEOF'
 echo '--- 配置快照 ---'

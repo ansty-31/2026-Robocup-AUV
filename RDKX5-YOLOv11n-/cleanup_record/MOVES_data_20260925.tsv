@@ -1,0 +1,31 @@
+# NOTE: 本文件记录的是**当时**那次搬移的 from→to。后续目录若又被移动（如 2026-09-26 的二级分类），
+#       `to` 列可能已不是当前位置 —— 以最新那份 MOVES_* 与本目录的同日记录为准。
+#       逐项现存位置可用 `test -e <to>` 自查；缺失的说明已被再次移动。
+from	to	kind	files	bytes
+data/AUV_1/rec_front.mp4	data/raw/AUV_1_rec_front.mp4	file	1	1177336613
+data/AUV_2/auv_20260910_172208.mjpeg	data/raw/AUV_2_auv_20260910_172208.mjpeg	file	1	4813685409
+data/AUV_3/auv_20260911_201754.mjpeg	data/raw/AUV_3_auv_20260911_201754.mjpeg	file	1	2456021243
+data/AUV_4/auv_4.mjpeg	data/raw/AUV_4_auv_4.mjpeg	file	1	2059177738
+data/AUV_4/auv_4.mjpeg.timestamps	data/raw/AUV_4_auv_4.mjpeg.timestamps	file	1	287243
+data/AUV_1/rec_front_frames	data/frames/AUV_1_rec_front_frames	dir	709	125480791
+data/AUV_2/auv_20260910_172208_frames	data/frames/AUV_2_auv_20260910_172208_frames	dir	995	192621026
+data/AUV_3/auv_20260911_201754_frames	data/frames/AUV_3_auv_20260911_201754_frames	dir	508	98282260
+data/AUV_4/auv_4_frames	data/frames/AUV_4_auv_4_frames	dir	10118	2059430282
+data/AUV_5/raw-data	data/frames/AUV_5_gate_calib	dir	6576	1523076319
+data/AUV_1/dataset/AUV.yolov11	data/datasets/AUV_1_AUV.yolov11	dir	4160	222659313
+data/AUV_1/dataset/AUV.yolov11.zip	data/datasets/AUV_1_AUV.yolov11.zip	file	1	221654684
+data/AUV_1/dataset/AUV_data.zip	data/datasets/AUV_1_AUV_data.zip	file	1	472077807
+data/AUV_2/AUV.yolov11	data/datasets/AUV_2_AUV.yolov11	dir	804	47036614
+data/AUV_3/PNP.v1i.yolov8	data/datasets/AUV_3_PNP.v1i.yolov8	dir	1608	31501319
+data/AUV_4/PNP.kpt4.yolov8	data/datasets/AUV_4_PNP.kpt4.yolov8	dir	2614	158909555
+data/AUV_5/gate-pose.yolov8	data/datasets/AUV_5_gate-pose.yolov8	dir	1695	95479275
+data/AUV_5/gate-pose.yolov8_backup_20260924_132624	data/datasets/AUV_5_gate-pose.yolov8_backup_20260924_132624	dir	1689	95056137
+data/AUV_2/selected_2000	data/derived/AUV_2_selected_2000	dir	1661	198425802
+data/AUV_2/select_report.csv	data/derived/AUV_2_select_report.csv	file	1	1006513
+data/AUV_3/selected_2000	data/derived/AUV_3_selected_2000	dir	2000	258455276
+data/AUV_4/selected_3000	data/derived/AUV_4_selected_3000	dir	3353	459717500
+data/AUV_5/selected_3000_Dwb	data/derived/AUV_5_selected_3000_Dwb	dir	2579	288133519
+data/AUV_5/upload_roboflow	data/derived/AUV_5_upload_roboflow	dir	1592	175804255
+data/AUV_5/label_candidates_Dwb	data/derived/AUV_5_label_candidates_Dwb	dir	152	19124868
+data/AUV_1/board	data/calib/AUV_1_board	dir	2298	447601805
+data/AUV_1/calibration_qc_views	data/calib/AUV_1_qc_views	dir	34	7438949

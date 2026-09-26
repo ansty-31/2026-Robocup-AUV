@@ -1,33 +1,14 @@
 #!/usr/bin/env python3
-"""
-标注图 → 原始帧 的溯源匹配（Route B：把已有标注重投影到新标定域）
+"""标注图 → 原始帧 的溯源匹配（内容最近邻）
 
-为什么需要它
-------------
-现有 2100 张标好关键点的图（data/AUV_4/PNP.kpt4.yolov8 1304 张 +
-data/AUV_3/PNP.v1i.yolov8 801 张）是**在旧标定域（AUV_1 水下 fx≈782.5，
-记为 A-old）里做的人工标注**。换标定（→ C, AUV_5 fx≈1207.6）或换去畸变策略
-（B 域 = 完全不去畸变）时必须重新生成训练图，否则模型训练域与板端推理域
-不一致。重新生成图需要两个东西：
-
-    1) 该标注图对应的【原始 1280x720 帧】(raw)  ← 本脚本负责
-    2) 该标注图的 4 个角点在图上的像素坐标（labels/*.txt，YOLO 归一化）
-
-有了 (1)(2) 就能：raw --(新链路)--> 新域图，同时把角点坐标经 A-old 链路
-的逆变换映回 raw 像素，再投影到新域图。**不需要重新标注。**
-
-方法
-----
-不能拿【原始帧】直接和【标注图】比像素：标注图已经过
-remap(A-old) → resize(640) → enhance，域差异（去畸变形变 + 白平衡/CLAHE/gamma）
-远大于帧间差异，最近邻会稳定地指向错误帧。所以索引必须建立在**与标注图相同的
-处理域**上（默认 A-old 链路），再用缩略图 L1 距离找最近邻。
+索引必须建在**与标注图相同的处理域**上（默认 A-old 链路：remap → resize(640) → enhance），
+否则域差异（去畸变形变 + 白平衡/CLAHE/gamma）会盖过帧间差异，最近邻稳定指向错误帧。
 
 判定：
     stage1  48x48 灰度缩略图全池最近邻（top-5）
     stage2  对 top-5 用 128x128 复核，取最优
     接受    128x128 平均绝对差 < --max-mad（默认 2.0/255）
-    歧义度  d2/d1：真命中时 d1 极小（≈0.03），d2/d1 会很大
+    CSV 的 amb = d2/d1 歧义度，一并写出
 
 用法：
     # 建索引（约 2~4 分钟，结果缓存到 runs/prov/）
@@ -35,7 +16,7 @@ remap(A-old) → resize(640) → enhance，域差异（去畸变形变 + 白平�
     # 扫描所有标注集
     python scripts/1_prepare/provenance/provenance_match.py scan
     # 只扫一个数据集
-    python scripts/1_prepare/provenance/provenance_match.py scan --dataset data/AUV_4/PNP.kpt4.yolov8
+    python scripts/1_prepare/provenance/provenance_match.py scan --dataset data/datasets/AUV_4_PNP.kpt4.yolov8
 
 输出：runs/prov/index_<domain>.npz、runs/prov/provenance_<dataset>.csv
 """
@@ -43,7 +24,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import os
 import re
 import sys
 import time
@@ -110,16 +90,16 @@ def _thumb(path: str):
 
 def collect_pool_paths() -> dict[str, list[str]]:
     pools = {
-        "AUV_1": "data/AUV_1/rec_front_frames",
-        "AUV_2": "data/AUV_2/auv_20260910_172208_frames",
-        "AUV_3": "data/AUV_3/auv_20260911_201754_frames",
-        "AUV_4": "data/AUV_4/auv_4_frames",
+        "AUV_1": "data/frames/AUV_1_rec_front_frames",
+        "AUV_2": "data/frames/AUV_2_auv_20260910_172208_frames",
+        "AUV_3": "data/frames/AUV_3_auv_20260911_201754_frames",
+        "AUV_4": "data/frames/AUV_4_auv_4_frames",
     }
     out = {}
     for tag, d in pools.items():
         fs = sorted(Path(d).glob("*.jpg"))
         out[tag] = [str(p) for p in fs]
-    out["AUV_5"] = sorted(str(p) for p in Path("data/AUV_5/raw-data").glob("gate-*/*.jpg"))
+    out["AUV_5"] = sorted(str(p) for p in Path("data/frames/AUV_5_gate_calib").glob("gate-*/*.jpg"))
     return out
 
 
@@ -164,13 +144,9 @@ def cmd_scan(a) -> None:
     ipath, itag = z["paths"], z["tags"]
     print(f"索引 {len(ipath)} 帧，域={a.domain}")
 
-    def query_thumb(p):
-        r = _thumb(p)
-        return r
-
     _init(a.calibration, a.domain, query=True)
     outdir = PROJECT_ROOT / "runs" / "prov"
-    datasets = a.dataset or ["data/AUV_4/PNP.kpt4.yolov8", "data/AUV_3/PNP.v1i.yolov8"]
+    datasets = a.dataset or ["data/datasets/AUV_4_PNP.kpt4.yolov8", "data/datasets/AUV_3_PNP.v1i.yolov8"]
     for ds in datasets:
         imgs = sorted(Path(ds).glob("*/images/*.jpg"))
         if not imgs:
@@ -179,7 +155,7 @@ def cmd_scan(a) -> None:
         print(f"\n== {ds}  {len(imgs)} 张 ==")
         rows, t0, nacc = [], time.time(), 0
         for n, p in enumerate(imgs):
-            r = query_thumb(str(p))
+            r = _thumb(str(p))
             if r is None:
                 rows.append(dict(img=p.name, accept=0, note="unreadable"))
                 continue
@@ -209,23 +185,12 @@ def cmd_scan(a) -> None:
             w.writeheader()
             w.writerows(rows)
         print(f"命中 {nacc}/{len(imgs)} = {100*nacc/max(len(imgs),1):.1f}%  → {out.relative_to(PROJECT_ROOT)}")
-        offs = {}
-        for r in rows:
-            if r.get("accept"):
-                offs[r["offset"]] = offs.get(r["offset"], 0) + 1
-        print("  命中帧号偏移分布 top8:", sorted(offs.items(), key=lambda kv: -kv[1])[:8])
-        pools = {}
-        for r in rows:
-            if r.get("accept"):
-                pools[r["pool"]] = pools.get(r["pool"], 0) + 1
-        print("  命中来源池:", pools)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    common = dict()
     for name in ("index", "scan"):
         s = sub.add_parser(name)
         s.add_argument("--calibration", default=DEFAULT_CALIB, help="索引所用标定（A-old）")

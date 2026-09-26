@@ -1,0 +1,17 @@
+from	to	kind	files	bytes	why
+data/derived/AUV_4_selected_3000	_archive/unneeded_20260926/data/derived/AUV_4_selected_3000	dir	3353	459717500	错域不可用：实测与池子 MAD≈12（另一个预处理域），文档明说不能用；AUV_4 素材已从 data/frames/AUV_4_auv_4_frames 按 D+wb 正确重渲染
+data/derived/AUV_5_upload_roboflow/stage1_needlabel	_archive/unneeded_20260926/data/derived/AUV_5_upload_roboflow/stage1_needlabel	dir	577	69891764	上传批次已消化：577 张全部出现在 gate-w_clear 导出里（池子名 577/577），阶段一训练用 data/datasets/AUV_5_stage1
+data/derived/AUV_5_upload_roboflow/stage1_fix111	_archive/unneeded_20260926/data/derived/AUV_5_upload_roboflow/stage1_fix111	dir	111	13519464	T5 范围被取代：全实例重判后 95/111 判为可用，纠正批次缩为 stage1_fix_wy 的 30 张；README_FIX111 已标「不要上传」
+output/preview/pool_other_water/annotated	_archive/unneeded_20260926/output/preview/pool_other_water/annotated	dir	1377	129058689	conf=0.25 时代旧渲染（其余水质池）；同目录的 per_image.csv 被 plan_retrain.py / train_strategy_evidence.py 读取，故只搬图不搬表
+output/preview/pool_other_water/grids	_archive/unneeded_20260926/output/preview/pool_other_water/grids	dir	44	26600163	同上（拼图）
+output/preview/auv5_pose/renders/annotated	_archive/unneeded_20260926/output/preview/auv5_pose/renders/annotated	dir	1200	132044995	conf=0.25 时代旧渲染，已被 renders/rejudge/（v_min/conf 定稿值）取代；predict_auv5.py 可重建
+output/preview/auv5_pose/renders/boardview	_archive/unneeded_20260926/output/preview/auv5_pose/renders/boardview	dir	282	31877339	口径作废：单实例画法（会藏门）+ 叠加层错位 46 px；其判定日志与分桶副本已在 judgment/archive/
+output/preview/auv5_pose/renders/false_accept	_archive/unneeded_20260926/output/preview/auv5_pose/renders/false_accept	dir	111	12551631	服务于已作废的 111 张批次（T5 现为 30 张）；make_false_accept_sheets.py 可重建
+output/preview/auv5_pose/tools/__pycache__	_archive/unneeded_20260926/output/preview/auv5_pose/tools/__pycache__	dir	8	96870	Python 编译缓存（仓库内其它 __pycache__ 一并处理）
+output/preview/auv5_pose/tables/worklist_local846.csv	_archive/unneeded_20260926/output/preview/auv5_pose/tables/worklist_local846.csv	file	1	121865	本地打标时代清单，工具已停用（现役走 Roboflow）
+output/preview/auv5_pose/tables/worklist_stage1.csv	_archive/unneeded_20260926/output/preview/auv5_pose/tables/worklist_stage1.csv	file	1	82160	分期待标清单：docs 已判作废（格子由模型推断），且 plan_retrain.py 可重新生成
+output/preview/auv5_pose/tables/worklist_stage2.csv	_archive/unneeded_20260926/output/preview/auv5_pose/tables/worklist_stage2.csv	file	1	49650	同上
+output/preview/auv5_pose/tables/worklist_stage3.csv	_archive/unneeded_20260926/output/preview/auv5_pose/tables/worklist_stage3.csv	file	1	75422	同上
+scripts/2_train/__pycache__	_archive/unneeded_20260926/scripts/2_train/__pycache__	dir	0	50575	Python 编译缓存
+scripts/1_prepare/__pycache__	_archive/unneeded_20260926/scripts/1_prepare/__pycache__	dir	0	17412	Python 编译缓存
+scripts/1_prepare/pose/__pycache__	_archive/unneeded_20260926/scripts/1_prepare/pose/__pycache__	dir	0	20017	Python 编译缓存

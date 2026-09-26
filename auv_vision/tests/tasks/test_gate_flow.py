@@ -371,6 +371,7 @@ def test_gate_defaults_match_cfg():
     import gate.gate_task as gt
     from common.cfgnode import MOTION_DEFAULTS
     from gate.heading_align import _D_HDG
+    from gate.gate_postproc import _D_DET, _D_POST, _D_SELECT
 
     G, V = S.comm.gate, S.vision.gate
     pairs = [
@@ -387,6 +388,10 @@ def test_gate_defaults_match_cfg():
         ("comm.gate.hdg", _D_HDG, G.hdg),
         ("vision.gate.pnp", gt._D_PNP, V.pnp),
         ("vision.gate.geometry", gt._D_GEOM, V.geometry),
+        # 解码后处理（规范 doc/gate_pose_decode_spec.md §4；实现 gate/gate_postproc.py）
+        ("vision.gate.det", _D_DET, V.det),
+        ("vision.gate.postproc", _D_POST, V.postproc),
+        ("vision.gate.select", _D_SELECT, V.select),
     ]
     # cfg 里有、但代码**故意**不参与运算的键（每加一个都要写理由）
     only_doc = {
@@ -708,11 +713,15 @@ def test_heading_turn_is_not_interrupted_by_degraded_mode(monkeypatch):
     sticky = {"on": False}
 
     def fn():
-        # **一旦开始转向就持续降级**（sticky，之后不再恢复 full）—— 模拟真实的
-        #   「档位退化 + 位姿被拒」。⚠️ 若只做间歇降级，打不打补丁都能转完，用例守不住行为。
+        # **只在"正在转向"（yaw 指令非 0）的那些帧降级** —— 模拟真实的「转向中途档位退化 +
+        #   位姿被拒」。
+        #   ⚠️ 2026-09-26 改语义：以前是"一旦转过就永久 sticky 降级"，那在**逐步转向**
+        #   （max_step_deg=10）下必然收敛不了 —— 每步转完都要重测，永久没有 full 帧就永远
+        #   测不到新 psi（那是设计使然，不是"被打断"）。本用例只守"**转向本身不被打断**"，
+        #   所以降级窗口限定在转向期间；转完恢复 full，它才能迭代收敛。
         fr = task_holder["t"].uart.frames if task_holder["t"] is not None else []
-        if sticky["on"] or (fr and abs(fr[-1][3]) > 1e-9):
-            sticky["on"] = True
+        sticky["on"] = bool(fr) and abs(fr[-1][3]) > 1e-9
+        if sticky["on"]:
             phase["turning_seen"] += 1
             d = w.det()[0]
             return [Det("gate", 0.95, d.x, d.y, d.w, d.h,

@@ -6,7 +6,7 @@
 本脚本把一批原始帧缩成小图拼成网格（每格带帧名与清晰度），几千张一眼扫完：
 
     python experiment/scripts/exp_distortion/make_contact_sheet.py \
-        data/AUV_2/auv_20260910_172208_frames \
+        data/frames/AUV_2_auv_20260910_172208_frames \
         --out experiment/runs/exp_distortion/sheets/auv2.jpg \
         --tile 240 --cols 8 --per-sheet 200
 

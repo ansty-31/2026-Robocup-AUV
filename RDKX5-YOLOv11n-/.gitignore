@@ -46,6 +46,8 @@ yolo_env/
 calibration_data/
 calibration_data_detect/
 calibration_data_backup_*/
+# 2026-09-24 起量化校验用到的分区/子集目录（_300/_eval200/_gate240 等，都是 .rgb 硬链接）
+calibration_data_*/
 coco/
 datasets/
 

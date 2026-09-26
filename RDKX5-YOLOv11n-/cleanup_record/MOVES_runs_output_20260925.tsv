@@ -1,0 +1,16 @@
+# NOTE: 本文件记录的是**当时**那次搬移的 from→to。后续目录若又被移动（如 2026-09-26 的二级分类），
+#       `to` 列可能已不是当前位置 —— 以最新那份 MOVES_* 与本目录的同日记录为准。
+#       逐项现存位置可用 `test -e <to>` 自查；缺失的说明已被再次移动。
+from	to	kind	files	bytes
+runs/auv5/pose_fromcoco_844	runs/auv5/train/pose_fromcoco_844	dir	29	16595350
+runs/auv5/logs/train_fromcoco_844.log	runs/auv5/train/train_fromcoco_844.log	file	1	11294401
+runs/auv5/logs/prep_calib.log	runs/auv5/calib/prep_calib.log	file	1	516
+runs/calib_auv5/calib.log	runs/auv5/calib/calib.log	file	1	1021
+runs/calib_auv5/diag_auv1board.json	runs/auv5/calib/diag_auv1board.json	file	1	3225
+runs/calib_auv5/diag_new.json	runs/auv5/calib/diag_new.json	file	1	3229
+runs/calib_auv5/diag_old.json	runs/auv5/calib/diag_old.json	file	1	3225
+runs/calib_auv5/front_camera_good.yaml	runs/auv5/calib/front_camera_good.yaml	file	1	482
+runs/auv5_eval/eval	runs/auv5/eval/clearwater16	dir	32	4601652
+runs/auv5_eval/pose_D_wb	runs/auv5/eval/pose_D_wb	dir	34	1900144
+output/auv5_pose_preview	output/preview/auv5_pose	dir	2917	349888939
+output/pool_other_water_preview	output/preview/pool_other_water	dir	1425	155993136

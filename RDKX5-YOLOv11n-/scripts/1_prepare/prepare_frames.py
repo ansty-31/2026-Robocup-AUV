@@ -1,42 +1,23 @@
 #!/usr/bin/env python3
-"""
-图片集 → YOLO 训练图集（去畸变 + 640x640 + 画面补偿）
+"""图片集 → YOLO 训练图集（与板端推理同链路）：resize(640) → 画面补偿 → 去畸变 remap@640。
 
-输入为【已经切好/分好类的原始图片】（配合 scripts/1_prepare/extract_frames.py 切帧、
-人工分类后的目录），逐张复刻板端推理（板端 `common/preprocess.py` 的
-`ModelPreprocessor.process()`）的预处理链路，
-保证【进入 YOLO 训练的图片】与【进入 YOLO 推理的图片】像素级一致：
+链路逐行对齐板端 common/preprocess.py（顺序不可交换）：
+    1) 统一尺寸  cv2.resize((size, size), INTER_LINEAR)
+    2) 画面补偿  enhance(): 白平衡通道增益 → LAB-L CLAHE(clip>0 时) → gamma LUT
+    3) 去畸变    cv2.remap(640 域映射, INTER_LINEAR)
 
-    1) 去畸变      cv2.remap(标定yaml生成的 remap 映射, INTER_LINEAR)
-    2) 统一尺寸    cv2.resize((640, 640))          ← 先缩放
-    3) 画面补偿    enhance(): 白平衡通道增益 → LAB空间L通道 CLAHE → gamma LUT
+参数（gains/clahe/gamma/标定/尺寸）由 --config 从板端同一份 vision.yaml 读取（推荐），
+或用 --calibration + --wb-gains/--clahe/--gamma 显式给出；不给标定则跳过去畸变。
 
-⚠️ 2) 与 3) 的顺序不可交换（2026-09-11 板端优化）：板端已把 enhance 从
-「720p 上做」挪到「缩放到 640 之后做」（CLAHE 是分块局部算子，先缩放再补偿
-≠ 先补偿再缩放，像素结果不同），并把 CLAHE 对象 / gamma LUT 改为缓存复用。
-本脚本与之逐行对齐，否则训练图与推理图分布漂移。
+用法：
+    python scripts/1_prepare/prepare_frames.py data/frames/AUV_1_red_ball --config configs/vision.yaml
 
-参数（白平衡增益/CLAHE/gamma/标定文件）以板端 auv_vision 工程的 cfg/vision.yaml
-为唯一来源（镜像见 configs/vision.yaml）：image.undistort / white_balance_bgr /
-clahe_clip / gamma / camera.front.calibration / model.input_size；
-用 --config 直接读取即可，保证训练图与板端推理图逐参数一致。
-
-用法示例：
-    # 方式1：--config 读取板端同一份 vision.yaml（推荐，天然一致）
-    python scripts/1_prepare/prepare_frames.py data/AUV_1/red_ball --config configs/vision.yaml
-
-    # 方式2：显式给出与板端一致的参数
-    python scripts/1_prepare/prepare_frames.py data/AUV_1/red_ball data/AUV_1/blue_ball data/AUV_1/gate \
+    python scripts/1_prepare/prepare_frames.py data/frames/AUV_1_red_ball data/frames/AUV_1_gate \
         --calibration configs/front_camera.yaml \
         --wb-gains 1.15,1.0,0.9 --clahe 2.0 --gamma 1.0 \
-        --out-dir data/AUV_1/processed_640
+        --out-dir data/frames/AUV_1_processed_640
 
-    # 通配符（shell 展开成多个目录，按来源目录分组建子目录输出）
-    python scripts/1_prepare/prepare_frames.py data/AUV_1/frames/red_ball*
-
-输出: <out_dir>/<来源目录名>/frame_000001.jpg ...（每张 640x640）
-之后标注并组织为 YOLO 数据集（train/valid + data.yaml）即可开始训练：
-    python scripts/2_train/train_yolo11n.py --data data/<名字>/data.yaml ...
+输出：<out-dir>/<来源目录名>/frame_000001.jpg（每张 size×size，默认 640）。
 """
 
 from __future__ import annotations
@@ -45,7 +26,7 @@ import argparse
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]  # scripts/<stage>/x.py
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 import cv2
 import numpy as np
@@ -56,17 +37,13 @@ IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp")
 # ---------- 与板端 common/preprocess.py 完全一致的函数 ----------
 
 def calibration_maps_640(path: str, size: int = 640):
-    """640 域去畸变映射：dest(去畸变 size×size) ← src(畸变 size×size)
-
-    与板端 common/preprocess.py 的 calibration_maps_640 逐行同式，也与
+    """640 域去畸变映射：dest(去畸变 size×size) ← src(畸变 size×size)，与
     map_pose_dataset.py 的「D 域」同式：
 
         S = diag(size/RAW_W, size/RAW_H, 1)
         nk720 = getOptimalNewCameraMatrix(K, dist, (RAW_W,RAW_H), 0, (RAW_W,RAW_H))
         nk640 = S · nk720 ;  K640 = S · K
         initUndistortRectifyMap(K640, dist, None, nk640, (size,size))
-
-    几何上与「先 remap@输入分辨率 再缩放」等价（nk640 = S·nk720），但少一次整幅读写。
     """
     fs = cv2.FileStorage(path, cv2.FILE_STORAGE_READ)
     if not fs.isOpened():
@@ -85,7 +62,7 @@ def calibration_maps_640(path: str, size: int = 640):
 
 
 def calibration_maps(path: str, width: int, height: int):
-    """由标定 yaml 生成去畸变 remap 映射（按分辨率缓存，只算一次）"""
+    """由标定 yaml 生成 (width, height) 分辨率下的去畸变 remap 映射"""
     fs = cv2.FileStorage(path, cv2.FILE_STORAGE_READ)
     if not fs.isOpened():
         raise FileNotFoundError(f"camera calibration missing: {path}")
@@ -105,7 +82,7 @@ _GAMMA_CACHE: dict[float, np.ndarray] = {}
 
 
 def _clahe(clip: float):
-    """CLAHE 对象缓存（板端 _clahe 同款：原先是每帧 createCLAHE）"""
+    """CLAHE 对象缓存（与板端一致，避免每帧 createCLAHE）"""
     c = _CLAHE_CACHE.get(clip)
     if c is None:
         c = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8, 8))
@@ -114,7 +91,7 @@ def _clahe(clip: float):
 
 
 def _gamma_lut(gamma: float) -> np.ndarray:
-    """gamma LUT 缓存（板端 _gamma_lut 同款：原先每帧重建 256 项 LUT）"""
+    """gamma LUT 缓存（与板端一致，避免每帧重建 256 项 LUT）"""
     lut = _GAMMA_CACHE.get(gamma)
     if lut is None:
         lut = np.array([pow(i / 255.0, gamma) * 255 for i in range(256)],
@@ -125,8 +102,8 @@ def _gamma_lut(gamma: float) -> np.ndarray:
 
 def enhance(frame: np.ndarray, gains: list[float], clip: float,
             gamma: float) -> np.ndarray:
-    """画面补偿：白平衡通道增益 → (clip>0 时) LAB-L通道CLAHE → gamma LUT。
-    与板端 auv_vision/common/preprocess.py 的 enhance 逐行一致。"""
+    """画面补偿：白平衡通道增益 → (clip>0 时) LAB-L CLAHE → gamma LUT。
+    与板端 common/preprocess.py 的 enhance 逐行一致。"""
     f = np.clip(frame.astype(np.float32) * np.array(gains, np.float32),
                 0, 255).astype(np.uint8)
     if clip > 0:                              # 板端：clip=0 时不做 CLAHE
@@ -150,11 +127,9 @@ def parse_gains(text: str) -> list[float]:
 
 
 def load_board_config(config: Path):
-    """从板端同一份 vision.yaml 读取图像处理参数（板端参数唯一来源）。
-    兼容两种结构：
-      - auv_vision 工程 vision.yaml：image.undistort + camera.front.calibration
-      - 旧 mission.yaml 风格：image.white_balance_bgr + camera.front_calibration
-    """
+    """读板端 vision.yaml 的图像参数：image.undistort/white_balance_bgr/clahe_clip/
+    gamma + camera.front.calibration + model.input_size。
+    兼容旧 mission.yaml 风格（image.white_balance + camera.front_calibration）。"""
     try:
         import yaml
     except ImportError:
@@ -179,8 +154,8 @@ def load_board_config(config: Path):
 
 
 def localize_calibration(path: str | None, config: Path | None) -> str | None:
-    """板端 yaml 里的标定路径常是 /app/... 绝对路径，PC 端不存在时回退：
-    --config 同目录 或 项目 configs/ 下同名文件"""
+    """板端 yaml 里的标定路径常是 /app/... 绝对路径：本机不存在时回退到
+    --config 同目录 或 项目 configs/ 下的同名文件"""
     if not path:
         return None
     p = Path(path)
@@ -197,11 +172,9 @@ def localize_calibration(path: str | None, config: Path | None) -> str | None:
 
 
 def collect_image_sets(inputs: list[str]):
-    """
-    把输入整理为 [(组名, [图片路径...]), ...]：
-      - 目录  → 该目录下所有图片为一组（组名=目录名）
-      - 文件  → 同父目录的文件合并为一组（组名=父目录名）
-    """
+    """把输入整理为 [(组名, [图片路径...]), ...]：
+    目录 → 该目录下所有图片为一组（组名=目录名）；
+    文件 → 与其同父目录的文件合并为一组（组名=父目录名）。"""
     groups: dict[str, list[Path]] = {}
     for item in inputs:
         p = Path(item)
@@ -225,10 +198,10 @@ def collect_image_sets(inputs: list[str]):
 
 def prepare(groups, out_dir: Path, calibration: str | None,
             gains: list[float], clahe: float, gamma: float,
-            size: int, chain_order: str = "new") -> int:
+            size: int) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     total_saved = 0
-    maps_cache: dict[tuple[int, int], tuple] = {}
+    maps = None
 
     for group, files in groups:
         sub = out_dir / group
@@ -241,34 +214,18 @@ def prepare(groups, out_dir: Path, calibration: str | None,
                 continue
             h, w = raw.shape[:2]
 
-            # 链路顺序必须与板端 common/preprocess.py 当前实现一致，否则训练/推理分布漂移。
-            #   new（2026-09-23 起，D 域/P2）：resize(640) → enhance → remap@640
-            #   old（历史 P1）           ：remap@输入分辨率 → resize(640) → enhance
-            if chain_order == "new":
-                frame = raw
-                if (w, h) != (size, size):           # 1) 先统一 640x640
-                    frame = cv2.resize(frame, (size, size),
-                                       interpolation=cv2.INTER_LINEAR)
-                frame = enhance(frame, gains, clahe, gamma)      # 2) 640 上做补偿
-                if calibration:                      # 3) 再在 640 上去畸变
-                    if ("m640", size) not in maps_cache:
-                        maps_cache[("m640", size)] = calibration_maps_640(calibration, size)
-                        print(f"📐 生成 640 域去畸变映射 {size}x{size} <- {calibration}")
-                    m0, m1 = maps_cache[("m640", size)]
-                    frame = cv2.remap(frame, m0, m1, cv2.INTER_LINEAR)
-            else:
-                if calibration:                      # 1) 去畸变（按分辨率缓存映射）
-                    if (w, h) not in maps_cache:
-                        maps_cache[(w, h)] = calibration_maps(calibration, w, h)
-                        print(f"📐 生成去畸变映射 {w}x{h} <- {calibration}")
-                    m0, m1 = maps_cache[(w, h)]
-                    frame = cv2.remap(raw, m0, m1, cv2.INTER_LINEAR)
-                else:
-                    frame = raw
-                if (w, h) != (size, size):           # 2) 再统一 640x640
-                    frame = cv2.resize(frame, (size, size),
-                                       interpolation=cv2.INTER_LINEAR)
-                frame = enhance(frame, gains, clahe, gamma)
+            # D 域链路（与板端 common/preprocess.py 一致，顺序不可交换）：
+            # resize(size) → enhance → remap@640
+            frame = raw
+            if (w, h) != (size, size):               # 1) 先统一尺寸
+                frame = cv2.resize(frame, (size, size),
+                                   interpolation=cv2.INTER_LINEAR)
+            frame = enhance(frame, gains, clahe, gamma)      # 2) 在 size 上做补偿
+            if calibration:                          # 3) 再去畸变
+                if maps is None:
+                    maps = calibration_maps_640(calibration, size)
+                    print(f"📐 生成 640 域去畸变映射 {size}x{size} <- {calibration}")
+                frame = cv2.remap(frame, *maps, cv2.INTER_LINEAR)
             dst = sub / f"frame_{saved + 1:06d}.jpg"
             cv2.imwrite(str(dst), frame,
                         [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -291,9 +248,6 @@ def main() -> None:
                     help="标定 yaml（calibrate_camera.py 的输出）；不传则跳过去畸变")
     ap.add_argument("--size", type=int, default=640,
                     help="输出/模型输入尺寸（板端 model.input_size）")
-    ap.add_argument("--chain-order", choices=["new", "old"], default="new",
-                    help="链路顺序：new=resize(640)→enhance→remap@640（板端 2026-09-23 起，D 域/P2）；"
-                         "old=remap@输入分辨率→resize→enhance（历史 P1）。必须与板端一致")
     ap.add_argument("--wb-gains", type=parse_gains, default=[1.0, 1.0, 1.0],
                     help="白平衡通道增益 B,G,R（板端 image.white_balance_bgr）")
     ap.add_argument("--clahe", type=float, default=2.0,
@@ -331,8 +285,6 @@ def main() -> None:
     elif board:
         print("⚠️  板端配置 image.undistort=false：本次跳过去畸变（仅补偿+缩放），"
               "与板端推理一致；如需开启请显式传 --calibration 或改板端 vision.yaml")
-    else:
-        a.calibration = None
 
     if not a.calibration:
         print("⚠️  本次跳过去畸变（仅补偿+缩放）。需要去畸变时请传"
@@ -340,10 +292,8 @@ def main() -> None:
 
     groups = collect_image_sets(a.inputs)
     n = prepare(groups, a.out_dir, a.calibration, a.wb_gains, a.clahe,
-                a.gamma, a.size, chain_order=a.chain_order)
+                a.gamma, a.size)
     print(f"\n🎉 共生成 {n} 张训练图片（{a.size}x{a.size}），位于 {a.out_dir}/")
-    print("下一步：标注后按 YOLO 格式组织（train/valid + data.yaml），再运行:")
-    print("   python scripts/2_train/train_yolo11n.py --data data/<数据集>/data.yaml ...")
 
 
 if __name__ == "__main__":

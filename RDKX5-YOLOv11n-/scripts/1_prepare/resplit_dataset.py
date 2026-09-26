@@ -1,56 +1,25 @@
 #!/usr/bin/env python3
-"""
-把已有的 YOLO 数据集按比例重新随机划分 train/val/test（序列感知，避免相邻帧泄漏）。
+"""把已有的 YOLO 数据集重新划分 train/val/test（序列感知，避免相邻帧泄漏）。
 
-## 为什么不是纯随机
+先把帧按「同一来源流内帧号相差 <= --group-gap」聚成连续段，再整段随机分配到各
+split，所以同一片段的相邻帧不会跨 split。来源流 = 文件名 `_frame_` 之前的部分
+（旧命名 `frame_000123…` 为空串）；不同来源流的帧号互不相干，不能跨流比较。
 
-录制的视频帧被抽帧后，同一个片段里相邻帧几乎一模一样。若逐张随机划分，
-`frame_000123` 进 train、`frame_000124` 进 val，验证集就等于「背过的题」，
-mAP 会虚高、早停与调参全部失真。本脚本先把帧按「帧号相邻」聚成**连续段**，
-再**整段随机**分配到各个 split，同一个片段只会落在一个 split 里。
+各 split 目标数 = --ratios × 总数（最大余数法取整，每个 split 至少 1）；在「段不跨
+split」约束下多轮贪婪重启 + 模拟退火，按优先级权衡：数量 → 类别均衡 → 时间泄漏
+（帧号相差 <= --leak-window 却跨 split 的帧对）→ 稀有类保护（全量实例少于
+--rare-threshold 的类，含该类的段强制留在 train；--no-rare-to-train 关闭）。
 
-`nd_` 前缀（不去畸变变体，见 select_frames.py）与主集同一帧号 = 同一时刻，
-因此聚合时**不区分前缀**：帧号相差 <= --group-gap 的两张图必进同一段。
+用法：
+    python scripts/1_prepare/resplit_dataset.py data/datasets/AUV_2_AUV.yolov11 --dry-run   # 只看方案，不动文件
+    python scripts/1_prepare/resplit_dataset.py data/datasets/AUV_2_AUV.yolov11             # 执行（先备份）
+    python scripts/1_prepare/resplit_dataset.py <数据集> --ratios 0.7 0.2 0.1 --seed 7
+    python scripts/1_prepare/resplit_dataset.py <数据集> --group-gap -1                     # 关闭聚合 = 纯随机
+    python scripts/1_prepare/resplit_dataset.py <数据集> --leak-window 10 --leak-weight 0.02
 
-## 数量自动取整 + 多目标权衡
-
-各 split 的目标数由 `--ratios` 乘总数得到，用**最大余数法**取整后强制每类 >= 1。
-在「段不得跨 split」的约束下，代价函数同时考虑四件事（按优先级）：
-
-1. **数量**（权重最高）：与目标数量的偏差，默认能压到 0 张；
-2. **类别均衡**：各类实例在三个 split 的占比尽量贴近目标占比，避免 val 只有一类；
-3. **时间泄漏**：帧号相差 <= `--leak-window` 却跨 split 的帧对越少越好；
-4. **稀有类保护**：全量实例少于 `--rare-threshold` 的类别（如本项目只有 1 个 gate），
-   含该类的段强制留在 train，否则训练集完全没有该类、模型永远学不会。
-
-求解方式：多轮随机贪婪装箱给出若干起点，再用**模拟退火**（随机「交换两段」/「搬动一段」）
-增量优化上述代价，取全局最优快照。默认参数下的典型折中效果（AUV_2 的 400 张）：
-数量严格 320/40/40，帧号相差 <= 5 的近似重复帧对跨 split 的比例约 2%，
-而纯随机划分约为 67%——但要接受 val/test 的类别分布不如逐张分层那么均匀，
-这是「同一片段只进一个 split」的必然代价（本项目两类目标在时间上成段出现）。
-
-## 用法
-
-    # 先看方案，不动文件
-    python scripts/1_prepare/resplit_dataset.py data/AUV_2/AUV.yolov11 --dry-run
-
-    # 确认后执行（会先把现有划分复制到 <dataset>_backup_<时间戳>）
-    python scripts/1_prepare/resplit_dataset.py data/AUV_2/AUV.yolov11
-
-    # 换比例 / 换种子（结果可复现）
-    python scripts/1_prepare/resplit_dataset.py data/AUV_2/AUV.yolov11 --ratios 0.7 0.2 0.1 --seed 7
-
-    # 关掉序列聚合（= 纯随机，存在相邻帧泄漏）/ 关掉稀有类保护
-    python scripts/1_prepare/resplit_dataset.py data/AUV_2/AUV.yolov11 --group-gap -1
-    python scripts/1_prepare/resplit_dataset.py data/AUV_2/AUV.yolov11 --no-rare-to-train
-
-    # 更严格地压制时间泄漏（代价：val/test 类别更不均衡）
-    python scripts/1_prepare/resplit_dataset.py data/AUV_2/AUV.yolov11 --leak-window 10 --leak-weight 0.02
-
-输出：
-    * 就地重排 <dataset>/{train,valid,test}/{images,labels}/
-    * manifest:  <dataset>/split_manifest.csv  （每张图 old/new split、组号、帧号）
-    * 备份目录（可用 --no-backup 关闭），以及打印的划分报告
+输出：就地重排 <dataset>/{train,valid,test}/{images,labels}/；
+      <dataset>/split_manifest.csv（每张图 old/new split、段号、帧号、标注框数）；
+      备份 <dataset>_backup_<时间戳>/（--no-backup 关闭）。
 """
 
 from __future__ import annotations
@@ -67,8 +36,10 @@ from datetime import datetime
 from pathlib import Path
 
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
-# frame_000123_jpg.rf.abcdef.jpg / nd_frame_000123_jpg.rf.abcdef.jpg / frame_000123.jpg
-FRAME_RE = re.compile(r"^(?P<prefix>[A-Za-z]*_)?frame_(?P<num>\d+)", re.IGNORECASE)
+# 两种命名都要认：
+#   frame_000292_jpg.rf.<hash>                 → stream="",                 num=292
+#   AUV_5_gate-11_frame_000001_jpg.rf.<hash>   → stream="AUV_5_gate-11",    num=1
+FRAME_RE = re.compile(r"^(?P<stream>.*?)_?frame_(?P<num>\d+)", re.IGNORECASE)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -107,9 +78,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def frame_number(stem: str) -> int | None:
+def frame_key(stem: str) -> tuple[str, int | None]:
+    """文件名 → (来源流, 帧号)。来源流 = `_frame_` 之前的部分（旧命名为空串）；
+    相邻关系只在同一来源流内成立。"""
     m = FRAME_RE.match(stem)
-    return int(m.group("num")) if m else None
+    if not m:
+        return "", None
+    return (m.group("stream") or "").strip("_"), int(m.group("num"))
 
 
 def scan(dataset: Path, names: tuple[str, str, str]) -> list[dict]:
@@ -125,12 +100,14 @@ def scan(dataset: Path, names: tuple[str, str, str]) -> list[dict]:
             if img.suffix.lower() not in IMG_EXTS:
                 continue
             lbl = lbl_dir / f"{img.stem}.txt"
+            _st, _num = frame_key(img.stem)
             records.append({
                 "src_split": split,
                 "img": img,
                 "lbl": lbl,
                 "has_label": lbl.is_file(),
-                "frame": frame_number(img.stem),
+                "stream": _st,
+                "frame": _num,
             })
     if not records:
         sys.exit(f"[error] {dataset} 下没有找到任何图片")
@@ -138,23 +115,31 @@ def scan(dataset: Path, names: tuple[str, str, str]) -> list[dict]:
 
 
 def group_records(records: list[dict], gap: int) -> list[list[dict]]:
-    """按帧号相邻聚成连续段；无帧号的图各自成段，前缀不参与分组。"""
+    """按「同一来源流内帧号相邻」聚成连续段；无帧号的图各自成段。
+    gap < 0 时每张图各自成段（= 纯随机划分）。"""
     if gap < 0:
         return [[r] for r in records]
-    by_num: dict[int, list[dict]] = defaultdict(list)
+    by_stream: dict[str, dict[int, list[dict]]] = defaultdict(lambda: defaultdict(list))
     no_num: list[dict] = []
     for r in records:
-        (by_num[r["frame"]] if r["frame"] is not None else no_num).append(r)
-    groups: list[list[dict]] = []
-    nums = sorted(by_num)
-    cur = [nums[0]]
-    for a, b in zip(nums, nums[1:]):
-        if b - a <= max(gap, 1):  # gap=0 时把同帧号（跨前缀）并在一起
-            cur.append(b)
+        if r["frame"] is None:
+            no_num.append(r)
         else:
-            groups.append([r for n in cur for r in by_num[n]])
-            cur = [b]
-    groups.append([r for n in cur for r in by_num[n]])
+            by_stream[r.get("stream", "")][r["frame"]].append(r)
+    groups: list[list[dict]] = []
+    for st, by_num in by_stream.items():
+        nums = sorted(by_num)
+        cur = [nums[0]]
+        for a, b in zip(nums, nums[1:]):
+            if b - a <= max(gap, 1):  # gap=0：同帧号（跨前缀变体）并在一起
+                cur.append(b)
+            else:
+                groups.append([r for n in cur for r in by_num[n]])
+                cur = [b]
+        groups.append([r for n in cur for r in by_num[n]])
+    if no_num:
+        print(f"[warn] {len(no_num)} 张图没有可解析的帧号（各自成段）；"
+              f"请确认命名形如 frame_000123… 或 <来源>_frame_000123…", file=sys.stderr)
     groups.extend([r] for r in no_num)
     return groups
 
@@ -196,16 +181,16 @@ def build_context(groups: list[list[dict]], window: int):
         for r in g:
             c.update(r["classes"])
         gcls.append(c)
-    num2g: dict[int, int] = {}
+    num2g: dict[tuple[str, int], int] = {}
     for gi, g in enumerate(groups):
         for r in g:
             if r["frame"] is not None:
-                num2g[r["frame"]] = gi
+                num2g[(r.get("stream", ""), r["frame"])] = gi
     adj: list[dict[int, int]] = [dict() for _ in groups]
     ks = sorted(num2g)
     for idx, a in enumerate(ks):
         for b in ks[idx + 1:]:
-            if b - a > window:
+            if b[0] != a[0] or b[1] - a[1] > window:   # 只比同一来源流内相邻的帧
                 break
             ga, gb = num2g[a], num2g[b]
             if ga != gb:
@@ -276,10 +261,8 @@ def refine(assign: list[int], groups: list[list[dict]], gcls: list[Counter], adj
            rng: random.Random, iters: int,
            protected: frozenset[int] = frozenset(),
            t0: float = 50.0, t1: float = 0.02) -> tuple[list[int], list[int], list[Counter], int]:
-    """模拟退火：随机「交换两个段」或「搬动一个段」，增量维护数量/类别/泄漏三项代价。
-
-    单纯爬山会被「交换不同大小的段会破坏精确数量」卡死，退火允许暂时恶化以换取
-    类别均衡等更优的最终解；best 只记录全局最优快照。"""
+    """模拟退火：随机「交换两个段」或「搬动一个段」，增量维护数量/类别/泄漏代价，
+    best 记录全局最优快照。"""
     assign = assign[:]
     n = len(groups)
     sizes = [len(g) for g in groups]
@@ -343,7 +326,7 @@ def refine(assign: list[int], groups: list[list[dict]], gcls: list[Counter], adj
 
 
 def allocate(groups: list[list[dict]], targets: list[int], args, cls_tot: Counter):
-    """多轮贪婪重启 + 爬山微调，取综合代价最优的方案。"""
+    """多轮贪婪随机重启 + 模拟退火微调，取综合代价最优的方案。"""
     rng = random.Random(args.seed)
     gcls, adj = build_context(groups, args.leak_window)
     w, lw = args.balance_weight, args.leak_weight
@@ -373,7 +356,11 @@ def allocate(groups: list[list[dict]], targets: list[int], args, cls_tot: Counte
     ranked = sorted(cands, key=key)
     rounds = max(args.refine_rounds, 1)
     # 取最优的一批，并穿插排名靠后的候选，增加退火起点多样性
-    starts = ranked[: max(1, rounds // 2)] + ranked[max(1, rounds // 2):: max(1, len(ranked) // rounds)]        if len(ranked) > rounds else ranked
+    if len(ranked) > rounds:
+        starts = (ranked[: max(1, rounds // 2)]
+                  + ranked[max(1, rounds // 2):: max(1, len(ranked) // rounds)])
+    else:
+        starts = ranked
     starts = starts[:rounds]
     best_assign, best_score, best_state = None, float("inf"), None
     for idx, start in enumerate(starts):
@@ -403,16 +390,16 @@ def do_backup(dataset: Path, names: tuple[str, str, str]) -> Path | None:
 
 def leakage(assign: list[int], groups: list[list[dict]], window: int = 5) -> tuple[int, int]:
     """统计帧号相差 <= window 却落在不同 split 的相邻帧对（时间泄漏指标）。"""
-    num: dict[int, int] = {}
+    num: dict[tuple[str, int], int] = {}
     for gi, g in enumerate(groups):
         for r in g:
             if r["frame"] is not None:
-                num[r["frame"]] = assign[gi]
+                num[(r.get("stream", ""), r["frame"])] = assign[gi]
     ks = sorted(num)
     bad = pair = 0
     for i, a in enumerate(ks):
         for b in ks[i + 1:]:
-            if b - a > window:
+            if b[0] != a[0] or b[1] - a[1] > window:
                 break
             pair += 1
             bad += num[a] != num[b]
@@ -495,8 +482,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.backup:
         bk = do_backup(dataset, names)
         print(f"\n已备份原划分 -> {bk}")
-    elif not args.no_backup:
-        pass
 
     # 移动文件（先收集再落位，源目录同名文件直接覆盖式写入）
     moved = 0

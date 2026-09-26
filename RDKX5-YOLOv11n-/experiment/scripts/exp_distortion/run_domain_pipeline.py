@@ -13,7 +13,7 @@
   4. 不够用 → 训 D → 比 C@C vs D@D → 取更优（并列时取 D：更省）
   5. 在最优域上训 enhance-off 臂 → 消融配对 → 判断 enhance 可否去掉
   6. 用最优臂推理 AUV_5 清水 16 张 + 120 帧随机探针
-  7. 写 experiment/runs/domain/DOMAIN_RESULT.md
+  7. 写 experiment/runs/domain/reports/DOMAIN_RESULT.md
 
 用法：
     python experiment/scripts/exp_distortion/run_domain_pipeline.py
@@ -329,8 +329,8 @@ def main():
         for split in ("test", "valid"):
             stem = f"EVAL_main_{split}"
             eval_arms(
-                [f"基线_老模型_A几何:data/AUV_4/PNP.kpt4.yolov8:weights/yolo11n-pose.pt:AOLD:{split}",
-                 f"基线_老模型_C几何:data/AUV_4/PNP.kpt4.yolov8:weights/yolo11n-pose.pt:AOLD_C:{split}",
+                [f"基线_老模型_A几何:data/datasets/AUV_4_PNP.kpt4.yolov8:weights/yolo11n-pose.pt:AOLD:{split}",
+                 f"基线_老模型_C几何:data/datasets/AUV_4_PNP.kpt4.yolov8:weights/yolo11n-pose.pt:AOLD_C:{split}",
                  f"B@B:experiment/data/pose_B:weights/domain_B.pt:B:{split}",
                  f"C@C:experiment/data/pose_C:weights/domain_C.pt:C:{split}"],
                 [f"B@B:C@C", f"基线_老模型_C几何:B@B"],
@@ -361,7 +361,7 @@ def main():
             train("D", "D")
             eval_arms([f"C@C:experiment/data/pose_C:weights/domain_C.pt:C:test",
                        f"D@D:experiment/data/pose_D:weights/domain_D.pt:D:test"],
-                      ["C@C:D@D"], "test", "experiment/runs/domain/EVAL_CD.md")
+                      ["C@C:D@D"], "test", "experiment/runs/domain/reports/EVAL_CD.md")
             det2 = load_detail("EVAL_CD")
             if det2:
                 s2 = pair_stats(det2["C@C"], det2["D@D"], "C@C", "D@D")
@@ -377,7 +377,7 @@ def main():
         train("noenh", winner, enhance=False)
         eval_arms([f"{winner}@enh:experiment/data/pose_{winner}:weights/domain_{winner}.pt:{winner}:test",
                    f"{winner}@noenh:experiment/data/pose_{winner}_noenh:weights/domain_{winner}_noenh.pt:{winner}:test"],
-                  [f"{winner}@enh:{winner}@noenh"], "test", "experiment/runs/domain/EVAL_enhance.md")
+                  [f"{winner}@enh:{winner}@noenh"], "test", "experiment/runs/domain/reports/EVAL_enhance.md")
         det3 = load_detail("EVAL_enhance")
         enh = None
         if det3:
@@ -388,11 +388,11 @@ def main():
                   open(FIELD / "verdict.json", "w"), indent=1, ensure_ascii=False)
 
         # ---------- 6) AUV_5 清水 ----------
-        eval_arms([f"老模型@A-old:runs/auv5_eval/pose_AOLD:weights/yolo11n-pose.pt:AOLD_C:eval",
-                   f"B臂@B:runs/auv5_eval/pose_B:weights/domain_B.pt:B:eval",
-                   f"C臂@C:runs/auv5_eval/pose_C:weights/domain_C.pt:C:eval",
-                   f"最优臂@{winner}:runs/auv5_eval/pose_{winner}:weights/domain_{winner}.pt:{winner}:eval"],
-                  ["B臂@B:C臂@C"], "eval", "experiment/runs/domain/EVAL_auv5.md", conf=0.10)
+        eval_arms([f"老模型@A-old:runs/auv5/eval/pose_AOLD:weights/yolo11n-pose.pt:AOLD_C:eval",
+                   f"B臂@B:runs/auv5/eval/pose_B:weights/domain_B.pt:B:eval",
+                   f"C臂@C:runs/auv5/eval/pose_C:weights/domain_C.pt:C:eval",
+                   f"最优臂@{winner}:runs/auv5/eval/pose_{winner}:weights/domain_{winner}.pt:{winner}:eval"],
+                  ["B臂@B:C臂@C"], "eval", "experiment/runs/domain/reports/EVAL_auv5.md", conf=0.10)
         for dom in ("B", "C", "D"):
             if (PROJECT_ROOT / f"weights/domain_{dom}.pt").exists():
                 run([PY, "experiment/scripts/exp_distortion/probe_auv5_detect.py",
@@ -441,19 +441,19 @@ def main():
            ("weights/domain_B_noenh.pt", "B+noenh 臂（仅当最优域=B）"),
            ("weights/domain_C_noenh.pt", "C+noenh 臂（仅当最优域=C）"),
            ("weights/domain_D_noenh.pt", "D+noenh 臂（仅当最优域=D）"),
-           ("experiment/runs/domain/EVAL_main_test.md", "主评估 test"),
-           ("experiment/runs/domain/EVAL_main_valid.md", "主评估 valid"),
-           ("experiment/runs/domain/EVAL_CD.md", "C vs D 对比"),
-           ("experiment/runs/domain/EVAL_enhance.md", "enhance 消融"),
-           ("experiment/runs/domain/EVAL_auv5.md", "AUV_5 清水"),
-           ("experiment/runs/domain/verdict.json", "自动判定原始数据"),
+           ("experiment/runs/domain/reports/EVAL_main_test.md", "主评估 test"),
+           ("experiment/runs/domain/reports/EVAL_main_valid.md", "主评估 valid"),
+           ("experiment/runs/domain/reports/EVAL_CD.md", "C vs D 对比"),
+           ("experiment/runs/domain/reports/EVAL_enhance.md", "enhance 消融"),
+           ("experiment/runs/domain/reports/EVAL_auv5.md", "AUV_5 清水"),
+           ("experiment/runs/domain/tables/verdict.json", "自动判定原始数据"),
            ("experiment/runs/domain/label_audit_B.csv", "标注审计")]
     clines = ["\n## 产物完整性清单\n"]
     for rel, desc in exp:
         mark = "✅" if (PROJECT_ROOT / rel).exists() else "❌ 缺"
         clines.append(f"- {mark} `{rel}` — {desc}")
     parts.append("\n".join(clines) + "\n")
-    atxt, aok = artifact_check("experiment/runs/domain/artifacts_before.txt")
+    atxt, aok = artifact_check("experiment/runs/domain/logs/artifacts_before.txt")
     parts.append("\n## 第 ⑥ 条核验：实验前已有产物是否被动过\n\n" + atxt)
     for stem, title in [("EVAL_main_test", "主评估（test）"),
                         ("EVAL_main_valid", "复现检验（valid）"),
@@ -465,7 +465,7 @@ def main():
             parts.append(f"\n## {title}\n\n" + f.read_text() + "\n")
     (FIELD / "DOMAIN_RESULT.md").write_text("".join(parts))
     log(f"产物核验：{'PASS' if aok else 'FAIL'}")
-    log("完成。产物：experiment/runs/domain/EVAL_*.md, verdict.json, DOMAIN_RESULT.md")
+    log("完成。产物：experiment/runs/domain/reports/EVAL_*.md, verdict.json, DOMAIN_RESULT.md")
     return 0
 
 

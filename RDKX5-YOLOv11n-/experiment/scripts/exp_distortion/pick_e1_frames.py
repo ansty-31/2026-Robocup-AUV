@@ -7,9 +7,9 @@ fs=cv2.FileStorage(C,cv2.FILE_STORAGE_READ); K=fs.getNode("camera_matrix").mat()
 cx,cy=K[0,2],K[1,2]; half=np.hypot(640,360)
 from ultralytics import YOLO
 m=YOLO("weights/yolo11n-pose.pt")
-DIVES=[("AUV_1",["data/AUV_1/rec_front_frames"],400),("AUV_2",["data/AUV_2/auv_20260910_172208_frames"],400),
-       ("AUV_3",["data/AUV_3/auv_20260911_201754_frames"],400),("AUV_4",["data/AUV_4/auv_4_frames"],400),
-       ("AUV_5",sorted(glob.glob("data/AUV_5/raw-data/gate-*")),900)]
+DIVES=[("AUV_1",["data/frames/AUV_1_rec_front_frames"],400),("AUV_2",["data/frames/AUV_2_auv_20260910_172208_frames"],400),
+       ("AUV_3",["data/frames/AUV_3_auv_20260911_201754_frames"],400),("AUV_4",["data/frames/AUV_4_auv_4_frames"],400),
+       ("AUV_5",sorted(glob.glob("data/frames/AUV_5_gate_calib/gate-*")),900)]
 random.seed(0)
 cands=collections.defaultdict(list); stat=collections.Counter()
 for tag,pats,NS in DIVES:

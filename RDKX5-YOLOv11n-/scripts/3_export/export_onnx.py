@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""
-导出YOLOv11n ONNX模型（6输出版本）
+"""导出 YOLO11n ONNX（RDK X5 分裂输出头：detect 6 张量 / pose 9 张量）并校验张量结构。
 
-作者: RDKX5-YOLOv11n-项目
-许可证: MIT
+用法：
+    python scripts/3_export/export_onnx.py                 # weights/yolo11n.pt
+    python scripts/3_export/export_onnx.py --task pose     # weights/yolo11n-pose.pt
+
+约定：opset 11、静态 shape、float32、simplify=False；导出前先用
+`scripts/3_export/modify_ultralytics.py --task <task>` 打补丁（否则输出个数校验会失败）。
 """
 
 import sys
@@ -13,14 +16,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]  # scripts/<stage>/x.py
 
 def export_onnx(model_path='yolo11n.pt', output_name='yolo11n.onnx', imgsz=640,
                 task='detect'):
-    """
-    导出ONNX模型
+    """导出 ONNX 并校验输出张量结构（detect 6 / pose 9）
 
-    Args:
-        model_path: 预训练模型路径
-        output_name: 期望的输出ONNX文件名（实际文件名由 ultralytics 按模型名生成）
-        imgsz: 输入图像尺寸
-        task: detect=6 输出（3×bbox + 3×cls）/ pose=9 输出（每尺度 bbox+cls+kpt）
+    output_name 只是期望名，实际文件名由 ultralytics 按模型名生成。
     """
     
     try:
@@ -119,7 +117,7 @@ def export_onnx(model_path='yolo11n.pt', output_name='yolo11n.onnx', imgsz=640,
             else:
                 print(f"⚠️  输出结构异常（{len(outs)} 个，通道 {uniq}）")
                 print("   预期 9 个：3×C=64(reg) + 3×C=nc(cls) + 3×C=3*kpt_dim(kpt)")
-                print("   提示：python scripts/modify_ultralytics.py --task pose")
+                print("   提示：python scripts/3_export/modify_ultralytics.py --task pose")
                 return False
         else:
             if len(outs) == 6:
@@ -129,23 +127,16 @@ def export_onnx(model_path='yolo11n.pt', output_name='yolo11n.onnx', imgsz=640,
             else:
                 print(f"⚠️  警告：输出数量为 {len(outs)}")
                 print("   预期6个输出，请检查ultralytics是否正确修改")
-                print("   提示：运行 python scripts/modify_ultralytics.py --task detect")
+                print("   提示：运行 python scripts/3_export/modify_ultralytics.py --task detect")
                 return False
 
     except Exception as e:
         print(f"⚠️  验证过程出错: {e}")
     
     print()
-    print("=" * 60)
-    print("✅ ONNX导出完成！")
-    print("=" * 60)
-    print()
     print("下一步：")
-    print("  1. 准备校准数据:")
-    print("     python scripts/3_export/prepare_calibration.py --coco-path /path/to/coco")
-    print()
-    print("  2. PTQ量化:")
-    print("     ./scripts/3_export/quantize.sh" +
+    print("  python scripts/3_export/prepare_calibration.py --coco-path <代表性图片目录>")
+    print("  ./scripts/3_export/quantize.sh" +
           (" configs/gate_kpt_config.yaml" if task == 'pose' else ""))
     print()
     
@@ -153,8 +144,6 @@ def export_onnx(model_path='yolo11n.pt', output_name='yolo11n.onnx', imgsz=640,
 
 
 def main():
-    """主函数"""
-    
     import argparse
     
     parser = argparse.ArgumentParser(description='导出YOLO11 ONNX模型（RDK X5 分裂头）')

@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""
-修改 ultralytics 输出头，适配 RDK X5 BPU（NHWC 分裂头）
+"""修改 ultralytics 输出头，适配 RDK X5 BPU（NHWC 分裂头）。
 
     --task detect  Detect.forward → 6 个张量：3×bbox(C=4*reg_max) + 3×cls(C=nc)
     --task pose    Pose.forward   → 9 个张量：每尺度 bbox(C=64) + cls(C=nc) + kpt(C=12)
     --restore      从 head.py.backup 恢复原版（训练/推理必须用原版）
 
-pose 约定（与板端 gate/gate_decode.py 的 decode_yolo11_kpt 对齐）：
+pose 约定（与板端 gate/gate_decode.py::decode_yolo11_kpt 对齐，详见 docs/gate_pose_decode_spec.md）：
     * 每个尺度 3 个张量，shape=[1, g, g, C]（NHWC）；C = 64(reg, DFL raw) / nc(cls, raw logits) / 12(kpt)
     * kpt 通道顺序 [x,y,v] × kpt_dim（本仓库 gate 为 4 点：TL,TR,BR,BL）
-    * x,y = (raw*2 - 0.5 + 网格索引)，单位=cell（板端 ×stride 得输入像素，再 ×frame/640 得原图）
-    * v   = raw logit（板端自行 sigmoid）
+    * x,y 在 ONNX 内部已经算成最终 cell 坐标（= raw*2 + 网格索引）⇒ 板端只需 x_px = x_cell × stride
+    * v = raw logit（板端自行 sigmoid）
 
 用法：
     python scripts/3_export/modify_ultralytics.py --task detect     # 导出检测模型前
@@ -93,7 +92,20 @@ PATCHES = {
     "pose": ("Pose", POSE_FORWARD, "9 个张量（3×(bbox + cls + kpt)）"),
 }
 _W = {"detect": "yolo11n.pt", "pose": "yolo11n-pose.pt"}
-WEIGHTS = {k: str(PROJECT_ROOT / "weights" / v) for k, v in _W.items()}
+
+
+def _weights_path(name: str) -> str:
+    """weights/ 分 new/ 与 old/：默认权重在 new/，找不到再回退 weights/ 根。
+
+    只用于「打完补丁跑一次前向验证输出个数」，路径错了只是跳过验证。
+    """
+    for rel in (Path("weights") / "new" / name, Path("weights") / name):
+        if (PROJECT_ROOT / rel).exists():
+            return str(PROJECT_ROOT / rel)
+    return str(PROJECT_ROOT / "weights" / name)
+
+
+WEIGHTS = {k: _weights_path(v) for k, v in _W.items()}
 
 
 def head_file() -> Path:
@@ -148,7 +160,7 @@ def patch(head: Path, task: str) -> bool:
 
 
 def verify(task: str) -> bool:
-    """独立子进程验证（避免同进程模块缓存误判），权重不存在则跳过"""
+    """独立子进程验证输出个数 = 6/9（避免同进程模块缓存误判）；权重不存在则跳过"""
     weights = WEIGHTS[task]
     if not Path(weights).exists():
         print(f"ℹ️  未找到 {weights}，跳过补丁验证（导出时会再次校验）")

@@ -1,27 +1,19 @@
 #!/usr/bin/env python3
-"""量化一致性校验（余弦相似度）—— 在 OpenExplorer 容器内运行
+"""量化一致性校验（余弦相似度）—— 在 OpenExplorer 容器内运行。
 
-为什么不是 `hb_mapper checker`：它只报告节点放置（BPU/CPU）、量化阈值与数据类型，
-"Cosine Similarity" 一列永远是 `--`，不做精度比对。
+A. 输出层实测：同一条输入分别喂 `<prefix>_original_float_model.onnx`（float）与
+   `<prefix>_calibrated_model.onnx`（量化模拟），逐输出张量算余弦相似度。
+B. 逐节点自报：读 `<prefix>_quant_info.json`，取 OE 校准时记的每个节点
+   `cosine_similarity`，给出最小值与最差节点（定位量化坏在哪一层）。
 
-本脚本用 OE 自带的 `HB_ONNXRuntime` 做两件互补的事：
+判定口径：A 的最小值 >= --thresh（默认 0.95）视为通过；B 作定位用。
 
-  A. **输出层实测**：同一条输入分别喂
-       `<prefix>_original_float_model.onnx`（float）与
-       `<prefix>_calibrated_model.onnx`（插入了量化参数、输入仍是 float NCHW），
-     逐输出张量算余弦相似度 —— 直接回答"量化有没有把模型输出搞坏"。
-  B. **逐节点自报**：读 `<prefix>_quant_info.json`，取 OE 在校准时为每个节点记的
-     `cosine_similarity`，给出最小值与最差节点（定位是哪一层被量化坏）。
-
-判定口径：**A 的最小值 >= --thresh（默认 0.95）视为通过**（B 作定位用；
-head 里的 conv/act 层常见 0.94 量级，只要输出层达标就不一定有害）。
-
-用法（容器内，项目根挂成 /data）：
+用法（容器内，项目根挂成 /data；--prefix 取配置里的 output_model_file_prefix）：
     python3 /data/scripts/3_export/check_quant_cos.py \
-        --prefix gate_kpt_bayese_640x640_nv12   # 用配置里的 output_model_file_prefix \
+        --prefix gate_kpt_bayese_640x640_nv12 \
         --out-dir /data/output --cal-dir /data/calibration_data --n 20 --thresh 0.95
 
-退出码：0=通过，1=不通过（据此决定要不要跑第二轮）。
+退出码：0=通过，1=不通过。
 """
 from __future__ import annotations
 

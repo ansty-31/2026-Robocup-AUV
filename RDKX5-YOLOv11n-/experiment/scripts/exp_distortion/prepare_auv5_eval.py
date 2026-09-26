@@ -8,7 +8,7 @@
 `map_pose_dataset.py` 直接生成 B/C/D 三域版本，用于「中/浊水新权重推理清水」的判定。
 
 输出：
-    runs/auv5_eval/eval/{images,labels}/          ← 源域(B)图与标签
+    runs/auv5/eval/clearwater16/{images,labels}/          ← 源域(B)图与标签
     runs/prov/provenance_auv5_eval.csv            ← 供 map_pose_dataset.py 使用
     data/mapped/raw/AUV_5gate/frame_*.jpg         ← 原始帧缓存（供三域渲染复用）
 """
@@ -33,10 +33,10 @@ def main():
     auv5 = [r for r in recs if "gate-" in r["src"]]
     print(f"AUV_5 (gate-*) 已标帧 {len(auv5)} 张")
 
-    ds = PROJECT_ROOT / "runs/auv5_eval/eval"
+    ds = PROJECT_ROOT / "runs/auv5/eval/clearwater16"
     (ds / "images").mkdir(parents=True, exist_ok=True)
     (ds / "labels").mkdir(parents=True, exist_ok=True)
-    rawdir = PROJECT_ROOT / "data/mapped/raw/AUV_5gate"
+    rawdir = PROJECT_ROOT / "data/frames/mapped_anchors/AUV_5gate"
     rawdir.mkdir(parents=True, exist_ok=True)
 
     rows, n_ok = [], 0
@@ -46,7 +46,7 @@ def main():
         gate, fname = parts[-2], parts[-1]
         num = int(fname.split("_")[1].split(".")[0])
         src_img = PROJECT_ROOT / "experiment/runs/exp_distortion/e1_picked" / "__".join(parts[1:])
-        raw_img = PROJECT_ROOT / "data/AUV_5/raw-data" / gate / fname
+        raw_img = PROJECT_ROOT / "data/frames/AUV_5_gate_calib" / gate / fname
         if not src_img.exists() or not raw_img.exists():
             print(f"  ⚠️ 缺文件，跳过 {m}")
             continue
@@ -82,7 +82,7 @@ def main():
     print("下一步：")
     for dom in ("B", "C", "D"):
         print(f"  python scripts/1_prepare/pose/map_pose_dataset.py --prov {prov.relative_to(PROJECT_ROOT)} "
-              f"--dataset runs/auv5_eval --domain {dom} --out runs/auv5_eval/pose_{dom}")
+              f"--dataset runs/auv5/eval --domain {dom} --out runs/auv5/eval/pose_{dom}")
 
 
 if __name__ == "__main__":

@@ -1,40 +1,20 @@
 #!/usr/bin/env python3
-"""
-用已有权重筛选图片集：剔除含指定类别的画面 + 按画面质量加权随机抽样
-（可选）多目录混合：第 1 个是主集，其余按 `--mix-ratio` 掺入
+"""筛图：剔除含指定类别的画面 + 按画面质量加权随机抽样。
 
-典型用途：把一批预处理后的帧集，用当前模型推理，
-    1) 剔除检测到「不要的类别」（如 red_ball）的画面；
-    2) 对剩余画面按质量分（清晰度为主、亮度异常惩罚）做**加权随机抽样**，
-       保留 N 张作为下一轮训练/挖掘素材。
+用 --weights 推理（需要**原始 head.py**，若打过 6 输出补丁先 restore）：
+    1) 剔除检出 --drop-classes 中任一类别（conf ≥ --conf）的画面；
+    2) 其余按质量分（清晰度 × 亮度合理性）加权无放回抽样，保留 --keep 张。
 
-## 多目录混合
+只有给了 --drop-classes 才加载模型；否则只过滤损坏帧（--weights 可不传，CSV 的 n_det 为 0）。
+多个输入目录合并成一个候选池（来源只用于统计与 CSV 报告），同名文件加 _2/_3 后缀防覆盖。
 
-给多个输入目录即可：**第 1 个是主集，其余是混合集**，用 `--mix-ratio` 控制掺入比例：
+用法：
+    python scripts/1_prepare/select_frames.py data/frames/AUV_3_auv_xxx_frames \\
+        --weights weights/yolo11n.pt --drop-classes red_ball \\
+        --quality-dir data/frames/AUV_3_auv_xxx_frames \\
+        --keep 2000 --out-dir data/derived/AUV_3_selected_2000
 
-    python scripts/1_prepare/select_frames.py \\
-        data/AUV_3/processed_640/auv_xxx_frames \\   # 主集
-        <第二个来源目录> \\                           # 混合集
-        --weights weights/yolo11n.pt --drop-classes red_ball \
-        --quality-dir data/AUV_3/auv_xxx_frames \
-        --mix-ratio 0.35 --keep 2000 --out-dir data/AUV_3/selected_2000
-
-混合集的输出文件会加前缀（默认 `nd_`，见 `--mix-prefix`）避免与主集同名，
-例如 `frame_000123.jpg` 与 `nd_frame_000123.jpg`。
-
-> **历史用途已废弃（2026-09-23）**：这个混合能力最初是为了把「不去畸变」变体掺进训练集，
-> 配套脚本 `prepare_frames_noundistort.py` **已删除**；去畸变位置已定稿为 **D 域**
-> （`resize(640) → enhance → remap@640`，见 `pose/map_pose_dataset.py`）。
-> 多目录混合本身仍可用（混任何第二来源都行）；若混的是几何不同的图，
-> **同一帧两版的标注框不通用，需分别标注**。
-
-注意：**只有给了 `--drop-classes` 才会加载模型推理**（需要**原始 head.py**）。
-      若此前跑过 scripts/3_export/modify_ultralytics.py（6 输出补丁），请先恢复：
-          cp <site-packages>/ultralytics/nn/modules/head.py.backup  head.py
-      不加 `--drop-classes` 时跳过全部推理（只按损坏帧过滤），速度快很多，
-      此时 `--weights` 可以不传；CSV 报告里的 `n_det` 会是 0。
-
-输出：<out-dir>/<文件名>.jpg（选中的 N 张）+ 可选 CSV 报告
+输出：<out-dir>/<文件名>.jpg（选中的 N 张）+ 可选 --report CSV 报告。
 """
 
 from __future__ import annotations
@@ -56,15 +36,14 @@ def list_images(path: Path):
 
 
 def quality_score(img_path: Path) -> tuple[float, float, float]:
-    """返回 (质量分, 清晰度laplacian方差, 亮度均值)
-    质量分 = 清晰度 × 亮度合理度惩罚（过暗/过曝降权）"""
+    """返回 (质量分, 清晰度 laplacian 方差, 亮度均值)；
+    质量分 = 清晰度 × 亮度合理度惩罚（偏离 110 越远越低）。"""
     img = cv2.imread(str(img_path))
     if img is None:
         return 0.0, 0.0, 0.0
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     sharp = float(cv2.Laplacian(gray, cv2.CV_64F).var())
     mean = float(gray.mean())
-    # 亮度惩罚：偏离 110 越远越低（全黑/过曝几乎为 0）
     penalty = max(0.05, 1.0 - abs(mean - 110.0) / 110.0)
     return sharp * penalty, sharp, mean
 
@@ -86,12 +65,9 @@ def weighted_sample_without_replacement(scores: np.ndarray, k: int,
     return np.argsort(-keys)[:k]
 
 
-def collect_entries(dirs: list[Path], mix_prefix: str):
-    """把多个输入目录摊平成 (路径, 来源序号, 输出文件名) 三个平行列表。
-
-    第 0 个目录 = 主集（文件名不加前缀）；其余 = 混合集（加 mix_prefix），
-    保证两版同名帧在输出目录里不会互相覆盖。
-    """
+def collect_entries(dirs: list[Path]):
+    """把多个输入目录摊平成 (路径, 来源序号, 输出文件名) 三个平行列表：
+    多个目录合并成一个候选池（来源序号只用于统计与报告），同名文件加 _2/_3 后缀防覆盖。"""
     paths: list[Path] = []
     src_of: list[int] = []
     out_names: list[str] = []
@@ -104,41 +80,26 @@ def collect_entries(dirs: list[Path], mix_prefix: str):
         files = list_images(d)
         if not files:
             sys.exit(f"❌ 目录中没有图片: {d}")
-        prefix = mix_prefix if si > 0 else ""
         for p in files:
-            name = f"{prefix}{p.name}"
+            name = p.name
             if name in used:                      # 极少数重名（同名不同扩展名）
                 j = 2
-                while f"{prefix}{p.stem}_{j}{p.suffix}" in used:
+                while f"{p.stem}_{j}{p.suffix}" in used:
                     j += 1
-                name = f"{prefix}{p.stem}_{j}{p.suffix}"
+                name = f"{p.stem}_{j}{p.suffix}"
             used.add(name)
             paths.append(p)
             src_of.append(si)
             out_names.append(name)
-        # 用末两级目录名做标签：不同来源的叶子目录常同名（如 .../xx/<组> 与
-        # .../yy/<组>），只取末级会分不清来源
+        # 标签取末两级目录名：不同来源的叶子目录常同名
         label = "/".join(d.parts[-2:]) if len(d.parts) >= 2 else (d.name or str(d))
         per_src.append((label, len(files)))
     return paths, src_of, out_names, per_src
 
 
-def allocate_quota(k_total: int, mix_ratio: float,
-                   n_pri: int, n_mix: int) -> tuple[int, int]:
-    """把 k_total 个名额按 mix_ratio 分给 主集/混合集。
-
-    返回 (k_pri, k_mix)。一侧候选不够时把余量让给另一侧，尽量凑满 k_total。
-    """
-    k_mix = min(int(round(k_total * mix_ratio)), n_mix)
-    k_pri = min(k_total - k_mix, n_pri)
-    k_mix = min(k_total - k_pri, n_mix)
-    k_pri = min(k_total - k_mix, n_pri)
-    return k_pri, k_mix
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="按已有权重剔除指定类别画面 + 质量加权随机抽样（可混入不去畸变变体）",
+        description="按已有权重剔除指定类别画面 + 质量加权随机抽样",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("images", nargs="+", type=Path,
                     help="输入图片目录（可多个；第 1 个为主集，其余为混合集）")
@@ -151,10 +112,6 @@ def main() -> None:
                     help="判定该类别的置信度阈值（低阈值=更激进地剔除）")
     ap.add_argument("--quality-dir", type=Path, default=None,
                     help="用该目录的同名图片计算质量（建议用原始高分辨率帧；默认用输入图）")
-    ap.add_argument("--mix-ratio", type=float, default=0.0,
-                    help="最终保留中来自「第 2 个及以后输入目录」的比例（0~1；0=只用主集）")
-    ap.add_argument("--mix-prefix", default="nd_",
-                    help="混合集输出文件名前缀（避免与主集同名）")
     ap.add_argument("--keep", type=int, default=2000, help="最终保留张数")
     ap.add_argument("--gamma", type=float, default=2.0,
                     help="质量权重指数（越大越偏向高质量图；1=纯随机）")
@@ -167,19 +124,13 @@ def main() -> None:
     ap.add_argument("--device", default="0", help="推理设备（'0'=GPU, 'cpu'）")
     a = ap.parse_args()
 
-    if not 0.0 <= a.mix_ratio <= 1.0:
-        sys.exit(f"❌ --mix-ratio 需在 0~1 之间，当前 {a.mix_ratio}")
-
-    files, src_of, out_names, per_src = collect_entries(a.images, a.mix_prefix)
+    files, src_of, out_names, per_src = collect_entries(a.images)
     n = len(files)
     print(f"📥 输入 {n} 张，共 {len(a.images)} 组:")
     for si, (nm, cnt) in enumerate(per_src):
-        role = "主集" if si == 0 else f"混合集(前缀 '{a.mix_prefix}')"
-        print(f"     [{si}] {nm}: {cnt} 张  ({role})")
-    if len(a.images) > 1 and a.mix_ratio <= 0:
-        print("ℹ️  有多个输入目录但 --mix-ratio=0：本次仍只用主集")
+        print(f"     [{si}] {nm}: {cnt} 张")
 
-    # ---------- 1+2. 分块推理 + 质量评分（低内存，无多进程 DataLoader） ----------
+    # ---------- 分块推理 + 质量评分（分块控制内存峰值，不用 DataLoader） ----------
     drop_names = [s.strip() for s in a.drop_classes.split(",") if s.strip()]
     model = None
     drop_ids: list[int] = []
@@ -247,35 +198,21 @@ def main() -> None:
     why = f"含 {drop_names} / " if drop_names else ""
     print(f"🚫 {why}损坏的图片: {n_drop} 张 → 剩余候选 {n - n_drop} 张")
 
-    # ---------- 3. 质量加权随机抽样（多目录时按 --mix-ratio 分配名额） ----------
+    # ---------- 质量加权随机抽样 ----------
     cand = np.where(~dropped)[0]
     if len(cand) == 0:
         sys.exit("❌ 所有图片都被剔除，无候选")
     src_arr = np.array(src_of)
     k_total = min(a.keep, len(cand))
 
-    if len(a.images) > 1 and a.mix_ratio > 0:
-        cand_pri = cand[src_arr[cand] == 0]        # 主集（已去畸变）
-        cand_mix = cand[src_arr[cand] > 0]         # 混合集（未去畸变）
-        k_pri, k_mix = allocate_quota(k_total, a.mix_ratio,
-                                      len(cand_pri), len(cand_mix))
-        picked_pri = cand_pri[weighted_sample_without_replacement(
-            scores[cand_pri], k_pri, a.gamma, a.seed)]
-        picked_mix = cand_mix[weighted_sample_without_replacement(
-            scores[cand_mix], k_mix, a.gamma, a.seed + 1)]
-        picked = np.concatenate([picked_pri, picked_mix])
-        print(f"🧩 名额分配: 主集 {len(picked_pri)} 张 + 混合集 {len(picked_mix)} 张"
-              f"（目标比例 {a.mix_ratio:.0%}，实际 "
-              f"{len(picked_mix) / max(len(picked), 1):.0%}）")
-    else:
-        picked = cand[weighted_sample_without_replacement(
-            scores[cand], k_total, a.gamma, a.seed)]
+    picked = cand[weighted_sample_without_replacement(
+        scores[cand], k_total, a.gamma, a.seed)]
 
     a.out_dir.mkdir(parents=True, exist_ok=True)
     for i in picked:
         shutil.copy2(files[i], a.out_dir / out_names[i])
 
-    # ---------- 4. 统计与报告 ----------
+    # ---------- 统计与报告 ----------
     print(f"选中 {len(picked)}/{len(cand)} 张（质量加权 γ={a.gamma}）")
     for si, (nm, _) in enumerate(per_src):
         sel = int(np.sum(src_arr[picked] == si))

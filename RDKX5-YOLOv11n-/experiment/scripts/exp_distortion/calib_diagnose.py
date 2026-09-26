@@ -26,7 +26,7 @@
 
     # 顺带扫棋盘素材，给出覆盖半径 + 用 5 参数/8 参数(rational) 重标并对比
     python experiment/scripts/exp_distortion/calib_diagnose.py \
-        --board data/AUV_1/board --cols 11 --rows 8 --square-mm 20 \
+        --board data/calib/AUV_1_board --cols 11 --rows 8 --square-mm 20 \
         --refit 5 8 --save-refit experiment/runs/exp_distortion/calib
 
 判读标准（脚本会直接给结论）：

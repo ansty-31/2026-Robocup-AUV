@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
-"""
-把溯源命中的原始帧落地到本地缓存（domain 映射的唯一输入）
+"""把溯源命中的原始帧落地到本地缓存（各域渲染的唯一输入）
 
-为什么需要
-----------
-· AUV_2/AUV_3/AUV_4 在裸 MJPEG 里，按 SOI 字节偏移切出来是无损的；
-· AUV_1 在 `rec_front.mp4` 里（重编码件），必须**顺序解码**才能帧准——
-  `cap.set(CAP_PROP_POS_FRAMES, n)` 在 mp4 上不保证逐帧精确；
-· B/C/D 三个域要反复渲染同一批帧，落地一次避免重复解码。
+AUV_1 在 `rec_front.mp4` 里，必须顺序解码才能帧准；其余来源按 SOI 字节偏移切 MJPEG。
 
-输出：data/mapped/raw/<src>/frame_<idx:06d>.jpg（原分辨率 1280x720）
+输出：data/frames/mapped_anchors/<src>/frame_<idx:06d>.jpg（原分辨率 1280x720）
 
 用法：
     python scripts/1_prepare/provenance/materialize_raw.py --prov runs/prov/provenance_final_PNP.kpt4.yolov8.csv
@@ -27,11 +21,10 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "1_prepare"))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "1_prepare" / "pose"))
 
 import cv2  # noqa: E402
-import numpy as np  # noqa: E402
 
-from map_pose_dataset import SRC_PATH, read_raw, stream_offsets  # noqa: E402
+from map_pose_dataset import SRC_PATH, read_raw  # noqa: E402
 
-OUT = PROJECT_ROOT / "data/mapped/raw"
+OUT = PROJECT_ROOT / "data/frames/mapped_anchors"
 
 
 def main():
@@ -45,7 +38,6 @@ def main():
     for r in rows:
         need[r["src"]].add(int(r["num_src"]))
     print(f"需落地 {len(rows)} 张（去重后 {sum(len(v) for v in need.values())} 帧）")
-    print("  按源:", {k: len(v) for k, v in need.items()})
 
     for src, idxs in need.items():
         d = OUT / src

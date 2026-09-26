@@ -1,25 +1,17 @@
 #!/usr/bin/env python3
-"""
-录制文件 → 逐帧切出原始图片（统一入口，自动识别格式）
+"""录制文件 → 逐帧原始图片（原始分辨率；自动识别容器视频 / 裸 MJPEG 流）。
 
-支持两类输入，自动判断，参数统一：
+  * 容器视频（.mp4/.avi/.mov/.mkv）：cv2 逐帧解码后按 --quality 重编码为 JPEG；
+  * 裸 MJPEG（.mjpeg/.mjpg，文件头 FF D8 FF）：按 JPEG 标记【无损】字节切割
+    （不解码）；同目录存在 <文件>.timestamps 时可用 --every-seconds 按时间抽帧。
 
-  1) 容器视频（.mp4/.avi/.mov/.mkv）      → cv2 逐帧解码保存
-  2) 裸 MJPEG 流（.mjpeg/.mjpg，文件头 FF D8 FF，JPEG 首尾直接拼接）
-                                          → 按 JPEG 标记【无损】字节切割
-                                            （不解码、零画质损失、速度快）
-     若存在 <文件>.timestamps（逐帧时间戳），可用 --every-seconds 按时间抽帧
+输出：<同目录>/<文件名>_frames/frame_000001.jpg（--out-dir 可改）。
 
-用途：先切出原始帧 → 人工分类（红球/蓝球/门/标定板…）→
-      再用 scripts/1_prepare/prepare_frames.py 统一预处理（去畸变 + 补偿 + 640x640）。
-
-用法示例：
-    python scripts/1_prepare/extract_frames.py data/AUV_2/auv_xxx.mjpeg              # 裸流全量切
-    python scripts/1_prepare/extract_frames.py data/AUV_2/auv_xxx.mjpeg --every-seconds 1
-    python scripts/1_prepare/extract_frames.py data/AUV_1/rec_front.mp4 --step 5     # 容器视频抽帧
-    python scripts/1_prepare/extract_frames.py <文件> --dry-run                       # 只统计不写盘
-
-输出: <同目录>/<文件名>_frames/frame_000001.jpg ...（原始分辨率）
+用法：
+    python scripts/1_prepare/extract_frames.py data/raw/AUV_2_auv_xxx.mjpeg              # 裸流全量切
+    python scripts/1_prepare/extract_frames.py data/raw/AUV_2_auv_xxx.mjpeg --every-seconds 1
+    python scripts/1_prepare/extract_frames.py data/raw/AUV_1_rec_front.mp4 --step 5     # 容器视频抽帧
+    python scripts/1_prepare/extract_frames.py <文件> --dry-run                          # 只统计不写盘
 """
 
 from __future__ import annotations
@@ -31,14 +23,12 @@ from pathlib import Path
 
 import cv2
 
-IMG_EXTS = (".mjpeg", ".mjpg")          # 视为裸 MJPEG 流的扩展名
 VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv")
 SOI = b"\xff\xd8\xff"                    # JPEG Start Of Image
 
 
 # ---------------------------------------------------------------- 格式识别
 def is_raw_mjpeg(path: Path) -> bool:
-    """文件头为 FF D8 FF 即裸 MJPEG 流（单帧 JPEG 或拼接流）"""
     with open(path, "rb") as f:
         return f.read(3) == SOI
 
@@ -208,9 +198,6 @@ def main() -> None:
         except RuntimeError as e:
             print(f"❌ {e}")
             sys.exit(1)
-
-    print("   下一步：人工分类后运行 "
-          "python scripts/1_prepare/prepare_frames.py <分类目录> --config configs/vision.yaml")
 
 
 if __name__ == "__main__":

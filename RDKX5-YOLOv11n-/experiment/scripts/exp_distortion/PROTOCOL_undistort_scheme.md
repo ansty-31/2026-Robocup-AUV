@@ -154,13 +154,13 @@ PY=/home/ansty/anaconda3/envs/yolov8/bin/python
 # ① 标定体检（3 秒）：可逆性 / 放大倍率 / 棋盘覆盖
 $PY experiment/scripts/exp_distortion/calib_diagnose.py \
     --calibration configs/front_camera.yaml --board <棋盘目录> \
-    --cols 11 --rows 8 --square-mm 20 --out runs/<x>/diag.json
+    --cols 11 --rows 8 --square-mm 20 --out runs/<x>/diag.json    # `<x>` 是占位符；实验产物现归 experiment/runs/exp_distortion/（见 experiment/README.md 的迁移表）
 
 # ② 位置与速度（本地相对成本；绝对 ms 以上板实测为准，见 §4）
 $PY experiment/scripts/exp_distortion/bench_undistort_placement.py \
     --board-root /home/ansty/RDKX5/auv_vision/auv_vision \
     --calibration configs/front_camera.yaml \
-    --frames <720p 帧目录> --n 60 --out runs/<x>/e3_local.json
+    --frames <720p 帧目录> --n 60 --out runs/<x>/e3_local.json    # `<x>` 是占位符；实验产物现归 experiment/runs/exp_distortion/（见 experiment/README.md 的迁移表）
 
 # ③ 几何 / 模型评估（1 分钟）
 $PY experiment/scripts/exp_distortion/compare_kpt_spacing.py \
@@ -239,7 +239,7 @@ $PY experiment/scripts/exp_distortion/compare_kpt_spacing.py \
 ## 8. 执行现状与命名对照（2026-09-23 更新，**以本节为准**）
 
 本协议写于实验设计阶段；实际执行时域命名与判据有更新，**新口径见
-`experiment/runs/domain/EXPERIMENT_DESIGN.md`**（含预先登记的判定阈值 §13）。对照表：
+`experiment/runs/domain/reports/EXPERIMENT_DESIGN.md`**（含预先登记的判定阈值 §13）。对照表：
 
 | 本协议旧称 | 现在的域名 | 板端方案 | 图像链路 |
 |---|---|---|---|
@@ -261,7 +261,7 @@ $PY experiment/scripts/exp_distortion/compare_kpt_spacing.py \
 - **标定 A 与 C 对同一相机的几何分歧达 59%**（门距 1.12 m vs 1.79 m），两者各自内部
   自洽。用部署中模型自己的预测点判定：C 几何下门框矩形一致性提高约一倍
   （W 误差 1.24%→0.66%、H 2.37%→1.56%）、reprojRMS 6.06→3.61 px
-  ⇒ **A 是错的那个**，部署中的门距偏小约 37%。详见 `experiment/runs/domain/EXPERIMENT_DESIGN.md` §12。
+  ⇒ **A 是错的那个**，部署中的门距偏小约 37%。详见 `experiment/runs/domain/reports/EXPERIMENT_DESIGN.md` §12。
 - **A-old 去畸变会裁掉视场**：test 129 帧里有 6 个 GT 可见角点被打出画面（4 帧），
   B/C/D 均为 0；清水下恶化到 16 帧里 6 帧。
 
@@ -269,5 +269,5 @@ $PY experiment/scripts/exp_distortion/compare_kpt_spacing.py \
 
 1304 张标注帧已全部溯源到裸流原始帧（`runs/prov/provenance_final_PNP.kpt4.yolov8.csv`），
 可重投影到任意域而**无需重新标注**。关键事实：**标注文件名里的编号就是裸流帧序号**；
-`data/AUV_x/*_frames` 是「每 25 帧取 1 帧 + 重编号」的残片，不能当全量帧用。
+`data/frames/AUV_*_frames`（原 `data/AUV_x/*_frames`，2026-09-25 归整；见 `cleanup_record/MOVES_data_20260925.tsv`）是「每 25 帧取 1 帧 + 重编号」的残片，不能当全量帧用。
 工具见 `scripts/1_prepare/provenance/` 与 `map_pose_dataset.py`。

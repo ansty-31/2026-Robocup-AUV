@@ -18,6 +18,8 @@ import base.settings as S
 from common.detector import (Det, bgr_to_packed_nv12, bgr_to_packed_nv12_fast,
                       decode_yolo11_split, _nms)  # noqa: F401
 from gate.geometry import GATE_FRAME_W, GATE_FRAME_H
+from gate.gate_postproc import (apply as postproc_apply, det_cfg,
+                                postproc_cfg)
 
 _KPT_PER_PT = 3                       # (x, y, visible)
 
@@ -72,6 +74,11 @@ def decode_yolo11_kpt(outputs, labels, frame_w, frame_h,
     nc = len(labels)
     kch = _KPT_PER_PT * kpt_dim
     bins = np.arange(reg_max, dtype=np.float32)
+    # ⚠️ 按 **(网格 g, 通道 C)** 自描述分组，**不依赖张量顺序**。
+    #    2026-09-26 板端实测：同一个 bin 用 hbm_runtime 跑两次，返回 dict 里 9 个张量的
+    #    排列都不一样（形状都对、位置乱序）⇒ **任何按顺序取输出的写法都会静默错**。
+    #    ONNX 文件里的顺序（output0/566/567/…，见 doc/gate_pose_decode_spec.md §2）只是
+    #    导出清单，不是运行时保证。
     grids = {}
     for arr in outputs.values():
         a = np.asarray(arr)
@@ -142,7 +149,7 @@ class GateKeypointBackend(object):
     """真机 gate keypoint 后端骨架（hbm_runtime / pyeasy_dnn / onnx，同 detector 惯例）。"""
 
     def __init__(self, path, labels, kpt_order, camera,
-                 kind="hbm_runtime", input_size=640, vis_thr=None):
+                 kind="hbm_runtime", input_size=640, vis_thr=None, det_conf=None):
         from gate.geometry import CameraModel
         assert isinstance(camera, CameraModel)
         self.labels = list(labels)
@@ -152,6 +159,12 @@ class GateKeypointBackend(object):
         self.input_size = int(input_size)
         self.kind = kind
         self._key = "input"                       # hbm_runtime 输入名(加载后解析)
+        # 候选框 score 阈值：显式参数 > `vision.gate.det.conf` > 共用的 model.score_threshold > 0.6
+        # （规范 `doc/gate_pose_decode_spec.md` §6 CONF。**不用共用那一个**：给 gate 调阈值不该动撞球。）
+        self._det_conf = det_cfg(det_conf)
+        # 解码后处理（规范 §4）：几何合法 + 重复框去重。参数读 `vision.gate.postproc`，
+        # 缺键用 gate_postproc 的兜底（不改行为、不崩）。
+        self._post = postproc_cfg()
         # 解码期角点可见度硬门限：低于它的角点 conf 直接清 0，**下游再也看不到**。
         # 优先级（高 → 低）：
         #   ① 构造参数 vis_thr（预览工具/测试显式给，如 0.0 = 保留模型原始置信度）
@@ -229,6 +242,11 @@ class GateKeypointBackend(object):
         # X5 导出结构未定型：默认按 split-head 张量字典；若是列表则包成 dict 占位
         if not isinstance(outputs, dict):
             outputs = {("out%d" % i): o for i, o in enumerate(outputs)}
-        return decode_yolo11_kpt(outputs, self.labels, w, h,
+        dets = decode_yolo11_kpt(outputs, self.labels, w, h,
                                  input_w=pre.size, input_h=pre.size,
+                                 conf=self._det_conf,
                                  vis_thr=self._vis_thr)
+        # 解码后处理（规范 §4）：几何合法 + 重复框去重 —— 任务与预览必须看到同一批实例。
+        # 注意这里的可信角点口径是 **V_MIN（keypoint.conf_thr）**，不是解码期的 vis_thr：
+        # 几何合法性只对"四角都可信"的实例判（conf_thr=None ⇒ gate_postproc 自己去读 cfg）。
+        return postproc_apply(dets, conf_thr=None, cfg=self._post)

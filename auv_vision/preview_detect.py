@@ -19,7 +19,8 @@
   python3 preview_detect.py --classes all --save /tmp/pv --duration 20
   python3 preview_detect.py --classes gate --model models/auv_multi.bin --conf 0.4
 
-门角点(关键点)模式 —— 用 gate 任务模型 gate_kpt_bayese_640x640_nv12.bin，
+门角点(关键点)模式 —— 用 gate 任务模型（`vision.model.task_models.gate.path`，当前为阶段一
+`gate_kpt_stage1_g240_i16_bayese_640x640_nv12.bin`），
 画 4 个角点 + 四边形，并打印每点坐标/置信度与四角组合判定：
   python3 preview_detect.py --gate-kpt --stream                  # 门角点预览
   DISPLAY=:0 python3 preview_detect.py --gate-kpt --show         # 板子桌面窗口
@@ -97,7 +98,7 @@ def main():
     model_desc = S.vision.model.path
     if a.gate_kpt:
         from gate.gate_detector import build_gate_backend
-        backend = build_gate_backend()
+        backend = build_gate_backend(conf=a.conf)   # --conf 同时覆盖 gate 的候选阈值
         if backend is None:
             print("[PV] 门角点后端不可用(权重缺失)；检查 vision.model.task_models.gate.path")
             return 3

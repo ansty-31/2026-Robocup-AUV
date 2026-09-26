@@ -36,8 +36,18 @@ ABORTED = "aborted"    # 外部中止（如转向中整门丢失）
 
 _TERMINAL = (DONE, GIVEUP, ABORTED)
 
-_D_HDG = dict(enable=True, tol_deg=8.0, measure_frames=5, max_iters=3,
-              max_step_deg=0.0, settle_ms=400, settle_tol_deg=2.0,
+_D_HDG = dict(enable=True, tol_deg=8.0, measure_frames=5, max_iters=5,
+              # ---- 2026-09-26 新增（用户定：「无法测量 psi 就用历史上的最后一个」）----
+              # hist_ms：历史 psi 保鲜期(ms)。**0 = 不限年龄**；**<0 = 关闭回退**。
+              hist_ms=0.0,          # 0 = 不限年龄（本门内）；<0 = 关闭回退
+              # entry_psi_first：**航向优先** —— 居中还没达标也能起转（解死锁：航向歪 ⇒
+              #   门偏一侧 ⇒ 居中确认不了 ⇒ 按老规则不许转 yaw）。false = 旧顺序。
+              entry_psi_first=False,   # 2026-09-26 晚：用户定必须先居中
+              # 航向优先的距离门（满足任一）：新鲜 z ≤ psi_first_z_max 或 框占比 ≥ psi_first_ratio
+              psi_first_z_max=2.5, psi_first_ratio=0.30,
+              # 2026-09-26：max_step_deg 0(不限) → 15（逐步收敛）；max_iters 3 → 5
+              max_step_deg=10.0,
+              settle_ms=400, settle_tol_deg=2.0,
               measure_timeout_ms=2000, timeout_ms=30000,
               # 一直没有遥测 yaw 时的等待上限（超过就放弃正航向，别白等总超时）
               wait_tel_ms=3000.0, turn_timeout_s=8.0, fresh_ms=800.0,
@@ -56,14 +66,14 @@ _D_HDG = dict(enable=True, tol_deg=8.0, measure_frames=5, max_iters=3,
               #   之后再调 yaw」，而且触发的那一帧必须是 full（p3p 的 psi std 64~69°）。
               #   true 会让"居中那一刻恰好是 p3p/coarse"也能起转（少等一帧），但会让
               #   HDG 在没真正看清门的时候就开始转 ⇒ 现场表现"一上来就调 yaw"。要试可以开。
-              entry_stale_ok=False,
+              entry_stale_ok=True,   # 2026-09-26：默认 true（本帧非 full 也能用历史 psi 起转）
               # blind_enable：遥测缺失时**允许开环盲转**（角度÷`motion.turn_pid.blind_rate_dps`
               #   换算时长），转完回 SETTLE 再测 psi 迭代 ⇒ 无遥测也能收敛（精度受假设速率限制）。
               #   false = 旧行为：`wait_tel_ms` 内没遥测就 giveup（且此后本门不再转）。
               blind_enable=True)
 
 # 开关键：其余键都是数值，只有这几个是布尔 → 用 flag() 解析（别用 bool()）
-_BOOL_KEYS = ("enable", "entry_stale_ok", "blind_enable")
+_BOOL_KEYS = ("enable", "entry_stale_ok", "blind_enable", "entry_psi_first")
 
 
 def hdg_cfg(node=None):
@@ -180,7 +190,7 @@ class HeadingAligner(object):
 
     # ------------------------------------------------------------------
     def step(self, now_ms, psi_deg=None, psi_fresh=False, yaw_telemetry=None,
-             gate_lost=False):
+             gate_lost=False, psi_stale=None):
         """推进一帧。
 
         Args:
@@ -188,6 +198,10 @@ class HeadingAligner(object):
             psi_fresh:   该测量是否新鲜（gate_task 用时间戳判；旧值不算）
             yaw_telemetry: 下位机回传的绝对航向（度；None=没有遥测）
             gate_lost:   本帧整门丢失
+            psi_stale:   **历史最后一个 psi**（最近一次 full 帧的 EMA；None=没有/已过期）。
+                         只在「攒不够 full 样本」时兜底用一次（见 MEASURE 分支）—— 2026-09-26 用户定：
+                         「居中成功后如果无法测量 psi，就用历史上的最后一个 psi」。
+                         ⚠️ 它**不进**样本列表当重复样本（那会把中位数拉偏、按旧偏差多转一次）。
         Returns:
             (state, yaw_cmd)
         """
@@ -258,6 +272,20 @@ class HeadingAligner(object):
             if psi_deg is not None and psi_fresh:
                 self._samples.append(float(psi_deg))
             need = max(1, int(self.cfg["measure_frames"]))
+            if len(self._samples) < need:
+                t_meas = self._t_meas if self._t_meas is not None else now_ms
+                if now_ms - t_meas <= self.cfg["measure_timeout_ms"]:
+                    return MEASURE, 0.0
+                if psi_stale is None:
+                    return self._giveup("%.1fs 内没攒够 %d 帧 full 测量（且没有可用的历史 psi）"
+                                        % (self.cfg["measure_timeout_ms"] / 1000.0, need))
+                # ★ 2026-09-26 用户定：「无法测量 psi，就用历史上的最后一个 psi」——
+                #   把它当**本次**测量值（塞一份列表走同一条决策路径），
+                #   于是不会因为"模型这会儿看不到角点"就把整门正航向废掉。
+                self._samples = [float(psi_stale)] * need
+                self.log("[HDG] ⏳ %.1fs 没攒够 %d 帧 full 测量 → 用**历史最后一个 psi**"
+                         "=%+.1f° 兜底（不放弃）"
+                         % (self.cfg["measure_timeout_ms"] / 1000.0, need, float(psi_stale)))
             if len(self._samples) >= need:
                 self.psi_meas = float(st.median(self._samples))
                 self.log("[HDG] 测量 %d 帧 → psi=%+.1f°（中位数）" % (len(self._samples), self.psi_meas))
@@ -284,10 +312,6 @@ class HeadingAligner(object):
                     return self._giveup("迭代已用满 %d 次（残余 psi=%+.1f°）"
                                         % (self.iters, self.psi_meas))
                 return self._start_turn(now_ms)
-            t_meas = self._t_meas if self._t_meas is not None else now_ms
-            if now_ms - t_meas > self.cfg["measure_timeout_ms"]:
-                return self._giveup("%.1fs 内没攒够 %d 帧 full 测量"
-                                    % (self.cfg["measure_timeout_ms"] / 1000.0, need))
             return MEASURE, 0.0
 
         # ---------------- 转（目标冻结；不在转动中重测）----------------

@@ -1,32 +1,24 @@
 #!/usr/bin/env python3
-"""
-把已标注的 pose 数据集重投影到指定「去畸变域」（Route B 的产物落地）
+"""把已标注的 pose 数据集重投影到指定「去畸变域」，并写出该域的 YOLO pose 数据集
 
-为什么可以这样做
-----------------
-`runs/prov/provenance_final_*.csv` 给出了每张标注图对应的**裸流原始帧**
-（`src` + `num_src`）以及当年生成它时用的链路（`chain`：`aold`=标定A去畸变 /
-`nound`=不去畸变）。因此：
+依据 `runs/prov/provenance_final_*.csv`（每张标注图对应的裸流原始帧 `src`/`num_src`
+与当年生成它的链路 `chain`：`aold`=标定A去畸变 / `nound`=不去畸变 / `d640`=640 上去畸变）：
 
-    标注图上的角点(640 像素)  --链路反变换-->  裸流像素  --新链路-->  新域角点(640 像素)
-    裸流原始帧                --新链路------>  新域图像
+    标注图角点(640) --链路反变换--> 裸流像素 --新链路--> 新域角点(640)
+    裸流原始帧      --新链路-------------------------> 新域图像
 
-不需要重新标注，也不损失任何信息（唯一损失是新域图像本身的 JPEG 重编码）。
-
-三个域（与 PROTOCOL_undistort_scheme.md 的 P1/P2/P4 对齐）
-----------------------------------------------------------
+三个域（与 PROTOCOL_undistort_scheme.md 的 P1/P2/P4 对齐）：
     B 域 = P4   resize(640)                → enhance?          [不去畸变]
     C 域 = P1   remap@720p → resize(640)   → enhance?          [720p 上去畸变]
     D 域 = P2   resize(640) → enhance?     → remap@640         [640 上去畸变]
 
-⚠️ D 域**不能**用 `prepare_frames.calibration_maps(calib, 640, 640)`：那会用
-未缩放的 K（fx≈1208，按 1280 宽标定）去处理 640 图，几何是错的。
-P2 的正确定义（与 experiment/scripts/exp_distortion/bench_undistort_placement.py 一致）：
-
+D 域（P2）的映射不用未缩放的 K，而是：
     S     = diag(640/1280, 640/720, 1)
     nk720 = getOptimalNewCameraMatrix(K, dist, (1280,720), 0, (1280,720))
     nk640 = S @ nk720
     m640  = initUndistortRectifyMap(S @ K, dist, None, nk640, (640,640))
+
+本模块同时是各域图像/坐标的公共库（`Domain`、`SRC_PATH`、`read_raw`、`read_pose_label` …）。
 
 用法：
     python scripts/1_prepare/pose/map_pose_dataset.py --domain B --enhance on  --out experiment/data/pose_B
@@ -35,6 +27,8 @@ P2 的正确定义（与 experiment/scripts/exp_distortion/bench_undistort_place
     python scripts/1_prepare/pose/map_pose_dataset.py --domain B --enhance off --out experiment/data/pose_B_noenh
     # 自检：角点 环回误差（标注→raw→同域应回到原点）
     python scripts/1_prepare/pose/map_pose_dataset.py --domain C --selfcheck
+
+默认输出 `data/mapped/pose_<域><_noenh|_wb>`；`manifest.csv` + `data.yaml` + `domain_meta.json`
 """
 from __future__ import annotations
 
@@ -61,12 +55,12 @@ SOI = b"\xff\xd8\xff"
 WB, CLAHE, GAMMA = [1.0, 1.05, 1.15], 0.5, 0.85
 
 SRC_PATH = {                     # provenance 的 src → 取帧方式
-    "AUV_4dir": ("dir", "data/AUV_4/auv_4_frames"),
-    "AUV_4":    ("mjpeg", "data/AUV_4/auv_4.mjpeg"),
-    "AUV_3":    ("mjpeg", "data/AUV_3/auv_20260911_201754.mjpeg"),
-    "AUV_2":    ("mjpeg", "data/AUV_2/auv_20260910_172208.mjpeg"),
-    "AUV_1":    ("video", "data/AUV_1/rec_front.mp4"),
-    "AUV_1board": ("dir", "data/AUV_1/board"),
+    "AUV_4dir": ("dir", "data/frames/AUV_4_auv_4_frames"),
+    "AUV_4":    ("mjpeg", "data/raw/AUV_4_auv_4.mjpeg"),
+    "AUV_3":    ("mjpeg", "data/raw/AUV_3_auv_20260911_201754.mjpeg"),
+    "AUV_2":    ("mjpeg", "data/raw/AUV_2_auv_20260910_172208.mjpeg"),
+    "AUV_1":    ("video", "data/raw/AUV_1_rec_front.mp4"),
+    "AUV_1board": ("dir", "data/calib/AUV_1_board"),
 }
 WATER = {"AUV_1": "中水", "AUV_4": "中水", "AUV_4dir": "中水",
          "AUV_2": "浊水", "AUV_3": "浊水", "AUV_5": "清水"}
@@ -107,8 +101,7 @@ class Domain:
     """一个目标域的 点变换 与 图像链路"""
 
     def __init__(self, name: str, calib: str | None, enhance):
-        """enhance: True/"on"=WB+CLAHE+gamma；"wb"=只 WB+gamma（无 CLAHE）；False/"off"=不做
-        （板端 2026-09-23 起用 "wb"，配 LUT 白平衡实现）"""
+        """enhance: True/"on"=WB+CLAHE+gamma；"wb"=只 WB+gamma（无 CLAHE）；False/"off"=不做"""
         self.name = name
         self.enhance = enhance
         self.calib = calib
@@ -140,12 +133,12 @@ class Domain:
             # raw 像素 → squish 到 640
             return p.reshape(-1, 2) * sc
         if self.name == "C":
-            # raw → 720p 去畸变 → squish 到 640（末尾缩放只对 720p 结果成立）
+            # raw → 720p 去畸变 → squish 到 640
             q = cv2.undistortPoints(p, self.K, self.dist, P=self.nk720).reshape(-1, 2)
             return q * sc
         if self.name == "D":
-            # raw → squish 到 640（畸变域）→ 640 上去畸变；P=nk640 已直接给出 640 像素，
-            # 绝不能再乘一次 sc（2026-09-23 踩过：标签整体缩一半，x 差 233 px）
+            # raw → squish 到 640（畸变域）→ 640 上去畸变；
+            # P=nk640 已直接给出 640 像素，不能再乘 sc
             return cv2.undistortPoints(p * sc, self.K640, self.dist,
                                        P=self.nk640).reshape(-1, 2)
         raise ValueError(self.name)
@@ -186,8 +179,8 @@ def labeled_to_raw(pts640: np.ndarray, chain: str) -> np.ndarray:
     """标注图上的 640 像素 → 裸流像素。
 
     chain:  aold  = 标定A 去畸变（720p remap→resize）
-            nound = 不去畸变（只 resize）           ← B 域标注
-            d640  = 640 上去畸变（resize→remap@640） ← **D 域标注（板端新方案）**
+            nound = 不去畸变（只 resize）
+            d640  = 640 上去畸变（resize→remap@640）
     """
     p = np.asarray(pts640, np.float64)
     p720 = p * np.array([RAW_W / SIZE, RAW_H / SIZE])      # 640 → 720p（squish 逆）
@@ -220,7 +213,7 @@ def stream_offsets(path: str) -> list[int]:
     return _OFF[path]
 
 
-CACHE = PROJECT_ROOT / "data/mapped/raw"
+CACHE = PROJECT_ROOT / "data/frames/mapped_anchors"
 
 
 def read_raw(src: str, idx: int):
@@ -277,11 +270,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--prov", default="runs/prov/provenance_final_PNP.kpt4.yolov8.csv")
-    ap.add_argument("--dataset", default="data/AUV_4/PNP.kpt4.yolov8")
+    ap.add_argument("--dataset", default="data/datasets/AUV_4_PNP.kpt4.yolov8")
     ap.add_argument("--domain", required=True, choices=["B", "C", "D"])
     ap.add_argument("--calibration", default="configs/front_camera.yaml")
     ap.add_argument("--enhance", choices=["on", "wb", "off"], default="on",
-                    help="on=WB+CLAHE+gamma（旧）；wb=只 WB+gamma 无 CLAHE（板端新方案）；off=不做")
+                    help="on=WB+CLAHE+gamma；wb=只 WB+gamma（无 CLAHE，板端）；off=不做")
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--selfcheck", action="store_true",
                     help="只做角点环回自检（标注→raw→同域），不写图")
@@ -316,11 +309,10 @@ def main():
               f"p90 {np.percentile(e,90):.4f}  最大 {e.max():.4f} px")
         return
 
-    # 默认输出目录按增强档位命名，与生成时的约定一致（定稿生产集 = data/mapped/pose_D_wb）
+    # 默认输出目录按增强档位命名
     _suffix = {"on": "", "off": "_noenh", "wb": "_wb"}[a.enhance]
     out = a.out or PROJECT_ROOT / f"data/mapped/pose_{a.domain}{_suffix}"
-    manifest, stats = [], dict(n_img=0, n_fail=0, n_out=0, out_kpt=0,
-                               dive={}, water={})
+    manifest, stats = [], dict(n_img=0, n_fail=0, n_out=0, out_kpt=0)
     for r in rows:
         split = r["split"]
         stem = Path(r["img"]).stem
@@ -393,11 +385,6 @@ def main():
                 kpt_out_of_view_total=stats["out_kpt"])
     (out / "domain_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
     print(f"写出 {stats['n_img']} 张（失败 {stats['n_fail']}）→ {out}")
-    print(f"  角点出画：{stats['n_out']} 帧 / {stats['out_kpt']} 个点（v 置 0）")
-    import collections
-    print("  来源:", dict(collections.Counter(m["src"] for m in manifest)))
-    print("  水况:", dict(collections.Counter(m["water"] for m in manifest)))
-    print("  划分:", dict(collections.Counter(m["split"] for m in manifest)))
 
 
 if __name__ == "__main__":

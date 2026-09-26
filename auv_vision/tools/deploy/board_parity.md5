@@ -1,35 +1,38 @@
 [ 167b72c7a524b5b3d5327284ad0598c8  base/camera.py ]
 [ 5cd1d8b7a7777a4dd23414ed50790c53  base/__init__.py ]
-c58c8d8a45810ae67faf23f045e59dac  base/settings.py
+[ c58c8d8a45810ae67faf23f045e59dac  base/settings.py ]
 [ f61ea247f48f8ac214f25fd749fbcfe4  base/telemetry.py ]
 [ 5911a38a3a720ba302a28768e4b2cf47  base/uart.py ]
-21a25280e51063f305f08a21191b4bf6  cfg/backup/front_camera_AUV1_water_fx782.yaml
-8099b88b6113ed7a2aeb49524e353fc4  cfg/comm.yaml
+[ 21a25280e51063f305f08a21191b4bf6  cfg/backup/front_camera_AUV1_water_fx782.yaml ]
+[ 50a115870d80c950fc5d2894e1710aa4  cfg/comm.yaml ]
 [ 5e9c040d53ed6818f09ef55acc8e9026  cfg/front_camera_air.yaml ]
 [ cb757ca6a8b3aadec0f007af547bcd27  cfg/front_camera.yaml ]
-[ 0a8bd76ade26721efac309a6633f08bf  cfg/vision.yaml ]
+[ 33e57fdba9cd371617f011d70c8851a7  cfg/vision.yaml ]
 [ 31fb75e14217adf60d1b378283967604  common/cfgnode.py ]
 [ 58dfcca5f25424d20e117a4b5d1bac18  common/detector.py ]
 [ b632fee694cd4166265b1aeda927dbac  common/__init__.py ]
 [ b2983b6a93e934849e78f4f8e7374f24  common/PID.py ]
 [ 0be96c81ddb96f1943cf6eeacc9f0b4a  common/preprocess.py ]
 [ 9ad40e2ca2e0eaa41dd8235d9a81292b  common/turn_deg.py ]
-00ec5c4e383b31cd928c92783624d3f3  doc/2026-09-22-改动记录-review.md
-988f07fb2edf5a1ad2f6887aca8df8ca  doc/2026-09-23-改动记录-review.md
+[ 00ec5c4e383b31cd928c92783624d3f3  doc/2026-09-22-改动记录-review.md ]
+[ 00e590cbe5ef006d7cd600527d5f671b  doc/2026-09-23-改动记录-review.md ]
+[ 27f9de5c7c0a42ba8e69f7469cb2ec9b  doc/2026-09-26-改动记录-review.md ]
 [ b905a19d6a483b703ae4e0eb5f898206  doc/待研究-缺角位姿先验（三维信息复用）.md ]
 [ 8968abf17e5d86abbc71643566dde548  doc/前视USB相机低延迟推流方案.md ]
-6bc1caefa77ad711f0fb6f322715e3e9  doc/实验待测-runbook.md
+[ a57ccf331e39ab744a36db6c52600882  doc/实验待测-runbook.md ]
 [ e14fc41ec0e2bc32c40ac1280ed660dd  doc/算法说明-gate-角点逐点融合滤波.md ]
 [ 7ee15f996311b79ccc0ab6290fa0b240  doc/算法说明-gate-PnP移植方案.md ]
-a9568ec075ef5ac4384ad5672bfa753c  doc/算法说明.md
+[ 955430485cdc06be4f50e48a26345377  doc/算法说明.md ]
 [ bb695e1d11b6f7d47dc5ebfd71479424  doc/现场卡-靶子法.md ]
-bf9f01fb702d0090dc5f796d62247332  doc/psi测量步骤_20260923.txt
-a68a5ee328101423e07f123491586232  gate/过门-状态机与参数.md
-[ 9a39344f8b57b6124362015a99708c54  gate/gate_decode.py ]
-[ 1cf0298e90f4092ea9e1a124f468fd0b  gate/gate_detector.py ]
+[ e030feb8aecbd76b0e2e33c284a60794  doc/gate_pose_decode_spec.md ]
+[ bf9f01fb702d0090dc5f796d62247332  doc/psi测量步骤_20260923.txt ]
+[ f166f330e8337bec35139c4601f17348  gate/过门-状态机与参数.md ]
+[ df219e7d6f77cfa7debd853d45916f84  gate/gate_decode.py ]
+[ 87e47531d0b4574ef2a14fbdc03090c7  gate/gate_detector.py ]
 [ 5fde068d71cf396c5956f12c6a59437a  gate/gate_frontend.py ]
-[ 64662c537480fdca960cc11bfe0b9a70  gate/gate_task.py ]
-2169e6b91760775822014008c8e30c9d  gate/geometry.py
+[ bb5dbb7234a59cee4ba9f832f755f6c2  gate/gate_postproc.py ]
+[ 84bf161080ee578e38e13b60e314bbc2  gate/gate_task.py ]
+[ 2169e6b91760775822014008c8e30c9d  gate/geometry.py ]
 [ c16afcbc5191d99a89de0fd4d563381a  gate/heading_align.py ]
 [ d875126922153e11c75cd10db0f96ba1  gate/__init__.py ]
 [ f8cee57d64ab6fba36906d56ead59426  gate/kpt_memory.py ]
@@ -40,10 +43,10 @@ a68a5ee328101423e07f123491586232  gate/过门-状态机与参数.md
 [ 87fddfa544fc2fcbd040b7817a5f7fca  manual.sh ]
 [ 24542619f1225adceb3aca901ce8583b  manual/stream.py ]
 [ f94fe059e4e093a726eb8909779c4f83  manual/udp_server.py ]
-[ 945fdd0179abcc3f54da8ec404cd2949  models/gate_kpt_bayese_640x640_nv12.bin ]
+[ ef52c18b9fa05a08911d478adf29cce6  models/gate_kpt_stage1_g240_i16_bayese_640x640_nv12.bin ]
 [ a28156ba2949892b75f88d6e694380a6  models/yolo11n_detect_bayese_640x640_nv12.bin ]
-[ 659a0340c2b3edaa04bcc0cd9d2cf320  preview_detect.py ]
-47cd1790752431f77240271b97acc98c  README.md
+[ 27d87fe224e3d8972479a77b44cd1d6b  preview_detect.py ]
+[ c0cb676d4902663afa6946d940241c7f  README.md ]
 [ ab33a179888d4c71586afd634e5a97c6  task1_2/ball.py ]
 [ 57b1a7d3b2f227d198baea7064409b64  task1_2/__init__.py ]
 [ ca63df9ff9c8ddb1426cf42828c1e2ba  task1_2/run_ball_reverse.sh ]
@@ -59,7 +62,8 @@ a68a5ee328101423e07f123491586232  gate/过门-状态机与参数.md
 [ b7f47a1e4cecb7972ab1f5d74853e2a6  tests/README.md ]
 [ c6cd59b32d4dda8935b7acfb2a1396fa  tests/tasks/__init__.py ]
 [ fbdf6ac226b8880d3a9a797876d67830  tests/tasks/test_ball.py ]
-5c7c4e69b744d36b45bce901b92fee45  tests/tasks/test_gate_flow.py
+[ fe07ca56551263733756d1899168a9cf  tests/tasks/test_gate_flow.py ]
+[ e68142e466c4493e2ac8ae67bb180f14  tests/tasks/test_gate_postproc.py ]
 [ 896da81ac7393bf52017e4ea5660f023  tests/tasks/test_gate_vision.py ]
 [ e00ef6747a848c51dc7fca9663085799  tests/tasks/test_motion.py ]
 [ f9956fd663105cf940bd5d793f6c11f7  tests/tooling/__init__.py ]
@@ -74,13 +78,13 @@ a68a5ee328101423e07f123491586232  gate/过门-状态机与参数.md
 [ 6adef2cd74de53e3c064789de9be7f59  tools/analyze/analyze_task_log.py ]
 [ a75b0f625a574e52cecfbe0a9f0a769b  tools/analyze/feature_coverage.py ]
 [ 17558c18e49a677a743fc747244bfc87  tools/analyze/__init__.py ]
-d49d6f0a6b7e359cd2db5cf2fac1815b  tools/analyze/label_corners.py
+[ d49d6f0a6b7e359cd2db5cf2fac1815b  tools/analyze/label_corners.py ]
 [ 4744a7b352151c4017e48aeda85bcd96  tools/analyze/pnp_calib.py ]
 [ e32812add1dc4c019415006c5d7bcfcf  tools/analyze/ruler_calib.py ]
 [ 060e463ca296c45b081c112806d5ca4b  tools/analyze/tape_ticks.py ]
 [ 1a7c9bdb483a07b362b3d31b9eac3736  tools/check/auv_kpt_meter.py ]
 [ b0e008f0f1aaa8647df48c03bd57ec3e  tools/check/check_dof_sign.py ]
-[ 5ad49e51a44d3f3f8fc39e1d9a84e3c4  tools/check/check_gate_pose.py ]
+[ c621599e30c8d7fd2d5ae5855c8166b6  tools/check/check_gate_pose.py ]
 [ 1a2d1de7e3c1d58d8730187cd1c7a855  tools/check/check_kpt_decode.py ]
 [ e4879058d5482cbd9676279944d5b674  tools/check/check_paths.py ]
 [ bae354d7a2e6f23060a93f42e39e82d4  tools/check/check_pipeline_identity.py ]
@@ -88,4 +92,4 @@ d49d6f0a6b7e359cd2db5cf2fac1815b  tools/analyze/label_corners.py
 [ 31cf169f0703a5d2f86319e21e009e50  tools/deploy/archive_baks.sh ]
 [ dccb6a3c23ca6bc07ad1d8cea9f0aa07  tools/deploy/__init__.py ]
 [ a5756436e46199292608db3824a030b3  tools/__init__.py ]
-63c97cbc937d9fa9c3de0b43db9c96df  tools/README.md
+[ a46e80fa36231fe0fd56d19dc21e2409  tools/README.md ]

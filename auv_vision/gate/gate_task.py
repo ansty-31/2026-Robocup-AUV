@@ -36,7 +36,9 @@ from gate.gate_frontend import (parse_kpt_mode, width_range_depth, bbox_center,
                                 MODE_FULL, MODE_P3P, MODE_WIDTH, MODE_COARSE)
 from gate.geometry import (object_points, gate_pose, gate_normal_angles_deg,
                             GATE_FRAME_W, GATE_FRAME_H)
-from gate.heading_align import HeadingAligner, hdg_cfg
+from gate.heading_align import HeadingAligner, hdg_cfg, _D_HDG
+from gate.gate_postproc import (det_cfg, postproc_cfg, select_cfg,
+                                pick as postproc_pick)
 
 PH_SEARCH = "SEARCH"
 PH_ALIGN = "ALIGN"
@@ -57,17 +59,33 @@ SUB_REACQUIRE = "REACQUIRE"
 #    `comm.gate.pid_sway/pid_heave`、`comm.gate.surge.fast/slow` 里写"确实要单独一套"的覆盖。
 #    gate 里**用 yaw 的地方只有一处**：ALIGN.HDG 离散正航向（增益 comm.motion.turn_pid）；
 #    居中一律 sway（见 `_lateral_out`）。
-_D_ALIGN = dict(confirm_frames=4, px_x=0.20, px_y=0.25)
+_D_ALIGN = dict(confirm_frames=2, px_x=0.10, px_y=0.15)
+# ★ 2026-09-26 `confirm_frames` 4 → **2**（用户：居中稳定 2 帧就转；水下水波复杂、画面难维持稳定）。
+#   原因：新模型下 mode 每帧在 full/coarse 间跳，4 连帧几乎不可能攒到（实测 144 帧 ALIGN 里
+#   一次都没确认过）⇒ 正航向永远起不来。代价：抗单帧抖动变弱，用 `px_*` 收紧来补。
+# ★ 2026-09-26 收紧 0.20/0.25 → **0.10/0.12**（用户："很快进 fast，把居中阈值缩小一点"）。
+#   依据（板端 log/gate_one_2026092.jsonl）：居中达标那一帧实测 **dx=-0.079 / dy=-0.167**，
+#   而竖向余量只有 0.08 m —— 旧 0.25 相当于容许 0.169 m（@2.16 m）⇒ **带着超限的偏就进 fast**。
+#   换算：横 0.625·z、竖 0.313·z（rectified fx=1023.76/fy=1151.45@720p）⇒
+#   新 0.10 → 0.135 m（横余量 0.16 ✓）｜新 0.15 → 0.101 m。
+#   ⚠️ 竖向**不能再紧**：heave kp=1.0、执行器死区 0.138 ⇒ |dy|≤0.138 时没有推力，
+#     阈值设到死区以下就只能靠惯性滑进去（可能永远确认不了居中）。要更准就动 pid_heave。
+#   ⚠️ **别调回 0.20/0.25**；要更严就继续降，代价是 ALIGN 停留更久（creep 很慢但不冒险）。
 # 「在门口超时兜底」= 出口③：已在门口(占比≥z.near_lost_ratio) + 在安全带内，
 # 连续超过 timeout_ms 仍未 commit → 自己判过门并直冲（现场：门占比 0.97 时整框仍检测得到，
 # 没有这条就会在门口一直 creep）。实测记录见 md §3。
 _D_LOITER = dict(enable=True, timeout_ms=3000, dx_max=0.14, dy_max=0.20)
-# z.cross：实船验证过的穿门判据（出口①）。near_lost_* 是"到门口了"的两条判据（见出口②）。
-# ⚠️ 2026-09-23：**本轮只改 psi/转向，米制阈值保持陆上原值不动**（用户定）。
-#   已算出"读数尺度映射 ×1.43"（陆上读数=0.70×真距、今天≈真距 ⇒ 整组应 ×1.43：cross 1.10 /
-#   near_lost_m 1.43 / slow_max 1.86 / width.z_max 2.15），但**不回填**；要回填整组一起改。
-_D_Z = dict(cross=0.77, cross_confirm_frames=2, slow_max=1.3, near_lost_m=1.0,
-            near_lost_ratio=0.60, z_stale_ms=1500)
+# z.cross：穿门判据（出口①）。near_lost_* 是"到门口了"的两条判据（见出口②）。
+# ★ 2026-09-26 由 0.77 **缩小到 0.65**（用户："cross 也缩小一点"）：当前读数尺度 ≈ 真距（水里）
+#   ⇒ 触发点 ≈ 真 0.65 m，比原来更贴门才起冲刺；与同时收紧的 `align.px_*` 一起，"带偏冲门"的两个入口都变严。
+#   ⚠️ 历史遗留：陆上验证时读数 = 0.70×真距，若哪天整组 ×1.43 回填（cross 1.10 等），这个 0.65 要跟着重算。
+_D_Z = dict(cross=0.65, cross_confirm_frames=2, slow_max=1.3, near_lost_m=0.6,
+            near_lost_ratio=0.75, z_stale_ms=1500)
+# ★ 2026-09-26：**出口②的两条判据一起收紧**（用户：近距丢门的阈值也跟着缩小）——
+#   `near_lost_m` 1.0 → **0.6**、`near_lost_ratio` 0.60 → **0.75**。
+#   依据（板端 log/gate_one_2026092.jsonl）：那趟靠出口①(z=0.868 ≤ 1.0) 就判「已过门」满速冲了，
+#   psi=30.6°、dy=0.42；而当时占比只有 0.498（旧 0.60 也没到）。收紧后：
+#   要么真贴到 0.6 m 以内，要么门框真的占满 3/4 画面，**并且**航向闸门（见 _start_through）也过才冲。
 _D_SURGE = dict(creep=0.20, lost_backward=0.20, reacquire=0.25, through=0.6)
 # 进近两档 fast/slow 取自 comm.motion.surge_fast/surge_slow（与撞球共用同一份，见 _speed）。
 # ⚠️ creep/lost_backward 曾取 0.12 —— 那是**执行器死区以内(0 推力)**，等于这两个动作
@@ -76,20 +94,27 @@ _D_COARSE = dict(far_ratio=0.18, near_ratio=0.55, align_x=0.33, align_y=0.29)
 # 框占比阈值是**像素比**，与配置 fx 无关 ⇒ 不参与米制映射（本身也不动）。
 _D_WIDTH = dict(z_max=1.5)
 _D_TASK = dict(timeout_ms=300000, pass_target=1, pose_hold_frames=10)
-# ⚠️ 2026-09-23 晚由 0.7 提到 **0.9**（**与 cfg 同值**，以板端现场值为准）。
-#   0.9 意味着 `mode == full` 需要 4 个角点都 ≥0.9，而 **psi 只吃 full 帧** ⇒ 直接决定正航向能不能启动。
-#   别改回 0.5：0.5 会让鬼点/倒影被当成真角点（0.7 是 09-18 现场实测的旧值）。
+# ⚠️ 2026-09-26 由 0.9 改到 **0.8**（= 规范 `doc/gate_pose_decode_spec.md` §6 的 `V_MIN`）。
+#   0.9/0.7 是给**上一代**权重现场试出来的，不是本模型（阶段一 g240_i16）的标定值；
+#   0.8 与阶段一权重的评测/判定工作点同值。
+#   0.8 意味着 `mode == full` 需要 4 个角点都 ≥0.8，而 **psi 只吃 full 帧** ⇒ 直接决定正航向能不能启动。
+#   别改回 0.5：0.5 会让鬼点/倒影被当成真角点。
 # ⚠️ 与 `cfg/vision.yaml → gate.keypoint.conf_thr` 必须同值（用例 test_gate_defaults_match_cfg 守）。
-_D_KPT = dict(conf_thr=0.9)
+_D_KPT = dict(conf_thr=0.8)
 _D_HOLD = dict(max_frames=20)
 _D_REACQ = dict(max_ms=800, max_times=2, stop_ratio=0.75, reset_after_ms=3000)
 # THROUGH 结束条件按**时间**（帧数语义下冲刺时长随 fps 漂，而"要冲多远"是距离问题）；
 # confirm_ms<=0 → 退回旧的帧数语义。
-_D_THROUGH = dict(confirm_frames=8, confirm_ms=2500)
+_D_THROUGH = dict(confirm_frames=8, confirm_ms=2500, require_align_deg=8.0)
+# ★ require_align_deg（2026-09-26 新增，用户定）：**冲刺前的航向闸门** —— 最近一次测到的 psi
+#   必须 ≤ 它才允许进 THROUGH（≤0 = 关闸）。判据用 `_hdg_deg`（最近一次 full 帧的 EMA 历史值）；
+#   从没测到过 psi 时放行（没得判，否则「模型看不到角点」就永远过不了门）。
 # SEARCH = **左右平移扫视**（过门过程中不允许旋转搜索，2026-09-20 用户定）。
 # ⚠️ 波形**必须对称**（正反等时长）：遥测没有横向位置反馈，单向扫会一路漂到池壁；
 #    等时长 ⇒ 净位移≈0。残余漂移未验证，靠 timeout_ms 兜总时长。细节见 md §2.1。
-_D_SEARCH = dict(sweep_s=2.0, pause_s=1.0, sway=0.3)
+_D_SEARCH = dict(sweep_s=2.0, pause_s=1.0, sway=0.45)
+# ⚠️ 2026-09-26：兜底值由 0.3 对齐到 cfg 的 **0.45**（cfg 注释一直是"0.45 ≈ 25% 推力"，
+#    是代码兜底表漂了 —— 用例 test_gate_defaults_match_cfg 挡的就是这种事）。
 # ⚠️ reproj_px 曾写 8.0：8px 门槛会拒掉 ~88% 候选位姿，现场实测放宽到 20。
 _D_PNP = dict(reproj_px=20.0, z_min=0.2, z_max=15.0, refine=True,
               max_z_jump_m=0.8)
@@ -168,6 +193,16 @@ class GateTask(object):
         # 离散正航向（ALIGN.HDG；见 gate/heading_align.py）。每门只做一次，收敛或放弃后锁定。
         self._hdg = HeadingAligner(log=(print if S.DEBUG else (lambda *a: None)))
         self._hdg_cfg = hdg_cfg()
+        # ---- 选门策略（规范 doc/gate_pose_decode_spec.md §4；实现 gate/gate_postproc.py）----
+        self._select_cfg = select_cfg()          # near(默认) | corner(旧行为)
+        self._post = postproc_cfg()
+        print("[GATE] 选门策略=%s | 去重/几何=%s | 角点可信下限=%.2f | 候选 conf=%.2f"
+              % (self._select_cfg["mode"],
+                 ("edge_tol=%.2f/min_edges=%d/geom=%s"
+                  % (self._post["edge_tol"], self._post["min_edges"],
+                     self._post["geom_check"])),
+                 num(sub(V, "keypoint"), "conf_thr", _D_KPT["conf_thr"]),
+                 det_cfg()))
         self._hdg_done = True             # True=本门不需要再正航向（未启用或已出结论）
         self._hdg_done = not flag(self._hdg_cfg, "enable", True)
         # 航向误差测量（门法向 vs 光轴；**只有 full 帧可信**，p3p 实测 std 64~69°）
@@ -214,7 +249,8 @@ class GateTask(object):
         self._reacquire_ratio0 = None    # 进入 REACQUIRE 时的框占比（闭环后退基准）
         self._reacquire_cnt = 0          # 连续 REACQUIRE 次数（超限不再后退）
         self._reacquire_last_ms = None   # 上次真正后退的时刻（时间窗重置计数）
-        self._give_up_until_ms = None    # 放弃后退后的 HOLD 窗口截止          # 连续 REACQUIRE 次数（超限不再后退）
+        self._give_up_until_ms = None    # 放弃后退后的 HOLD 窗口截止
+        self._through_block_logged = False  # 本门是否已报过「航向闸门拦下冲刺」（每门一次）          # 连续 REACQUIRE 次数（超限不再后退）
         self._dbg_ratio = 0.0            # 本帧门框宽/屏宽（诊断+叠加）
         self._dbg_kpt = 0                # 本帧有效角点数（**记忆后**，用于判 mode）
         self._dbg_kpt_raw = 0            # 本帧原始有效角点数（诊断：看倒影污染程度）
@@ -337,17 +373,29 @@ class GateTask(object):
         return yaw_cmd
 
     def _hdg_fresh(self, mode, now_ms):
-        """本帧的航向测量是否可用作**样本**：必须 full 档（p3p 的 psi std 64~69° = 噪声）。
+        """本帧的 psi 是否可用作**当帧样本**：**只有 full 帧**（p3p 的 psi std 64~69° = 噪声）。
 
-        ⚠️ 2026-09-23：这里**删掉了 `fresh_ms` 的过期比较**（用户定）—— 它本来就是空转的：
-        mode==full 的帧当帧就把 `_hdg_ms` 刷成 now ⇒ age≡0；mode!=full 时上面的 mode 判据
-        已经 return False，永远走不到比较。留着只会让人误以为"fresh_ms 在限制转向"
-        （现场日志实测：`hdg_skip` 从未出现过 `stale(...)` 原因）。
-        参数仍保留在 cfg 里（向后兼容 + 日志可读），但不再参与任何判据。
+        ⚠️ 2026-09-26：本函数**只看"当帧能不能当样本"**，历史回退不在这里 ——
+        历史 psi 的两个合法用途是 ①起转判定（`_hdg_ready` / `_hdg_psi_first`）
+        ②MEASURE 攒不够样本时的**兜底**（`psi_stale` 参数，见 `heading_align.step`）。
+        把历史值当重复样本塞进 MEASURE 会把中位数拉偏 ⇒ 按旧偏差多转一次
+        （2026-09-26 实测：残余 -13.5° 的反向超调）。
         """
         if mode != MODE_FULL or self._hdg_deg is None or self._hdg_ms is None:
             return False
         return True
+
+    def _hdg_hist(self, now_ms):
+        """**历史最后一个 psi**（最近一次 full 帧的 EMA），按 `hdg.hist_ms` 判保鲜：
+        **0 = 不限年龄**；**<0 = 关闭回退**；超期 → None。"""
+        if self._hdg_deg is None or self._hdg_ms is None:
+            return None
+        hm = float(self._hdg_cfg.get("hist_ms", _D_HDG["hist_ms"]) or 0.0)
+        if hm < 0:
+            return None
+        if hm and (now_ms - self._hdg_ms) > hm:
+            return None
+        return self._hdg_deg
 
     def _hdg_ready(self, mode, now_ms):
         """是否可以（或必须）进正航向：启用 + 本门还没做 + 有可用的 psi。
@@ -360,8 +408,53 @@ class GateTask(object):
         if self._hdg_done or not self._hdg.enabled:
             return False
         if flag(self._hdg_cfg, "entry_stale_ok", True):
-            return self._hdg_deg is not None
+            return self._hdg_deg is not None      # 有历史 psi 就算可用（含历史回退）
         return self._hdg_fresh(mode, now_ms)
+
+    def _hdg_psi_first(self, now_ms):
+        """★ **航向优先**入口（2026-09-26 用户定）：居中还没达标就先转正。
+
+        为什么必须开这个口子（板端 `log/gate_one_2026092.jsonl`）：新模型下 `mode` 几乎每帧在
+        full/coarse/p3p/width 之间跳 ⇒ `_step` 的「换档清 `_center_cnt`」让居中**永远确认不了**
+        ⇒ 09-23 定的「先居中再转 yaw」变成死锁（**航向歪 → 门偏在画面一侧 → 居中不达标 → 不许转**），
+        最后靠出口②在 psi=+30.6°、dy=0.42 时满速冲出去。
+
+        触发条件（全部满足）：
+          · 本门还没做过正航向、HDG 未在跑、`hdg.enable`；
+          · `hdg.entry_psi_first`（默认 true；false = 回到「必须先居中」的旧顺序）；
+          · 有历史 psi（`_hdg_deg` = 最近一次 full 帧的 EMA）；
+          · **|psi| > `hdg.tol_deg`**（航向已经够正 → 不抢，交给常规「先居中」路径）；
+          · 已进工作距离：**新鲜 z ≤ `hdg.psi_first_z_max`** 或 **框占比 ≥ `hdg.psi_first_ratio`**
+            （新模型下 z 常常不可用/是垃圾值，占比是全档位都有的量）。
+        """
+        if self._hdg_done or not self._hdg.enabled:
+            return False
+        if self.substate == SUB_HDG and not self._hdg.finished():
+            return False                      # 已经在跑 → 交给常规路径
+        if not flag(self._hdg_cfg, "entry_psi_first", True):
+            return False
+        if self._hdg_deg is None:
+            return False
+        if abs(self._hdg_deg) <= float(self._hdg_cfg.get("tol_deg", 8.0)):
+            return False
+        zmax = float(self._hdg_cfg.get("psi_first_z_max", 2.5) or 0.0)
+        zr = float(self._hdg_cfg.get("psi_first_ratio", 0.30) or 0.0)
+        stale = num(sub(self._G, "z"), "z_stale_ms", _D_Z["z_stale_ms"])
+        z_fresh = (self._z_ms is not None and self._z_last is not None and
+                   stale > 0 and (now_ms - self._z_ms) <= stale)
+        if z_fresh and zmax > 0 and self._z_last <= zmax:
+            return True
+        return zr > 0 and float(self._dbg_ratio or 0.0) >= zr
+
+    def _hdg_start(self, now_ms, reason):
+        """起转（两条入口共用）：置子状态 + 启动 aligner + 打 `hdg_entry` 日志。"""
+        self.substate = SUB_HDG
+        self._wait_hdg_ms = None
+        self.last_info["hdg_skip"] = None
+        self.last_info["hdg_entry"] = reason   # golden=居中达标 | psi_first=航向优先
+        self._hdg.start(now_ms)
+        self.last_info["hdg_i"] = self._hdg.iters
+        return self._hdg.state
 
     def _uart_yaw(self):
         """下位机回传的绝对航向（度；没有就 None）。"""
@@ -408,7 +501,27 @@ class GateTask(object):
         """进入 THROUGH：只前进、不微调（横向修正全部留在冲刺前完成）。
 
         速度 = `comm.gate.surge.through`（三个出口都走这一条，见 `_through_speed`）。
+
+        ★ 2026-09-26 新增**冲刺前的航向闸门**（用户定：「冲刺前确保历史最后一次的 psi 收敛在
+        8 度以内才行」）：`comm.gate.through.require_align_deg`（默认 8.0；≤0 = 关闸）。
+        判据 = `self._hdg_deg`（最近一次 full 帧测到的 psi，EMA 平滑后的历史值）：
+          · 从没测到过（None）→ **放行**（没得判）；
+          · |psi| ≤ 阈值 → 放行；
+          · 否则**拦下**：不切 THROUGH、写日志字段 `through_block`，任务留在原相位继续对准。
+        Returns:
+            True = 真的进了 THROUGH。**三个出口都必须看返回值**，别无条件当成功。
         """
+        need = num(sub(self._G, "through"), "require_align_deg",
+                   _D_THROUGH["require_align_deg"])
+        if need and need > 0 and self._hdg_deg is not None and abs(self._hdg_deg) > need:
+            self.last_info["through_block"] = "hdg=%+.1f>%.1f" % (self._hdg_deg, need)
+            if not self._through_block_logged:
+                self._through_block_logged = True
+                print("[GATE] 拦下冲刺：最近一次 psi=%+.1f° > %.1f°"
+                      " → 留在原地继续对准/正航向（不切 THROUGH）"
+                      % (self._hdg_deg, need))
+            return False
+        self.last_info["through_block"] = None
         self._hdg_abort("进入冲刺")
         self.phase = PH_THROUGH
         self.substate = ""
@@ -418,6 +531,7 @@ class GateTask(object):
         self._through_start_ms = None     # 第一帧 tick 时打时间戳（见 _tick_through）
         self._loiter_start_ms = None      # 已进入冲刺 → 门口的计时作废
         self._reset_lateral_pids()
+        return True
 
     def _through_speed(self):
         """本次冲刺速度 = `comm.gate.surge.through`。"""
@@ -431,6 +545,11 @@ class GateTask(object):
         self.phase = PH_SEARCH
         self.substate = ""
         # 新的一门：重新允许正航向（每门只做一次）
+        # ★ 2026-09-26：**历史 psi 也随之作废** —— `hdg.hist_ms: 0`（不限年龄）时，
+        #   若不在这里清，上一门的 psi 会被当成"历史最后一个"用于新门（跨门污染）。
+        self._hdg_f = None
+        self._hdg_deg = None
+        self._hdg_ms = None
         self._hdg.reset()
         self._hdg_done = not flag(self._hdg_cfg, "enable", True)
         self._wait_hdg_ms = None
@@ -512,26 +631,19 @@ class GateTask(object):
                                                           self.frames))
 
     def _pick_gate(self, dets):
-        """选目标门：**优先角点更全、更好的框**，其次才比 score。
+        """选目标门：按 `vision.gate.select.mode`（规范 `doc/gate_pose_decode_spec.md` §4）。
 
-        水中倒影常让角点落到倒影上（有时形成第二个门框）：只按 score 选可能把
-        倒影当真门 → 位姿错、甚至 z≤cross 直接冲门。角点数量/置信度和更能反映
-        "哪个是真门框"。（再配合上帧位姿消歧 + z 跳变保护一起用。）
+        - `near`（**2026-09-26 用户定，默认**）= **近距离优先**。此时还没有逐门位姿，
+          用 **框宽**当测距代理（`z ≈ fx·W/w`，单调）；并列再比可信角点数 / 置信和 / score。
+        - `corner` = 2026-09-18 的旧行为（角点更全更可信优先）—— 当时的理由是
+          "水面倒影可能形成第二个门框，只按 score 选会选到倒影"。要回退就是把 cfg 改成一行。
+
+        去重（同一个门被两个尺度各检出一次）与四角几何合法性**不在这里** ——
+        它们在 `gate_decode.GateKeypointBackend.detect()` 里做掉（`gate/gate_postproc.py`），
+        所以任务与预览看到的是同一批实例。这里只回答"多个门时走哪一个"。
         """
         conf_thr = num(sub(self._V, "keypoint"), "conf_thr", _D_KPT["conf_thr"])
-        best, best_key = None, None
-        for d in dets:
-            if d.kind != "gate":
-                continue
-            if d.kpt_conf is None:
-                key = (-1, 0.0, float(d.score))     # 无角点信息 → 排最后
-            else:
-                kc = np.asarray(d.kpt_conf, np.float64)
-                key = (int((kc >= conf_thr).sum()), float(kc.sum()),
-                       float(d.score))
-            if best_key is None or key > best_key:
-                best, best_key = d, key
-        return best
+        return postproc_pick(dets, conf_thr=conf_thr, cfg=self._select_cfg)
 
     # ------------------------------------------------------------ 单帧逻辑
     def _step(self, det, now_ms):
@@ -548,6 +660,12 @@ class GateTask(object):
         #   唯一中止条件 = 整门丢失（走上面的 `det is None` → `_tick_lost` → abort）。
         if self.phase == PH_ALIGN and self.substate == SUB_HDG \
                 and not self._hdg.finished() and self._hdg.turning:
+            # ⚠️ 只接管**转向中**：转向时绕开整条视觉链路（用户 09-18 定），
+            #   而且**转动中不重测**（psi_deg=None / psi_fresh=False）。
+            #   非转向阶段（settle/measure）**必须**让 `_on_pose` 去跑 —— 那里才有
+            #   `_hdg_deg`/`_hdg_ms` 的更新；在这里接管会把 psi 冻结在起转前的值，
+            #   第二轮测到的还是旧值 ⇒ 反复按旧偏差转（2026-09-26 实测残差 13.5°）。
+            #   档位退化（coarse/width）打断正航向的问题改由 `_tick_hdg_degraded()` 兜。
             _st, yaw_cmd = self._hdg.step(now_ms, psi_deg=None, psi_fresh=False,
                                           yaw_telemetry=self._uart_yaw(), gate_lost=False)
             if self._hdg.finished():
@@ -587,6 +705,16 @@ class GateTask(object):
             n = len(ids)
         else:
             mode, ids, n = MODE_COARSE, [], 0
+
+        # ★ 航向优先入口（2026-09-26）：居中还没达标但航向明显歪 + 已进工作距离 → 先转正。
+        #   放在档位分派之前 ⇒ 任何档位都能起转（新模型下 full 只占 27%，死等 full 等于永远不转）。
+        if self.phase == PH_ALIGN and self._hdg_psi_first(now_ms):
+            self._hdg_start(now_ms, "psi_first")
+            self._set_info("hdg", mode=mode, z=self._z_last, dx=0.0, dy=0.0,
+                           sway=0.0, heave=0.0, surge=0.0, yaw=0.0,
+                           kpt=self._dbg_kpt, hdg=self._hdg_deg,
+                           hdg_state=self._hdg.state)
+            return
 
         if mode in (MODE_FULL, MODE_P3P) and n >= 3:
             obj3s = self.obj3[ids]
@@ -675,9 +803,8 @@ class GateTask(object):
             # 连续 n 帧才判过门。
             self._cross_cnt += 1
             need = int(num(zc, "cross_confirm_frames", _D_Z["cross_confirm_frames"]))
-            if self._cross_cnt >= max(1, need):
+            if self._cross_cnt >= max(1, need) and self._start_through():
                 # 冲刺：只前进、不带横向微调（微调已在上一帧做完）
-                self._start_through()
                 self._set_info("through", mode=mode, z=z,
                                surge=self._through_speed(),
                                dx=dx_m, dy=dy_m, kpt=kpt)
@@ -698,6 +825,9 @@ class GateTask(object):
                 st_h, yaw_cmd = self._hdg.step(
                     now_ms, psi_deg=self._hdg_deg,
                     psi_fresh=self._hdg_fresh(mode, now_ms),
+                    # 历史 psi 兜底（用户 09-26：测不到就用最后一个）——**只在还没转过时**，
+                    # 转过之后必须重新测到 full，否则就是拿失效的旧值盲转。
+                    psi_stale=(self._hdg_hist(now_ms) if self._hdg.iters == 0 else None),
                     yaw_telemetry=self._uart_yaw(), gate_lost=False)
                 # ---- 转向用**内层高频循环**推进（2026-09-23）----
                 # `.sh` 路径的 turn() 是 period=0.05s(20Hz) 跑同一个 PID、同一套终止判据；
@@ -726,11 +856,8 @@ class GateTask(object):
                 if self._center_cnt >= int(num(al, "confirm_frames", _D_ALIGN["confirm_frames"])):
                     if self._hdg_ready(mode, now_ms):
                         # 居中达标 → **先正航向**（离散：测→转→停稳→再测）
-                        self._wait_hdg_ms = None
-                        self.last_info["hdg_skip"] = None    # 已经进来了，清掉"跳过"标记免得日志误读
-                        self.substate = SUB_HDG
-                        self._hdg.start(now_ms)
-                        self.last_info["hdg_i"] = self._hdg.iters
+                        # （_hdg_start 会清掉「跳过」标记，免得日志误读）
+                        self._hdg_start(now_ms, "golden")
                         self._set_info("hdg", mode=mode, z=z, dx=dx_m, dy=dy_m,
                                        sway=0.0, heave=0.0, yaw=0.0, kpt=kpt,
                                        hdg=self._hdg_deg, hdg_state=self._hdg.state)
@@ -775,6 +902,39 @@ class GateTask(object):
                            kpt=kpt)
 
     # ---------------- width（对向 2 角：测距 + 中点对中 → 慢 creep 靠近） ----
+    def _tick_hdg_degraded(self, now_ms):
+        """档位退化（width/coarse）但 HDG 正在跑 → **只推进 HDG**，别让 CREEP/HOLD 冲掉子状态。
+
+        2026-09-26：HDG 允许从任意档位进入（`_hdg_psi_first`），它在 settle/measure 期间
+        可能碰到 coarse/width 帧；老代码会把这些帧交给 `_on_coarse`，子状态被改成 CREEP/HOLD，
+        正航向就被打断了。
+        ⚠️ full/p3p 帧**不走这里**（走 `_on_pose`）—— 只有那里会更新 `_hdg_deg`/`_hdg_ms`。
+        Returns: True = 本帧已被 HDG 接管。
+        """
+        if not (self.phase == PH_ALIGN and self.substate == SUB_HDG
+                and not self._hdg.finished()):
+            return False
+        _st, yaw_cmd = self._hdg.step(now_ms, psi_deg=self._hdg_deg,
+                                      psi_fresh=False,          # 退化帧不当样本
+                                      # ★ 历史 psi 只在本门**还没转过**时当兜底：转过之后旧值已失效
+                                      #   （船头动了），再当测量用就是**盲转**（实测会一路转过头）。
+                                      psi_stale=(self._hdg_hist(now_ms)
+                                                 if self._hdg.iters == 0 else None),
+                                      yaw_telemetry=self._uart_yaw(), gate_lost=False)
+        if self._hdg.finished():
+            self._hdg_done = True
+            self.substate = SUB_GOLDEN
+            self._center_cnt = 0
+        self.last_info["hdg_i"] = self._hdg.iters
+        self._set_info("hdg" if not self._hdg.finished() else "center",
+                       mode=self.mode or "", z=self._z_last,
+                       dx=self.last_info.get("dx", 0.0),
+                       dy=self.last_info.get("dy", 0.0),
+                       sway=0.0, heave=0.0, surge=0.0, yaw=yaw_cmd,
+                       kpt=self._dbg_kpt, hdg=self._hdg_deg,
+                       hdg_state=self._hdg.state)
+        return True
+
     def _on_width(self, det, now_ms, ids):
         """width 档：只有对向 2 角（上边或下边），信息只够"水平中点 + 框心竖直"，不解 PnP。
 
@@ -783,6 +943,8 @@ class GateTask(object):
         出口仍然只有 `_tick_lost`（近距丢失）与 `_loiter_commit`（门口超时）两条。
         z 由 fx·W/Δu 粗估，只用来判"该不该靠近"，不参与闭环。
         """
+        if self._tick_hdg_degraded(now_ms):
+            return
         G = self._G
         W = merge(sub(G, "width"), _D_WIDTH)
         al = merge(sub(G, "align"), _D_ALIGN)
@@ -844,6 +1006,8 @@ class GateTask(object):
           ② 未对准：远距只对中；中距 HOLD 超限 → REACQUIRE；很近(框装不下) → REACQUIRE。
         出口同样只有 `_loiter_commit` 与 `_tick_lost` 两条。
         """
+        if self._tick_hdg_degraded(now_ms):
+            return
         G = self._G
         C = merge(sub(G, "coarse"), _D_COARSE)
         H = merge(sub(G, "hold"), _D_HOLD)
@@ -1009,7 +1173,10 @@ class GateTask(object):
                   " → 兜底判过门并直冲"
                   % ((now_ms - self._loiter_start_ms) / 1000.0, float(ratio or 0.0),
                      float(dxn), float(dyn)))
-        self._start_through()
+        if not self._start_through():
+            # 航向闸门拦下：**不算 commit**（返回 False 让调用方继续原逻辑），
+            # 门口的计时保留，下一帧会再评估一次。
+            return False
         self._set_info("through", z=self._z_last, dx=dxn, dy=dyn,
                        surge=self._through_speed(), kpt=self._dbg_kpt if kpt is None else kpt,
                        ratio=ratio)
@@ -1052,10 +1219,9 @@ class GateTask(object):
             # → SEARCH → 原地不动"，永远数不到过门）。判据用**最后一次检测到的框占比**
             # （每帧更新、比 z 更可靠且全档位可用）；远处丢检（占比小）仍走 SEARCH。
             why = self._near_lost(now_ms, zc)
-            if why:
+            if why and self._start_through():
                 if S.DEBUG:
                     print("[GATE] ALIGN 近距丢失(%s) → 判过门" % why)
-                self._start_through()
                 self._set_info("through", surge=self._through_speed())
             elif self._lost_cnt <= pose_hold:
                 # 帧间防抖：沿用上一帧对中保持
@@ -1066,12 +1232,11 @@ class GateTask(object):
             return
         if self.phase == PH_APPROACH:
             why = self._near_lost(now_ms, zc)
-            if why:
+            if why and self._start_through():
                 # 已到近距却整门丢失：门占满视野/机身进入门框 = 真过门的典型现象
                 # → 直接判过门并直行穿越（不等防抖、不后退），否则永远数不到过门。
                 if S.DEBUG:
                     print("[GATE] 近距丢失(%s) → 判过门" % why)
-                self._start_through()
                 self._set_info("through", surge=self._through_speed())
             elif self._lost_cnt <= pose_hold and self._z_last is not None:
                 # 还在远处、只是短暂丢失：轻微后退换回重新锁定/更大视野（不带速度盲冲），

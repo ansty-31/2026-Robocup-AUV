@@ -251,7 +251,7 @@ def main() -> None:
     ap.add_argument("--valid-only", action="store_true",
                     help="只用「标定可信 + 全部关键点落在有效区域」的实例（推荐）")
     ap.add_argument("--out-dir", type=Path,
-                    default=PROJECT_ROOT / "runs" / "exp_distortion" / "eval")
+                    default=PROJECT_ROOT / "experiment" / "runs" / "exp_distortion" / "eval")
     a = ap.parse_args()
 
     exp = None

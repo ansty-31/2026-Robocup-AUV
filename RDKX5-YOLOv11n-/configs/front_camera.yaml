@@ -6,12 +6,12 @@
 # at cfg/front_camera_air.yaml instead, and switch it back before launching.
 #
 # Source : chessboard 11x8 inner corners, 20 mm -- captured underwater in the
-#          AUV_5 session: data/AUV_5/raw-data/calibration-{1,2,3} (1443 images).
+#          AUV_5 session: data/frames/AUV_5_gate_calib/calibration-{1,2,3} (1443 images).
 # Fit    : scripts/1_prepare/calibrate_camera.py --views 150 --min-shift 40
 #          83 views kept, RMS reprojection error 0.546 px (previous file: 0.705).
 #
 # Why this replaces the ~782.5 px file (archived in backup/):
-#   * 782.5 was fitted from data/AUV_1/board alone and is under-constrained: it
+#   * 782.5 was fitted from data/calib/AUV_1_board alone and is under-constrained: it
 #     fails on held-out views of its OWN set, and badly on the AUV_5 set
 #     (checkerboard grid-straightness residual p90 307 px, max 873 px,
 #     2 frames with no solution at all).

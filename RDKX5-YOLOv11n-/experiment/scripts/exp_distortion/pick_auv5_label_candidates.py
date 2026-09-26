@@ -63,7 +63,7 @@ def main():
     ap.add_argument("--every", type=int, default=3, help="每 N 帧取 1 帧")
     ap.add_argument("--n", type=int, default=150, help="最终候选张数")
     ap.add_argument("--conf", type=float, default=0.40)
-    ap.add_argument("--out", default="data/AUV_5/label_candidates_Dwb")
+    ap.add_argument("--out", default="data/derived/AUV_5_label_candidates_Dwb")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
 
@@ -73,11 +73,11 @@ def main():
 
     # 排除已知损坏/全灰帧
     deleted = set()
-    dl = PROJECT_ROOT / "data/AUV_5/raw-data/_deleted_gray_frames.txt"
+    dl = PROJECT_ROOT / "data/frames/AUV_5_gate_calib/_deleted_gray_frames.txt"
     if dl.exists():
         deleted = {l.strip() for l in dl.read_text().splitlines() if l.strip()}
     pool = []
-    for d in sorted((PROJECT_ROOT / "data/AUV_5/raw-data").glob("gate-*")):
+    for d in sorted((PROJECT_ROOT / "data/frames/AUV_5_gate_calib").glob("gate-*")):
         for p in sorted(d.glob("*.jpg")):
             if p.name not in deleted:
                 pool.append(p)

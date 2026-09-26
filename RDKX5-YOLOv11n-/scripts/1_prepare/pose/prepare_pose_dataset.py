@@ -1,74 +1,37 @@
 #!/usr/bin/env python3
-"""
-Roboflow pose 导出 → 可直接训练的 YOLO pose 数据集（kpt_shape 归一 + flip_idx 修正）
+"""Roboflow pose 导出 → 可直接训练的 YOLO pose 数据集（kpt_shape 归一 + flip_idx 修正）
 
-## 为什么需要这一步
-
-Roboflow 的 Pose 项目在"关键点 schema"里加过的槽位**不会随标注删除而消失**：
-导出的 `data.yaml` 会带上全部槽位（`kpt_shape: [5, 3]`），而没标过的槽位在
-每一行标签里都写成 `0 0 0`（x=y=v=0）。这类**尾随全零槽位**必须截掉，否则：
-
-* 输出头 kpt 通道数从 12（4 点）变成 15（5 点），
-  与 `configs/gate_kpt_config.yaml` 的 `kpt12`、板端 `gate_decode.py` 对不上；
-* `scripts/3_export/export_onnx.py` 会告警"gate 需要 4 点"。
-
-另外 `flip_idx` 是个**必须与既有模型保持一致的工程约定**，不能想当然改：
-
-ultralytics 在 `data/augment.py:1466-1469` 先 `instances.fliplr(w)`（镜像坐标），
-再 `keypoints[:, flip_idx]`（下标重排）。于是两种约定各自自洽：
-
-* **恒等** `[0,1,2,3]`：翻转后索引**跟着物理角点走**（"索引 i 永远是门的第 i 个物理角"）。
-* **左右交换** `[1,0,3,2]`：翻转后索引**跟着图像位置走**（"索引 0 永远是画面左上角"）。
-
-两者只在**镜像图 / 从门背面看**时才有区别；板端 `gate/geometry.py` 的
-`object_points()` 明确写着「前后完全对称、无朝向要求 → from_front 恒 true」，
-`gate/gate_frontend.py` 的 mode 判定也只用到 TL/TR 与 BL/BR 的**配对**，
-所以两种约定对板端**等价**。
-
-`--flip-idx` 默认值因此是「**沿用源 data.yaml 的 flip_idx 截到目标点数**」
-（Roboflow 写的是恒等 `[0,1,2,3,4]` → 截成 `[0,1,2,3]`），这样微调时
-增广语义与 `weights/yolo11n-pose.pt`（现有板端模型）一致，不会互相打架。
-要换成图像位置约定，显式加 `--flip-idx-lr-swap`。
-
-> 实测依据（本仓库 2026-09-17）：用 `weights/yolo11n-pose.pt` 在
-> `data/AUV_4/PNP.kpt4.yolov8/valid` 上跑，未翻转图的逐索引误差
-> 「同序 32/61/81/52 px」远小于「交换 267/279/295/251 px」（89/96 张同序胜）；
-> 翻转图则 112/124 张符合「索引跟物理角点」= 恒等约定。即现有模型就是
-> 恒等约定训出来的，且与标注、与板端 object_points 一致。
-
-## 做了什么
-
+做了什么
 1. **截断尾随全零关键点槽位**：全数据集范围内 x=y=v=0 的尾部槽位逐个丢弃，
    直到遇到有值的槽位；结果必须等于 `--kpt`（默认 4），否则报错退出。
-2. **校验角点顺序约定**：只用四角齐全的实例，检查
-   `x0<x1`、`x3<x2`、`y0<y3`、`y1<y2` 的比例；低于 `--order-min-ratio`
-   （默认 0.98）说明标注不是"图像空间 TL,TR,BR,BL"，此时**不猜**，直接报错。
-3. **确定 flip_idx**：默认沿用源 `data.yaml` 的 flip_idx 截到目标点数（保持与既有
-   板端模型一致的增广约定，见上文）；`--flip-idx-lr-swap` 切到"索引跟图像位置"约定。
+2. **校验角点顺序约定**：只用四角齐全的实例，检查 `x0<x1`、`x3<x2`、`y0<y3`、`y1<y2`
+   的比例；低于 `--order-min-ratio`（默认 0.98）说明标注不是"图像空间 TL,TR,BR,BL"，
+   此时不猜，直接报错。
+3. **确定 flip_idx**：默认沿用源 `data.yaml` 的 flip_idx 截到目标点数（= 恒等约定，
+   "索引 i 永远是门的第 i 个物理角"）；`--flip-idx-lr-swap` 换成 `[1,0,3,2]`
+   （"索引跟图像位置"）。两种约定只在镜像图 / 从门背面看时有区别。
 4. **输出新数据集目录**：图片用硬链接（同一文件系统时零拷贝），标签重写，
-   写 `data.yaml` + `normalize_report.txt`。**原导出目录一个字节都不改。**
+   写 `data.yaml` + `normalize_report.txt`。原导出目录一个字节都不改。
 
 划分（train/valid/test）不在本脚本里做：先跑本脚本，再跑
 `scripts/1_prepare/resplit_dataset.py` 做序列感知划分（相邻帧不跨 split）。
 
-## 用法
-
+用法
     # 先看要改什么，不写文件
-    python scripts/1_prepare/pose/prepare_pose_dataset.py data/AUV_4/PNP.yolov8 --dry-run
+    python scripts/1_prepare/pose/prepare_pose_dataset.py data/datasets/AUV_4_PNP.kpt4.yolov8 --dry-run
 
     # 生成规范化数据集（默认 <src 同级>/PNP.kpt4.yolov8）
-    python scripts/1_prepare/pose/prepare_pose_dataset.py data/AUV_4/PNP.yolov8
+    python scripts/1_prepare/pose/prepare_pose_dataset.py data/datasets/AUV_4_PNP.kpt4.yolov8
 
     # 指定输出目录，然后做序列感知划分
-    python scripts/1_prepare/pose/prepare_pose_dataset.py data/AUV_4/PNP.yolov8 \
-        --out data/AUV_4/PNP.kpt4.yolov8
-    python scripts/1_prepare/resplit_dataset.py data/AUV_4/PNP.kpt4.yolov8 --dry-run
+    python scripts/1_prepare/pose/prepare_pose_dataset.py data/datasets/AUV_4_PNP.kpt4.yolov8 \
+        --out data/datasets/AUV_4_PNP.kpt4.yolov8
+    python scripts/1_prepare/resplit_dataset.py data/datasets/AUV_4_PNP.kpt4.yolov8 --dry-run
 
-## 输出
-
-* `<out>/{train,valid,test}/{images,labels}/`
-* `<out>/data.yaml`            — kpt_shape=[4,3], flip_idx=[1,0,3,2], nc/names 沿用
-* `<out>/normalize_report.txt` — 截断了几个槽位、角点顺序统计、每 split 张数
+输出
+    <out>/{train,valid,test}/{images,labels}/
+    <out>/data.yaml            — kpt_shape=[4,3]、flip_idx、nc/names 沿用
+    <out>/normalize_report.txt — 截断了几个槽位、角点顺序统计、每 split 张数
 """
 
 from __future__ import annotations
@@ -208,10 +171,8 @@ def main():
     meta = yaml.safe_load((src / "data.yaml").read_text(encoding="utf-8")) or {}
     out = a.out or (src.parent / f"{src.stem.split('.')[0]}.kpt{a.kpt}.yolov8")
 
-    print("=" * 72)
-    print(f"源数据集 : {src}")
+    print(f"源数据集  : {src}")
     print(f"目标数据集: {out}{'   [dry-run]' if a.dry_run else ''}")
-    print("=" * 72)
 
     records, slots = load_dataset(src)
     print(f"\n标签实例数: {sum(len(v) for v in records.values())}   每实例关键点槽位数: {dict(slots)}")

@@ -234,6 +234,12 @@ diff -u cfg/comm.yaml "$b"        # 逐键看清差异 → 把板端现场值合
   否则 `check_board_parity.sh` 永远不绿）；
 - 覆盖前板端旧文件会自动备份到 `bak/deploy_<时间戳>/`，回滚用 `cp -rp` 即可。
 
+> **2026-09-26 起**：脚本里有一个 `SKIP_FILES` 数组，用来声明"本地≠板端是**故意**的"文件
+> （曾经放 `base/settings.py` 的 SIM_MODE 与 `cfg/comm.yaml` 的台架分叉）。
+> **用户定"全部以本地为准"后它已清空**；要再制造分叉就把路径加进那个数组，别再靠人记。
+> 现状：**板端全量跟本地一致（95/95）**，所以上表"先 diff 再合并"的流程仍然是**改 cfg 前的好习惯**，
+> 但不再有"必须保留"的板端现场值。
+
 ### 陷阱 2：**新文件不在清单里 = 永远传不上板**
 `deploy_to_board.sh` 只遍历 `board_parity.md5` 里的条目；清单由
 `check_board_parity.sh --board --write` 用 `find` 重新生成（会收录新增的 `*.py/*.sh/*.md/*.yaml`）。

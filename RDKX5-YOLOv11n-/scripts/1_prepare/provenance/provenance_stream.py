@@ -1,28 +1,19 @@
 #!/usr/bin/env python3
-"""
-按【裸流帧序号】直达的溯源验证（Route B 主工具）
+"""按【裸流帧序号】直达的溯源（主工具）
 
-背景（2026-09-23 查明）
-----------------------
-标注数据集里的文件名编号 `frame_NNNNNN` **就是原始裸流的帧序号**（1-based，
-按 JPEG SOI 标记顺序）。证据：
-  · AUV_2/AUV_3 里能在现存 `*_frames` 池中命中的帧，满足 N = 25*(k-1)+1
-    （k 是池内序号），即池 = 每 25 帧取 1 帧、并从 1 重新编号的子集；
-  · 标注号 mod 25 近似均匀 → 标注集并非只含 1fps 帧，而是含全帧率的裸流帧；
-  · AUV_4 的 450 张命中全部是 offset 0（`auv_4_frames` 是全量抽取，未重编号）。
+标注数据集里的文件名编号 `frame_NNNNNN` 就是原始裸流的帧序号（1-based，按 JPEG SOI
+顺序）。现存 `data/frames/*_frames` 目录是降采样+重编号后的残片，不能用它做编号查找。
 
-因此**不需要**内容最近邻：给定标注号 N，直接在每条裸流的第 N 帧取图比对即可。
-现存 `data/AUV_x/*_frames` 目录是被降采样+重编号后的残片，不能用它做编号查找。
-
-本脚本：扫一遍裸流（MJPEG 按字节无损切割 / mp4 顺序解码），只对"被标注号命中"
-的序号做预处理链路复现 + 缩略图比对，输出 runs/prov/stream_match_<dataset>.csv。
-不写任何帧到磁盘。
+扫一遍裸流（MJPEG 按字节无损切割 / mp4 顺序解码），只对"被标注号命中"的序号做链路
+复现 + 缩略图比对，不写任何帧到磁盘。
 
 用法：
     conda run -n yolov8 python scripts/1_prepare/provenance/provenance_stream.py \
-        --dataset data/AUV_4/PNP.kpt4.yolov8 --dataset data/AUV_3/PNP.v1i.yolov8
+        --dataset data/datasets/AUV_4_PNP.kpt4.yolov8 --dataset data/datasets/AUV_3_PNP.v1i.yolov8
     # 未命中者再在序号 ±W 窗口里找（补偿裸流丢帧造成的相移）
-    ... --window 3 --only-unmatched runs/prov/stream_match_PNP.kpt4.yolov8.csv
+    ... --window 3 --unmatched-from runs/prov/stream_match_PNP.kpt4.yolov8.csv
+
+输出：runs/prov/stream_match_<dataset><_chain>.csv
 """
 from __future__ import annotations
 
@@ -31,7 +22,6 @@ import csv
 import mmap
 import re
 import sys
-import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -49,14 +39,14 @@ NTHUMB, NBIG = 48, 128
 
 # 裸流 / 帧目录：tag -> 路径（mjpeg=字节切割，video=cv2 解码，dir=现成全量目录）
 SOURCES = {
-    "AUV_1": ("video", "data/AUV_1/rec_front.mp4"),
-    "AUV_2": ("mjpeg", "data/AUV_2/auv_20260910_172208.mjpeg"),
-    "AUV_3": ("mjpeg", "data/AUV_3/auv_20260911_201754.mjpeg"),
-    "AUV_4": ("mjpeg", "data/AUV_4/auv_4.mjpeg"),
-    "AUV_4dir": ("dir", "data/AUV_4/auv_4_frames"),
-    "AUV_1board": ("dir", "data/AUV_1/board"),
-    "AUV_2sel": ("dir", "data/AUV_2/selected_2000"),
-    "AUV_3sel": ("dir", "data/AUV_3/selected_2000"),
+    "AUV_1": ("video", "data/raw/AUV_1_rec_front.mp4"),
+    "AUV_2": ("mjpeg", "data/raw/AUV_2_auv_20260910_172208.mjpeg"),
+    "AUV_3": ("mjpeg", "data/raw/AUV_3_auv_20260911_201754.mjpeg"),
+    "AUV_4": ("mjpeg", "data/raw/AUV_4_auv_4.mjpeg"),
+    "AUV_4dir": ("dir", "data/frames/AUV_4_auv_4_frames"),
+    "AUV_1board": ("dir", "data/calib/AUV_1_board"),
+    "AUV_2sel": ("dir", "data/derived/AUV_2_selected_2000"),
+    "AUV_3sel": ("dir", "data/derived/AUV_3_selected_2000"),
 }
 
 _MAPS = {}
@@ -68,14 +58,14 @@ def maps_for(w, h):
     return _MAPS[(w, h)]
 
 
-# 链路变体：区分「去畸变(A-old) / 不去畸变」×「新增强参数 / 旧增强参数」
+# 链路变体：aold=去畸变(标定A)；nound=不去畸变；_old=旧增强参数
 OLD_WB, OLD_CLAHE, OLD_GAMMA = [1.15, 1.0, 0.9], 2.0, 1.0
 CHAIN = "aold"
 OFFSETS: dict[str, int] = {}
 
 
 def chain(raw):
-    """复现当年建集链路。CHAIN 取值见 --chain。"""
+    """复现建集链路。CHAIN 取值见 --chain。"""
     h, w = raw.shape[:2]
     f = raw
     if CHAIN.startswith("aold"):
@@ -241,7 +231,6 @@ def main():
             if qs[qi]["best"] is None or m < qs[qi]["best"][2]:
                 qs[qi]["best"] = (tag, idx, m, d)
 
-        t0 = time.time()
         for tag in srcs:
             kind, path = SOURCES[tag]
             off = OFFSETS.get(tag, 0)
@@ -252,7 +241,6 @@ def main():
                 scan_video(path, sneed, collector, tag, a.window)
             else:
                 scan_dir(path, sneed, collector, tag)
-        print(f"  扫描耗时 {time.time()-t0:.0f}s")
 
         rows, nacc = [], 0
         for q in qs:
@@ -270,8 +258,6 @@ def main():
             w.writeheader()
             w.writerows(rows)
         print(f"命中 {nacc}/{len(qs)} = {100*nacc/max(len(qs),1):.1f}%  → {out.relative_to(PROJECT_ROOT)}")
-        import collections
-        print("  命中来源:", collections.Counter(r["src"] for r in rows if r["accept"]))
 
 
 if __name__ == "__main__":

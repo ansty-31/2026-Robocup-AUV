@@ -1,0 +1,4 @@
+from	to	kind	files	bytes
+output/preview/auv5_pose/judgment/boardview_stage1_log.csv	output/preview/auv5_pose/judgment/archive/boardview_stage1_log_singleinst_render.csv	file	1	17993
+output/preview/auv5_pose/ok	output/preview/auv5_pose/judgment/archive/buckets_singleinst_render_round1/ok	dir	22	-
+output/preview/auv5_pose/wrong_box	output/preview/auv5_pose/judgment/archive/buckets_singleinst_render_round1/wrong_box	dir	80	-

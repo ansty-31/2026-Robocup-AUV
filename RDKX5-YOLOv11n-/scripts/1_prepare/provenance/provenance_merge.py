@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-"""
-合并多次溯源结果为一张总表（每张标注图取最优命中）
+"""合并多次溯源结果为一张总表（每张标注图取最优命中）
 
-多轮来源：
-  · provenance_stream.py（按裸流序号直达，链路 aold / nound / …）
-  · provenance_nn.py（全量帧内容最近邻，处理被重编号的组）
-每轮输出一份 CSV；本脚本按 mad128（无则按 d48）取最优，产出
+输入 CSV 来自 provenance_stream.py（按裸流序号直达）/ provenance_nn.py（内容最近邻）；
+本脚本按 mad128（无则按 d48）取最优，产出
 runs/prov/provenance_final_<dataset>.csv：
 
     img, split, num_label, chain, src, num_src, mad128, d48, accept
@@ -59,7 +56,7 @@ def main():
                        accept=r.get("accept", "0"))
             if img not in best or score(rec) < score(best[img]):
                 best[img] = rec
-    # 统一判定规则，避免各轮阈值不一致
+    # 统一判定规则
     for r in best.values():
         m = r["mad128"]
         d = r["d48"]
@@ -72,21 +69,7 @@ def main():
         w = csv.DictWriter(f, fieldnames=FIELDS)
         w.writeheader()
         w.writerows(rows)
-
-    def okkind(r):
-        if str(r["accept"]) == "1":
-            return "命中(mad128)"
-        if r["d48"] and int(r["d48"]) < 300:
-            return "待复核(d48)"
-        return "未命中"
-
-    import collections
     print(f"总表 {len(rows)} 张 → {out}")
-    print("  状态:", dict(collections.Counter(okkind(r) for r in rows)))
-    print("  链路:", dict(collections.Counter(r["chain"] for r in rows if str(r["accept"]) == "1")))
-    print("  来源:", dict(collections.Counter(r["src"] for r in rows if str(r["accept"]) == "1")))
-    un = [r for r in rows if okkind(r) == "未命中"]
-    print(f"  未命中 {len(un)} 张，示例: {[r['img'][:28] for r in un[:4]]}")
 
 
 if __name__ == "__main__":

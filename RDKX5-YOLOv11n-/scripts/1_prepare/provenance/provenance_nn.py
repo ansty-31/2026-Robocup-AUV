@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
-"""
-裸流全帧内容最近邻溯源（`--step 1` 全量索引）
+"""裸流全帧内容最近邻溯源（给被重新编号的来源组兜底）
 
-什么时候需要它
---------------
-`provenance_stream.py` 按【裸流帧序号】直达，能解开绝大多数标注图。但当某个来源组
-被 `prepare_frames.py` 重新编号过（文件名变成 1..N 的连续序号）时，标注号就不再是
-裸流序号，只能靠**内容最近邻**在全量帧里找。
+`provenance_stream.py` 按裸流帧序号直达；当某个来源组被 `prepare_frames.py` 重新编号过
+（文件名变成 1..N 的连续序号）时，标注号不再是裸流序号，只能靠内容最近邻在全量帧里找。
 
-本脚本对每条裸流做一遍 step=1 的完整解码 → A-old 链路 → 48x48 灰度缩略图索引
+对每条裸流做一遍 step=1 的完整解码 → A-old 链路 → 48x48 灰度缩略图索引
 （AUV_1 为 mp4 顺序解码；其余为裸 MJPEG 字节切割，可多进程），
 再对未命中标注图做 NN + 128x128 复核。
 
 用法：
     python scripts/1_prepare/provenance/provenance_nn.py \
-        --dataset data/AUV_4/PNP.kpt4.yolov8 \
+        --dataset data/datasets/AUV_4_PNP.kpt4.yolov8 \
         --queries runs/prov/stream_match_PNP.kpt4.yolov8.csv   # 只查该 CSV 里 accept==0
         --sources AUV_1,AUV_2,AUV_3,AUV_4
 输出：runs/prov/nn_match_<dataset>.csv
@@ -36,14 +32,13 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "1_prepare"))
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
-import prepare_frames as pf  # noqa: E402
 import provenance_stream as ps  # noqa: E402
 
 SOURCES = {
-    "AUV_1": ("video", "data/AUV_1/rec_front.mp4"),
-    "AUV_2": ("mjpeg", "data/AUV_2/auv_20260910_172208.mjpeg"),
-    "AUV_3": ("mjpeg", "data/AUV_3/auv_20260911_201754.mjpeg"),
-    "AUV_4": ("mjpeg", "data/AUV_4/auv_4.mjpeg"),
+    "AUV_1": ("video", "data/raw/AUV_1_rec_front.mp4"),
+    "AUV_2": ("mjpeg", "data/raw/AUV_2_auv_20260910_172208.mjpeg"),
+    "AUV_3": ("mjpeg", "data/raw/AUV_3_auv_20260911_201754.mjpeg"),
+    "AUV_4": ("mjpeg", "data/raw/AUV_4_auv_4.mjpeg"),
 }
 N = 48
 _M = {}
@@ -173,9 +168,7 @@ def main():
         w.writeheader()
         w.writerows(rows)
     hit = sum(1 for r in rows if r["d48"] != "" and int(r["d48"]) < 300)
-    print(f"d48<300（=平均差 <0.13/255，真命中量级）{hit}/{len(rows)} → {out.relative_to(PROJECT_ROOT)}")
-    import collections
-    print("  命中来源:", collections.Counter(r["src"] for r in rows if r["d48"] != "" and int(r["d48"]) < 300))
+    print(f"命中 {hit}/{len(rows)}（d48<300）→ {out.relative_to(PROJECT_ROOT)}")
 
 
 if __name__ == "__main__":

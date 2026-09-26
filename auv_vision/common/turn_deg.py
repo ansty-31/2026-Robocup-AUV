@@ -44,8 +44,8 @@ from common.PID import PID                                          # noqa: E402
 from common.cfgnode import nums                                     # noqa: E402
 
 # 代码内兜底（cfg 缺失时用；正常走 comm.motion.turn_pid）
-_D_TURN_PID = dict(kp=0.2, ki=0.0, kd=0.05, out_max=0.45,
-                   deadzone_deg=6.0, norm_deg=15.0,
+_D_TURN_PID = dict(kp=0.2, ki=0.0, kd=0.10, out_max=0.30,
+                   deadzone_deg=3.0, norm_deg=15.0,
                    blind_rate_dps=20.0,
                    # ---- 探向（PROBE）参数，2026-09-23 从硬编码搬进 cfg ----
                    # ⚠️ 探向是**开环定时**：`probe_s` 秒 × `probe_dof` 舵，**与目标角度无关**。

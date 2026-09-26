@@ -1,26 +1,20 @@
 #!/usr/bin/env python3
-"""
-棋盘格标定输入（视频 / 图片目录 / 图片） → 相机内参标定（去畸变参数）
+"""棋盘格标定（图片目录/图片/视频）→ 相机内参 yaml（OpenCV FileStorage）。
 
-做法与 exampls/calibrate_camera.py 一致：
-    检测棋盘格内角点 → cornerSubPix 亚像素精化 → cv2.calibrateCamera
-    → 结果写入 OpenCV FileStorage yaml：
-        image_width / image_height / camera_matrix /
-        distortion_coefficients / reprojection_error
-    该 yaml 供 scripts/1_prepare/prepare_frames.py（训练图集）与板端 rdk_bpu_worker.py
-    （推理帧）生成去畸变 remap 映射，保证训练/推理使用同一份标定参数。
+yaml 含 image_width / image_height / camera_matrix / distortion_coefficients /
+reprojection_error，供 prepare_frames.py 与板端生成去畸变 remap 映射。
 
-采集策略（自动选择）：
-    * 图片目录/图片：全池扫描 → 按清晰度(Laplacian方差)降序、位姿去重(min_shift)
-      贪心选 --views 张 —— 避免视频切帧里运动模糊/低质量帧混入；
-    * 标定视频：按 --frame-step 抽帧、相邻位移去重，边扫边收到 --views 张即止。
-    两种输入共用“离群剔除精修”：迭代剔除单视图重投影误差最大者，直至
-    RMS ≤ --max-rms 或剩余视图数 ≤ --min-views。
+采集策略（按输入自动选择）：
+    * 图片目录/图片：全池扫描 → 按清晰度(Laplacian 方差)降序、位姿去重(--min-shift)
+      贪心选 --views 张；
+    * 视频：按 --frame-step 抽帧、相邻位移去重，收满 --views 张即止。
+两种输入共用离群剔除精修：迭代剔除单视图重投影误差最大者，直至 RMS ≤ --max-rms
+或剩余视图数 ≤ --min-views。
 
-少于 10 张视为失败；RMS 超过 --max-rms(0.8px) 时仍写出 yaml 但退出码非 0。
+有效视图少于 10 张报错；RMS 超过 --max-rms 时仍写出 yaml 但退出码非 0。
 
-用法示例：
-    python scripts/1_prepare/calibrate_camera.py data/AUV_1/board \
+用法：
+    python scripts/1_prepare/calibrate_camera.py data/calib/AUV_1_board \
         --cols 11 --rows 8 --square-mm 20 --output configs/front_camera.yaml \
         --views 35 --min-shift 40 --save-views qc_views/
 
@@ -34,7 +28,7 @@ import argparse
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]  # scripts/<stage>/x.py
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 import cv2
 import numpy as np

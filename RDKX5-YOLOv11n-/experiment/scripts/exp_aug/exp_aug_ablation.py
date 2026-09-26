@@ -8,7 +8,7 @@
     本实验要分清这 2% 是"增强方式"造成的，还是"数据分布/不确定性"造成的。
 
 设计（受控 A/B）：
-    同一份数据（data/AUV_5/gate-pose.yolov8）、同一起点（coco.pt，中性、无门先验）、
+    同一份数据（data/datasets/AUV_5_gate-pose.yolov8）、同一起点（coco.pt，中性、无门先验）、
     同一 seed / epochs / batch / imgsz，**只改增强**：
       armA = ultralytics 默认（mosaic=1.0, scale=0.5, translate=0.1, erasing=0.4）
       armB = 收缩诱导型增强关掉/收窄（mosaic=0, scale=0.2, translate=0.05, erasing=0）
@@ -64,7 +64,7 @@ def eval_model(weights: Path, tag: str, split: str = "test") -> dict:
                box_map50=round(float(r.box.map50), 4))
 
     # 逐帧面积比（用 predict，才能拿到实例级角点）
-    test_dir = PROJECT_ROOT / "data" / "AUV_5" / "gate-pose.yolov8" / split
+    test_dir = PROJECT_ROOT / "data" / "datasets" / "AUV_5_gate-pose.yolov8" / split
     per_water, ratios = {}, []
     for img in sorted((test_dir / "images").glob("*.jpg")):
         lab = test_dir / "labels" / (img.stem + ".txt")

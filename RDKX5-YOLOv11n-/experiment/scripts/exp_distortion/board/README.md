@@ -18,8 +18,8 @@
 | `verify_calibration_swap.py` | 换标定前后门距对比（走板端 `gate_pose`） | §5.4 / §18.1（×1.401） |
 | `preprocess_lut_wb.deployed.py` | **板端已部署**的 `common/preprocess.py`（LUT 白平衡） | 归档，便于与板端 md5 对照 |
 | `preprocess_original.py` | 改动前的原文件 | 供 diff / 回退参考 |
-| `frames_run1.txt` | 第一次板端测速用的 24 帧（`data/mapped/raw/AUV_4dir`） | 复现用 |
+| `frames_run1.txt` | 第一次板端测速用的 24 帧（`data/mapped/raw/AUV_4dir`（⚠️ 该路径已不存在，见 `experiment/README.md` 的迁移表）） | 复现用 |
 | `frames_run2_testsplit.txt` | 精度测试用的 28 帧（test split、4 角可见） | §4.6 / §18.3 |
 
 板端原始测量输出：`experiment/runs/domain/board/board_kpts_run{1,2}*.json`；
-板端当前状态（md5 / 备份名）见 `experiment/runs/domain/EXPERIMENT_DESIGN.md` §18.5。
+板端当前状态（md5 / 备份名）见 `experiment/runs/domain/reports/EXPERIMENT_DESIGN.md` §18.5。

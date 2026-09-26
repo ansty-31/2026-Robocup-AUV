@@ -54,15 +54,19 @@ model:
   input_size: 640          # 模型方形输入
   input_name: images         # hbm_runtime 输入名（板端报错时填模型实际名）
   fast_nv12: true         # true: 用 cv2 快速 NV12(快~30x, 标准BT.601色度)；false: 原 numpy 版
-  score_threshold: 0.5
+  score_threshold: 0.6
   nms_threshold: 0.45
   labels: [blue_ball, gate, red_ball]   # 类别顺序必须与训练/导出一致（决定解码类别）
   # 权重② gate keypoint：ball 走 model.path、gate 走 task_models.gate，互不影响。
   # path 为空 → gate 用 mock 联调 / 或跳过（取决于 model.mode）
   task_models:
-    gate: {path: models/gate_kpt_bayese_640x640_nv12.bin,
+    gate: {path: models/gate_kpt_stage1_g240_i16_bayese_640x640_nv12.bin,
            kind: keypoint, labels: [gate],
            kpt_order: [TL, TR, BR, BL]}   # 门 keypoint 权重(4角点)
+    # ★ 2026-09-26 换代：**阶段一 g240_i16 版**（md5 `ef52c18b…`，3,938,787 B）。
+    #   契约与后处理约束见 **`doc/gate_pose_decode_spec.md`**（输入 NV12/640/squish、输出
+    #   9 张量 float NHWC、kpt `x_px = x_cell × stride` 且 **v 要自己 sigmoid**）。
+    #   上一代 `gate_kpt_bayese_640x640_nv12.bin` 已移入 `bak/bakup_auv5/`（回退改回这一行即可）。
 
 mission:
   target_color: blue       # 任务目标球颜色：red | blue
@@ -93,14 +97,33 @@ gate:                         # 过门（§3 几何 / keypoint / PnP 参数）
              #   ⚠️ 水下还要用水下那份内参（`cfg/front_camera.yaml`，fx=782.5）验证折射因子 k。
              # body_center_offset：相机—机身安装偏置(m)，**只读入、不参与运算**（未标定）。
              # bar_width/sym_bars：未参与运算（keypoint 只标外轮廓四角，留作记录）。
-  keypoint: {conf_thr: 0.9, vis_thr: 0.7}
-      # ★ 2026-09-23 晚：**以板端现场值为准**（板端先改成 0.9/0.7，本地镜像随后同步 ⇒ 两边同值）。
-      # conf_thr：**任务侧**阈值——判 mode / 选门 / 计数（gate_task）。0.9 是严值：
-      #   要让 `mode == full` 成立，必须 4 个角点都 ≥0.9（**psi 只吃 full 帧** ⇒ 直接决定正航向能不能启动）。
-      #   ⚠️ 别改回 0.5（鬼点/倒影会被当真角点）；0.7 是 09-18 的现场实测旧值（≥3 角可用帧占比 94%）。
-      # vis_thr ：**解码期**硬门限——低于它的角点在解码阶段就被清 0，下游（含预览）看不到。
-      #   现与 conf_thr 解耦（0.7 < 0.9）：0.7~0.9 之间的角点仅用于预览/诊断，不参与 mode 判定。
-      #   null = 沿用 conf_thr（历史行为）。
+  det: {conf: 0.6}
+      # ★ 2026-09-26（`doc/gate_pose_decode_spec.md` §6 `CONF`）：**候选框 score 阈值，只作用于 gate**。
+      #   刻意**不复用** `model.score_threshold`（当前 0.6，是 ball/gate **共用**的；
+      #   它被谁改过都别指望 gate 跟着变）——给 gate 调阈值不该顺手改掉撞球的行为。
+      #   `preview_detect.py --conf` 会覆盖这里。
+  postproc: {edge_tol: 0.10, min_edges: 2, geom_check: true}
+      # ★ 解码后处理（规范 §4；实现 `gate/gate_postproc.py`，调用点 `gate_decode.detect`）：
+      #   edge_tol  = **重复框**判据里"边重合"的容忍 = 该比例 × 小框短边；
+      #   min_edges = 至少几条边重合才算同一个门 → 丢**小框**（且要求小框 conf 更低）。
+      #   ⚠️ 判据**不是包含关系**：远处第二个门可能落在近门框内，用包含会误删真门（规范实测误删 15 个）。
+      #   geom_check = 四角实例的"顺序合法 + 不自交"过滤（触发率 0~1.5%，用来挡退化实例）。
+  select: {mode: near}
+      # ★ 选门策略（规范 §4，2026-09-26 用户定）：
+      #   near   = **近距离优先**（默认）。没有逐门 PnP 之前用**框宽**做测距代理（z ≈ fx·W/w，单调）；
+      #            并列再比可信角点数/置信和/score。⚠️ 代理不是真测距（未验证），斜门/倒影下需实测复核。
+      #   corner = 2026-09-18 的旧行为（角点更全更可信优先，防水面倒影形成的"第二个门框"抢门）。
+      #            要回退成旧行为：把这里改成 corner（一行，不动代码）。
+  keypoint: {conf_thr: 0.8, vis_thr: 0.5}
+      # ★ 2026-09-26：随阶段一权重换代，按 `doc/gate_pose_decode_spec.md` §6 的工作点重设
+      #   （`V_MIN = 0.8`）——旧值 0.9/0.7 是给上一代权重现场试出来的，不是本模型的标定值。
+      # conf_thr：**任务侧**可信下限（= 规范的 `V_MIN`）——判 mode / 选门 / 计数（gate_task）。
+      #   4 个角点都 ≥ 它才算 `mode == full`；**psi 只吃 full 帧** ⇒ 直接决定正航向能不能启动。
+      #   ⚠️ 别改回 0.5（鬼点/倒影会被当真角点）。
+      # vis_thr ：**解码期**硬门限——低于它的角点在解码阶段 conf 被清 0，下游看不到。
+      #   刻意**与 conf_thr 解耦且更低**（0.5 < 0.8）：规范 §7.2 说低 v 角点的**坐标是垃圾、
+      #   不许参与 PnP**，但"看不见它"就没法诊断门为什么不全 ⇒ 让它留在画面/日志里，
+      #   由 conf_thr 这一层保证它进不了 mode/PnP。null = 沿用 conf_thr（历史行为）。
       # ⚠️ 代码兜底 `gate_task._D_KPT` 必须与 conf_thr 同值（有用例 test_gate_defaults_match_cfg 守）。
       # 阈值实测依据见 gate/过门-状态机与参数.md §9.2；挑阈值用
       #   `preview_detect.py --gate-kpt`（它按 vis_thr=0.0 显示模型原始置信度，不受这里影响）。
