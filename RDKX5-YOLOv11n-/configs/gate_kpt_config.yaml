@@ -1,10 +1,9 @@
 # ============================================
-# YOLO11n-pose（gate 4 角点）RDK X5 PTQ 量化配置 —— AUV_5 清水+混合水质版（2026-09-23）
-# 与 gate_kpt_config.yaml 的区别：ONNX 与输出前缀都指向新模型，**不覆盖已部署的 bin**
+# YOLO11n-pose（gate 4 角点）RDK X5 PTQ 量化配置
 # 输出：9 个 NHWC 张量（3 尺度 × bbox64/cls nc/kpt12），供板端 gate/gate_decode.py
 # ============================================
 model_parameters:
-  # 由 export_onnx.py --task pose 导出（模型名 yolo11n-pose.pt → yolo11n-pose.onnx，当前代次 AUV_5）
+  # 由 export_onnx.py --task pose 导出（模型名 yolo11n-pose.pt → yolo11n-pose.onnx）
   onnx_model: '/data/weights/yolo11n-pose.onnx'
 
   march: 'bayes-e'                       # RDK X5 = bayes-e
@@ -33,8 +32,7 @@ input_parameters:
 calibration_parameters:
   cal_data_dir: '/data/calibration_data'  # prepare_calibration.py 生成的 .rgb
   cal_data_type: 'float32'
-  # 第 2 轮：default → max（不裁剪激活阈值）。第 1 轮 default 的输出层最小余弦 0.9384 < 0.95
-  calibration_type: max
+  calibration_type: 'default'
 
 compiler_parameters:
   compile_mode: 'latency'
