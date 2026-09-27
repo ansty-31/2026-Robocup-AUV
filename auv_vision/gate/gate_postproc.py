@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """gate_postproc.py — 检测后处理（解码之后、下游之前）：可信角点 / 几何合法 / 去重 / 选门键
 
-**依据**：`doc/gate_pose_decode_spec.md` §4（2026-09-26 用户给定，与"阶段一"权重的评测/判定工作点同值）。
-这份规范是**工程约束**（本仓自设），不是模型契约；模型契约见该文件 §1–§3。
+**依据**：`doc/gate_pose_decode_spec.md` §4（2026-09-26 用户给定）。这份规范是**工程约束**（本仓自设），
+不是模型契约；模型契约见该文件 §1–§3。
 
 四条规则（全部可配置，缺键不崩；纯函数，不碰串口/相机/状态）：
 
@@ -11,13 +11,11 @@
      低 v 角点的**坐标是垃圾**（规范 §7.2）：不参与 PnP、也不用来推"门中心"，但**不能据此丢整帧** ——
      门框不全时该降级处理（`parse_kpt_mode` 已经这么做）。
   2. **几何合法**：四角**不自交** + **顺序合法**（`TL.x<TR.x`、`BL.x<BR.x`、`TL.y<BL.y`、`TR.y<BR.y`）。
-     两道都只在"四角可信"的实例上判；退化实例直接丢（规范实测触发率 0~1.5%）。
   3. **去重（重复框）**：同一个门被两个尺度各检出一次 → 丢小框。判据 = **小框 conf 更低** 且
      **≥ MIN_EDGES 条边与小框短边在 EDGE_TOL 比例内重合**。
      ⚠️ **不看"包含"**：远处第二个门可能落在近门框内，用包含会误删真门（规范实测误删 15 个）。
   4. **选门键**（函数在这里，**决策在 `gate_task._pick_gate`**）：
      `near`（默认，规范 §4）= **近距离优先**，用**框宽做测距代理**（`z ≈ fx·W/w`，单调）；
-     并列再比可信角点数 / 置信度和 / score。`corner` = 2026-09-18 的旧行为（角点优先，防倒影抢门）。
 
 调用点：`gate_decode.GateKeypointBackend.detect()` 在解码后调 `apply()`（几何 + 去重），
 所以 **任务与预览看到的是同一批实例**；选门由 `gate_task._pick_gate()` 用 `pick()`。
@@ -243,7 +241,6 @@ def near_key(det, conf_thr=None):
 
 
 def corner_key(det, conf_thr=None):
-    """2026-09-18 旧行为：角点更全/置信和更高优先，最后才比 score（防倒影抢门）。"""
     if getattr(det, "kpt_conf", None) is None:
         return (-1, 0.0, float(det.score))
     return (n_trusted(det, conf_thr), conf_sum(det), float(det.score))

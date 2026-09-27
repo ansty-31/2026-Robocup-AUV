@@ -1,12 +1,12 @@
 #!/bin/bash
-# tools/tidy_board_bak.sh — 整理**板端** bak/：按时间归档压缩 + 去冗余，只留最近 K 个快照可直接回滚
+# tools/deploy/tidy_board_bak.sh — 整理**板端** bak/：按时间归档压缩 + 去冗余，只留最近 K 个快照可直接回滚
 #
-#   bash tools/tidy_board_bak.sh --dry-run     # 只打印将做什么（不动板端）
-#   bash tools/tidy_board_bak.sh               # 执行
-#   KEEP=5 bash tools/tidy_board_bak.sh        # 保留最近 5 个快照不解压（默认 3）
-#   BIG_FILES=10 bash tools/tidy_board_bak.sh  # 文件数 ≥ 它的算"大改动"，也保留（默认 10）
+#   bash tools/deploy/tidy_board_bak.sh --dry-run     # 只打印将做什么（不动板端）
+#   bash tools/deploy/tidy_board_bak.sh               # 执行
+#   KEEP=5 bash tools/deploy/tidy_board_bak.sh        # 保留最近 5 个快照不解压（默认 3）
+#   BIG_FILES=10 bash tools/deploy/tidy_board_bak.sh  # 文件数 ≥ 它的算"大改动"，也保留（默认 10）
 #
-# 整理后的板端布局（<板端> = AUV_BOARD_DIR，默认 /home/sunrise/AUV）：
+# 整理后的板端布局（<板端> = AUV_BOARD_DIR，默认 /home/sunrise/Desktop/AUV_New）：
 #   <板端>/bak/
 #   ├── README.md                      # 自动生成的索引（含每个归档的内容 + 恢复方法）
 #   ├── rollback/deploy_MMDD_HHMMSS/   # 值得留着回滚的**原样**快照：cp -p 回去即可

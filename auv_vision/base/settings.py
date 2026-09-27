@@ -15,6 +15,9 @@ import os
 # ---- 代码级常量（非参数；参数一律在 cfg/*.yaml）----
 PROJECT_NAME = "AUV"
 SIM_MODE = True          # 无硬件调试：串口仅打印（板上置 False）
+# ⚠️ 本文件是**故意的本地/板端分叉**（出处 tools/deploy/board_forks.txt）：
+#   本地 True（只打印）/ 板端 False（真发串口）；deploy 对本文件整份跳过、两边不互相覆盖。
+#   台架只想打印时用运行期覆盖，别改这份文件：AUV_SIM_MODE=1 python3 main.py --task gate
 # 运行期可覆盖（默认行为不变）：AUV_SIM_MODE=0 真正发串口 / =1 只打印
 #   AUV_SIM_MODE=0 python3 main.py --task gate      ← 下水真实驱动
 #   AUV_SIM_MODE=1 python3 main.py --task gate      ← 台架只打印（默认）
@@ -89,10 +92,9 @@ comm = _load(_resolve(os.environ.get("AUV_COMM_CFG"), _DEFAULT_COMM))
 
 # --------------------------------------------------------------- 路径解析
 # cfg 里的文件路径**一律写仓库内相对路径**（`cfg/front_camera.yaml`、`models/x.bin`），
-# 运行时在这里统一按**工程根**解析成绝对路径。为什么这么做（2026-09-22 踩过）：
-#   板端有两份拷贝（`/home/sunrise/AUV` 旧副本 与 `~/Desktop/AUV_New` 在用副本），
-#   绝对路径会把标定/权重钉死在某一个拷贝上 —— 那份被删/被改/被搬，管线立刻崩。
-#   写成相对路径后，**整棵树搬到哪都能跑**（本地 / AUV_New / 旧副本 / U 盘）。
+# 运行时在这里统一按**工程根**解析成绝对路径。
+# ⚠️ 别在 cfg 里写绝对路径：板端存的多份工程拷贝会把该拷贝钉死，那份被搬走管线就崩
+# （2026-09-22 踩过，见 doc/_注释历史_fragments/base_tests.md）。
 # 绝对路径仍然接受（老配置不改也能跑），但不推荐。
 def project_root():
     """工程根（含 `main.py`/`cfg/`/`models/` 的那一层）。"""

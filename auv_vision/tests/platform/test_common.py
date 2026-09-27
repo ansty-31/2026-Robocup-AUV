@@ -70,6 +70,35 @@ def test_preprocess_enhance_shape_dtype_and_gamma():
     assert ModelPreprocessor(undistort=False).size == S.vision.model.input_size
 
 
+def test_preprocess_chain_domain_switch():
+    """识别链路域开关（`vision.image.chain`）：A/D 两序、必须与权重同域。
+
+    不变量：
+      1. 去畸变关闭时 A/D **必须逐像素相同**（两序唯一的差别就是 remap 的先后）；
+      2. 默认域 = 配置值（本仓库 D）；
+      3. 非法值要**当场报错**，不能静默退回某个域 —— 静默退回 = 拿错域的图喂权重。
+    """
+    rng = np.random.default_rng(20260927)
+    raw = rng.integers(0, 256, (48, 96, 3), dtype=np.uint8)
+
+    a = ModelPreprocessor(undistort=False, size=64, chain="A")
+    d = ModelPreprocessor(undistort=False, size=64, chain="D")
+    assert a.chain == "A" and d.chain == "D"
+    out_a, out_d = a.process(raw), d.process(raw)
+    assert out_a.shape == out_d.shape == (64, 64, 3)
+    assert np.array_equal(out_a, out_d), "去畸变关闭时 A/D 两序必须等价"
+
+    # 默认取配置；大小写/空白容忍
+    assert ModelPreprocessor(undistort=False).chain == \
+        str(S.get("vision.image.chain", "D")).strip().upper()
+    assert ModelPreprocessor(undistort=False, chain=" a ").chain == "A"
+
+    # 非法域：直接报错（别静默回退）
+    import pytest
+    with pytest.raises(ValueError):
+        ModelPreprocessor(undistort=False, chain="B")
+
+
 def test_det_helpers_and_pick_target():
     """Det 的 area/ratio/center/kpts 与按类别挑选（绝不因别类分高而换目标）。"""
     d = Det("blue_ball", 0.7, 10, 20, 30, 40)
@@ -156,8 +185,8 @@ def test_cfgnode_node_readers(monkeypatch):
     assert num({}, "x", 9.0) == 9.0                            # 缺键 → 默认值
     assert nums({"kp": 4.0}, {"kp": 1.0, "ki": 0.0}) == {"kp": 4.0, "ki": 0.0}
 
-    # ⚠️ 必须按字符串语义解析：bool("false") 是 True —— 板端就因此把 kpt_mem 的一个
-    #    拼写错值当成了"开"，这条断言守的就是那个坑
+    # ⚠️ 必须按字符串语义解析：bool("false") 是 True —— 拼写错的值会被当成"开"
+    #    （板端踩过，见 doc/_注释历史_fragments/base_tests.md），这条断言守的就是那个坑
     assert flag({"e": False}, "e", True) is False
     assert flag({"e": "false"}, "e", True) is False
     assert flag({"e": "0"}, "e", True) is False

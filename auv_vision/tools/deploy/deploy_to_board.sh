@@ -13,8 +13,7 @@
 #   AUV_SSH / AUV_SCP / AUV_STREAM / AUV_ASKPASS
 #
 # 为什么快：① 板端 md5 **一次 SSH 批量取**；② 只把变化的文件打成一个 tar 传过去；
-#           ③ 备份/删除各一次 SSH。之前是"一文件一次 SSH×2"，70+ 文件要几分钟。
-# 每一步都打印累计耗时，慢在哪一眼能看到。
+#           ③ 备份/删除各一次 SSH。每一步都打印累计耗时，慢在哪一眼能看到。
 #
 # 注：md5 只比对内容、**看不见文件权限**；而 tar 只上传"内容变化"的文件，
 #     所以内容没变但权限丢了的（如 scp 覆盖掉 manual.sh 的 +x）永远不会被修。
@@ -42,7 +41,7 @@ DELETED=(
   task1_2/ball_forward.py
   task1_2/run_ball_forward.sh
   tests/test_ball_forward.py
-  # 2026-09-19：按角度原地转的实现迁到 common/turn_deg.py（脚本与 gate 正航向共用），
+  # 按角度原地转的实现在 common/turn_deg.py（脚本与 gate 正航向共用），
   # 板端旧的 task1_2/turn_deg.py 必须删掉，否则"两个同名脚本、行为不同"必然踩坑。
   task1_2/turn_deg.py
   # 工程根旧副本：这些工具已迁到 tools/ 或已删除，板端根目录的同名旧文件要删
@@ -77,7 +76,7 @@ DELETED=(
   tests/test_gate_enhance.py
   tests/test_gate_cue_lead.py
   doc/算法说明-gate-v1.4-分层与质量分.md
-  # 2026-09-21 分类重整：tests/tools 下移到子目录后，**旧扁平路径必须删掉**
+  # 分类重整：tests/tools 下移到子目录后，**旧扁平路径必须删掉**
   # （否则板端会同时存在新旧两份：pytest 收集到重名模块会 import-mismatch 报错）
   tools/analyze_heading.py
   tools/analyze_kpt_dump.py
@@ -96,7 +95,7 @@ DELETED=(
   tests/test_gate_flow.py
   tests/test_motion.py
   tests/test_pnp_calib.py
-  # 板端遗留的**旧版/已合并**用例（2026-09-20 合并成 6 个文件时的旧名）
+  # 板端遗留的**旧版/已合并**用例（合并成 6 个文件时的旧名）
   # 板端这些更早的拆分文件不在清单里、会 import 已删除模块（gate.vision/gate.data/
   # common.ramp/build_frame_with_header…）→ 板端 pytest 收集即报错、把全量自检搞红。
   # 先备份到 bak/deploy_<stamp>/ 再删，保证"板端 == 清单"。
@@ -112,7 +111,7 @@ DELETED=(
   tests/test_detector.py
   # ⚠️ 反面教材（别再犯）：`tests/test_gate_flow.py` 曾经既是"被删的分层版用例"、又是
   #    "活文件"的同名路径 —— 那种情况下把它列进 DELETED 会把刚上传的文件再删掉。
-  #    2026-09-21 分类重整后活文件是 `tests/tasks/test_gate_flow.py`，扁平路径 `tests/test_gate_flow.py`
+  #    分类重整后活文件是 `tests/tasks/test_gate_flow.py`，扁平路径 `tests/test_gate_flow.py`
   #    才是要清的旧位置（见上面的"分类重整"段）；两者同名不同路径，**加 DELETED 时看清层级**。
   tests/test_gate_geometry.py
   tests/test_gate_kpt_memory.py
@@ -125,6 +124,14 @@ DELETED=(
   tests/test_return_handover.py
   tests/test_settings.py
   tests/test_uart.py
+  # 2026-09-27 文档归位：记录类文档从 doc/ 移到 doc/记录/，板端旧路径的副本要删
+  # （新路径已在清单里 → 会自动上传；不删的话板端会同时留两份同名文档）
+  doc/2026-09-22-改动记录-review.md
+  doc/2026-09-23-改动记录-review.md
+  doc/2026-09-26-改动记录-review.md
+  doc/psi测量步骤_20260923.txt
+  # gate/过门-状态机与参数.md 已归位到 doc/记录/过门-状态机与参数.md（来源见 doc/记录/README.md）
+  gate/过门-状态机与参数.md
 )
 
 T0=$(date +%s)
@@ -183,14 +190,20 @@ while read -r m p; do RM["$p"]="$m"; done < "$TMPD/remote"
 
 n_same=0; n_new=0; n_diff=0; n_miss_local=0; n_skip=0
 : > "$CHANGED"
-# ---- 「本地/板端故意分叉」的跳过表（**当前为空**，2026-09-26 用户定"全部以本地为准"）----
-#   历史教训：这条规则原先只写在文档里（"cfg 不要整份推板端"），每次部署都要人工记着排除；
-#   漏一次就把现场值冲掉 —— `depth_guard.min_depth_m=0.55` 被冲掉过两次、
-#   板端 `SIM_MODE=False` 也差点被本地 True 覆盖。要**再**制造分叉时，把路径写进下面这个数组。
-#   曾经的两条（现已统一为本地值）：
-#     base/settings.py    # SIM_MODE：本地 True / 板端 False（真驱动）
-#     cfg/comm.yaml       # 板端台架分叉：pass_target=2 / timeout=500000 / wait_fresh_ms=1000 / sweep_s=3.0
+# ---- 「本地/板端故意分叉」的跳过表 ----
+#   ⚠️ 别把"cfg 不要整份推板端"只写在文档里、靠人工记着排除：漏一次就把现场值冲掉
+#      （那些现场值没有任何本地副本）。
+#   ⚠️ 清单的**唯一来源是 tools/deploy/board_forks.txt**（check_board_parity.sh 读同一个文件）。
+#     别改回"只在这个脚本里写数组"：那边不知道分叉，--board 检查会永远红着。
+#   换目标仓库时（如给旧仓库 /home/sunrise/AUV 同步）用 AUV_FORKS_FILE 指向另一个文件：
+#     那个仓库的"故意分叉"和本仓库无关（它的 base/settings.py 也要跟着传）。
+#   cfg/comm.yaml 曾按"统一为本地值"处理，现在已不在分叉清单里。
+FORK_FILE="${AUV_FORKS_FILE:-$TOOLS_DIR/board_forks.txt}"
 SKIP_FILES=()
+if [ -f "$FORK_FILE" ]; then
+  while read -r f; do [ -n "$f" ] && SKIP_FILES+=("$f"); done \
+    < <(sed -e 's/#.*//' "$FORK_FILE" | awk 'NF{print $1}')
+fi
 is_skip() { local x="$1" s; for s in "${SKIP_FILES[@]}"; do [ "$s" = "$x" ] && return 0; done; return 1; }
 while IFS=$'\t' read -r _m f _v; do
   [ -f "$LOCAL/$f" ] || { n_miss_local=$((n_miss_local+1)); continue; }
@@ -250,7 +263,7 @@ step "废弃文件处理完成"
 # ---- 5) 板端自检 ----
 {
   echo "cd $BOARD"
-  echo "python3 -m py_compile main.py preview_detect.py base/settings.py base/camera.py base/uart.py base/telemetry.py common/detector.py common/PID.py common/preprocess.py common/turn_deg.py manual/recorder.py manual/stream.py manual/udp_server.py task1_2/ball.py gate/__init__.py gate/gate_task.py gate/gate_postproc.py gate/gate_detector.py gate/gate_decode.py gate/gate_frontend.py gate/geometry.py gate/kpt_memory.py gate/mock.py && echo COMPILE-OK"
+  echo "python3 -m py_compile main.py preview_detect.py base/settings.py base/camera.py base/uart.py base/telemetry.py common/detector.py common/PID.py common/preprocess.py common/turn_deg.py manual/recorder.py manual/stream.py manual/udp_server.py task1_2/ball.py gate/__init__.py gate/gate_task.py gate/gate_postproc.py gate/gate_detector.py gate/gate_decode.py gate/gate_frontend.py gate/geometry.py gate/heading_align.py gate/kpt_memory.py gate/mock.py && echo COMPILE-OK"
   [ "$NO_TEST" = "1" ] || echo "echo '--- 全量 pytest ---'; timeout 600 python3 -m pytest tests/ -q > /tmp/auv_pytest.log 2>&1; tail -3 /tmp/auv_pytest.log; if grep -qE '[0-9]+ passed' /tmp/auv_pytest.log && ! grep -qE '[0-9]+ (failed|error)' /tmp/auv_pytest.log; then echo PYTEST-OK; else echo PYTEST-FAIL; fi"
   cat <<'PYEOF'
 echo '--- 配置快照 ---'
@@ -280,7 +293,14 @@ timeout 900 "$STREAM" "bash -s" < "$TMPD/check.sh" 2>&1 | grep -v "Warning: Perm
 step "板端自检完成"
 
 # ---- 6) 终检 + 刷新清单（一次 SSH 批量 md5）----
-AUV_SSH="$SSH" bash "$TOOLS_DIR/check_board_parity.sh" --board --write 2>&1 | tail -4
+# ⚠️ `board_parity.md5` **只对应默认目标（在用副本 AUV_New）**。
+#    给别的仓库同步时（AUV_BOARD_DIR 改了）必须 AUV_PARITY_WRITE=0：
+#    否则会把那个仓库的字节写进清单，在用副本的对照当场变红。
+if [ "${AUV_PARITY_WRITE:-1}" = "1" ]; then
+  AUV_SSH="$SSH" bash "$TOOLS_DIR/check_board_parity.sh" --board --write 2>&1 | tail -4
+else
+  step "跳过清单刷新（AUV_PARITY_WRITE=0：目标 $BOARD 不是清单对应的仓库）"
+fi
 step "完成：上传 ${n_new}/${n_diff} 新/改，已一致 ${n_same}"
 
 # 板端 pytest **未全绿要吼出来**（以前是静默放过：红着也照样"完成"，很容易误判）

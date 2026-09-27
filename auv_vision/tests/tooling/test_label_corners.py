@@ -152,9 +152,11 @@ def test_load_done_and_resume(tmp_path):
 
 
 def test_same_basename_across_dirs_does_not_collide(tmp_path):
-    """**2026-09-22 现场踩过**：采图目录里的文件名永远是 cap_001.jpg…
-    ⇒ 按 basename 去重会让 `ruler_z100` 的记录被 `ruler_z300` 整行删掉，
-    `--resume` 更会直接跳过整档。必须按**完整路径**去重。"""
+    """采图目录里的文件名永远是 cap_001.jpg… ⇒ 必须按**完整路径**去重。
+
+    按 basename 去重会让 `ruler_z100` 的记录被 `ruler_z300` 整行删掉，`--resume` 更会直接
+    跳过整档（2026-09-22 现场踩过，证据见 doc/_注释历史_fragments/base_tests.md）。
+    """
     out = str(tmp_path / "ruler.jsonl")
     a = {"src": "cap_001.jpg", "src_path": "log/pnp_0922/ruler_z100/cap_001.jpg",
          "kind": "ruler", "span_m": 0.5, "z_tape": 1.0, "du": 540.0}

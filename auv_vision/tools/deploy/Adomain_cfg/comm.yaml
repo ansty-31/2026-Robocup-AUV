@@ -1,0 +1,254 @@
+# comm.yaml — 通信与运动参数（串口帧 / DOF 映射 / 心跳急停 / 底层运动 / 任务参数）
+#
+# 分区：
+#   serial·frame·dof_map·heartbeat·estop·ramp   串口与 11B 帧
+#   depth_guard·dof_comp                        底层保护与下潜增益（ball/gate 都吃）
+#   motion                                      **ball/gate 共用的底层运动**（PID / 速度档 / 预设）
+#   tasks·ball·gate                             任务装配与**各任务特有**的旋钮
+# 约定：**共用参数只写在 motion 里**，任务段不重复抄一份；任务段确实要单独一套时才写覆盖键
+#       （如 `gate.pid_sway`）。注释只写"是什么 + 当前值 + 单位/量纲 + 调它的后果"；
+#       实测记录 / 历史演进 / 推导与调参决策规则见 gate/过门-状态机与参数.md。
+
+serial:
+  device: /dev/ttyS1
+  baud: 9600
+
+frame:                     # 11B 定长帧（模拟遥控）：帧头 + 7 轴 + 3 键；轴值 128 中位、±127 幅值
+  header: 165              # 0xA5
+  axis_count: 7
+  btn_count: 3
+  axis_mid: 128
+  axis_range: 127
+  aux_axis: {4: 165, 5: 1, 6: 1}   # axis4=滚轮静止/中值, axis5/6=tri 中位（灵敏度三档 ×0.20/×0.24/×0.60）
+  btn_values: [0, 0, 0]    # 当前下位机固件未使用
+
+dof_map:                   # DOF→轴字节真值表（下位机 RC_Translate），sign 全为 1：
+  surge: {axis: 1, sign: 1}   # 前后←LY、左右平移←RY、升降←RX、旋转←LX
+  sway:  {axis: 3, sign: 1}
+  heave: {axis: 2, sign: 1}
+  yaw:   {axis: 0, sign: 1}
+
+heartbeat:
+  interval_ms: 50          # 心跳间隔(ms)，≥20Hz；下位机无帧超时停车 → 必须持续发
+estop:
+  repeat_ms: 30            # 急停连发中性帧间隔(ms)
+ramp:
+  speed_per_s: 220.0       # 轴字节平滑速率(字节/秒)：速度连续变化到目标，不是直接激增；0=关闭直跳
+
+telemetry:                 # 下位机上行姿态/深度的**符号归一**（2026-09-23）
+  yaw_sign: 1.0            # 遥测 yaw × 它。默认 1.0 = 不改行为。
+                           #   它就是"回传 yaw 的符号"这一个旋钮，转向环的极性 σ 直接由它算出
+                           #   （`common/turn_deg.py::yaw_sign()` = 固件常量 × `dof_map.yaw.sign` × 本键）：
+                           #   改这里，转向的闭环极性自动跟着改，不会出现"配置与代码各记一套符号"。
+                           #   ⚠️ 别为了"让船转对方向"去翻它 —— 方向不对先查 `dof_map.yaw.sign` 与接线。
+depth_guard:               # 限深保护：只压上浮，不动前进/转向（base/uart.py::_apply_depth_guard）
+  enable: true             #   当前深度 ≤ min_depth_m → 本帧 heave 清零并当帧回中，机身顶不出水面
+  min_depth_m: 0.55        # ⚠️ **现场定死 = 0.55，不准改**（有不变量用例守着）；**别再整份覆盖板端 cfg**
+                           #    （本地写 0.3 曾把板端的 0.55 冲掉过两次，本文件已与板端对齐）
+                           #    depth 正 = 水面**以下**；遥测打出负值是符号反了 → 去协议侧统一。
+  stale_ms: 500            # 遥测超过这么久(ms)没更新 → 视为没有深度（一直告警 = 下位机没回传）
+  stale_action: pass       # 无新鲜深度时：pass=放行(台架/仿真友好) | block_up=连盲上浮也不许（要求持续回传）
+  snap: true               # 触发时 heave 轴当帧直接回中（不走 ramp），防惯性继续上浮
+  log_ms: 1000             # 触发告警打印节流(ms；0=每帧都打)
+
+dof_comp:                  # **底层共用**：单独调"下潜"这一路动力（base/uart.py::_apply_dive_boost）
+  enable: true             #   只对 heave<0（下潜）生效；上浮/悬停/平移/转向一律原样
+  dive_scale: 2.0          # 下潜指令 × 它再夹到 [-1,0]；1.0=不放大。调法：弱→3.0/4.0，过头→1.5
+                           #   下位机对映射值 ≤35 直接返回 0 ⇒ 实际推力远小于 DOF 数字（换算见 md §1.1）；
+                           #   很小的指令(如 -0.05) 放大后仍可能落在死区(<0.138)内
+
+motion:                    # **ball / gate 共用的底层运动参数**（同船同推进器；任务段不重复写）
+  # ---- 共用 PID（任务段只在"确实要单独一套"时覆盖）----
+  pid_sway:  {kp: 8.0, ki: 0.01, kd: 0.05, out_max: 0.45, deadzone: 0.05}
+                           # 水平修正：ball 接近段 sway / gate 全档位居中（归一化像素偏差 ±1 输入）
+  pid_heave: {kp: 1.0, ki: 0.0,  kd: 0.15, out_max: 1.0,  deadzone: 0.04}
+                           # 升降居中：ball CENTER 的 heave / gate 的 heave
+  turn_pid: {kp: 0.2, ki: 0.0, kd: 0.0, out_max: 0.30, deadzone_deg: 6.0, norm_deg: 15.0,
+             div_deg: 15.0,
+             # period：转向闭环推进周期(s)，必须与 .sh 路径 turn(period=0.05) 一致。
+             #   gate 的 ALIGN.HDG 原先是每相机帧 step 一次（实测 p50 0.126s 约 8Hz），
+             #   同一套增益下 进带6度到连续3帧收舵 从 0.15s 拖成 0.38s 以致过冲。
+             #   现在转向期间由 gate_task._turn_inner_loop 按这个周期阻塞推进。
+             period: 0.05}
+       # 「额定转角」PID（`common/turn_deg.py`）：gate 的正航向与转向脚本**共用同一套用法** ——
+       #   调用形态就是 `turn_deg.py --deg N --dir left|right`（gate 里就是 `TurnCore(deg, left)`）。
+       #   闭环量 = 下位机回传的 yaw；极性 σ 由代码算出（`yaw_sign()` = 固件常量 × `dof_map.yaw.sign`
+       #   × `telemetry.yaw_sign`，当前 = -1）：**不需要配置、不探向、不现场测**。
+       # kp 管"多早开始收力/收敛更紧"，out_max 管"最大转速"（想整体更慢就降它，别只降 kp）。
+       # ⚠️ kd 必须为 0：内层循环 20Hz + 误差按 norm_deg 归一化 ⇒ D 项 = kd·Δerr/dt 在
+       #   30°/s 转速下就达 kd×4，kd=0.10 时 D 项(0.4)已超过 out_max ⇒ 出力每帧正负反转、
+       #   原地 2 帧极限环，**永远进不了到达窗**（2026-09-27 仿真复现：残余 7.5°、超时）。
+       # ⚠️ deadzone_deg 必须 ≥ 执行器死区折算角：kp·dz/norm_deg ≥ 0.138 ⇒ 当前增益下
+       #   dz ≥ 10.4° 才有推力；dz=3 等于把到达窗设在"一点力都没有"的区间里（同上仿真）。
+       #   6.0 = 与旧版实测行为一致（命令 90° 收敛到 ~85°）。
+       # ⚠️ out_max 别降到 0.15 那一档：15% 推力恰卡在执行器死区 0.138 边上 ⇒ "还剩二十几度就没推力"。
+       # deadzone_deg：PID 死区(°) 兼「到达判据」；norm_deg：误差归一化分母(°，调小=更凶)。
+       # div_deg：方向自证 —— 命令一直朝目标方向、误差却和初始同号且比初始还大这么多度 ⇒ 停转（0=关）。
+  # ---- 共用速度档（归一化 DOF）----
+  surge_fast: 0.35         # 快档：ball 分级最高速/冲刺、gate 远距进近（z > z.slow_max）
+  surge_slow: 0.15         # 慢档：ball 接近段减速、gate 近距进近
+  loss_inertia_surge: 0.25 # 目标短时丢失时的低速惯性（ball 接近段；gate 不用）
+                           # ⚠️ **任何速度档都不能落在执行器死区 (0, 0.138)**：低于它一点推力都没有
+                           #    （creep/lost_backward 曾写 0.12 = 0%，等于那两个动作从未发生）
+  search_yaw: 0.3          # 无目标时原地旋转搜索（30% 转速，右转）——**过门任务不用**（gate 是平移扫视）
+  presets:                 # 手动模式/急停用的 DOF 预设（uart.set_motion）
+    stop:         [0.0, 0.0, 0.0, 0.0]
+    forward_fast: [1.0, 0.0, 0.0, 0.0]
+    forward_slow: [0.35, 0.0, 0.0, 0.0]
+    backward:     [-0.5, 0.0, 0.0, 0.0]
+    left:         [0.0, -1.0, 0.0, 0.0]
+    right:        [0.0, 1.0, 0.0, 0.0]
+    up:           [0.0, 0.0, 1.0, 0.0]
+    down:         [0.0, 0.0, -1.0, 0.0]
+    turn_left:    [0.0, 0.0, 0.0, -0.4]
+    turn_right:   [0.0, 0.0, 0.0, 0.4]
+    search:       [0.0, 0.0, 0.0, 0.3]    # 右转；与 motion.search_yaw 一致
+
+tasks:
+  enabled: [ball]           # 任务一；任务二=记忆返回(task1-2/*.sh)；gate 需后端/mock
+  fault_action: skip       # 模型缺失等：skip | exit
+  idle_ms: 1000
+  done_hold_ms: 500
+
+ball:                      # 任务一 撞球：运动链 SEARCH→CENTER→APPROACH→DASH→STOP
+  # ---- 视觉量 → 运动决策 ----
+  ema_alpha: 0.3            # 面积占比 EMA 平滑(判据与日志都用它, 抗单帧抖动)
+  lost_grace_frames: 15     # 丢目标后的"短时保持/惯性"帧数
+  r_slow: 0.12              # 面积分级: >=该值且增长缓慢 → 用 slow; 其余用 fast
+  growth_eps: 0.002         # 面积增长阈值: 增长快 → 用 fast(说明在快速接近)
+  align_x: true             # 居中通道：x → yaw（旋转；撞球不做左右平移）、y → heave
+  align_y: true
+  timeout_ms: 30000         # 总时限 30s(DASH/STOP 期间不打断, 保证命中与停稳)
+  # ---- SEARCH: 脉冲旋转 + 周期性前进探测（沿用原方案）----
+  search_spin_s: 0.5        # 旋转 0.5s → 停 1.5s 循环；连续无目标 4s → 慢速前进探测一次
+  search_pause_s: 1.5       #   （探测时长 0.5s = 阶段窗口, 不按总时限等比缩; 速度 0.25）
+  search_advance_after_s: 4
+  search_advance_dur_s: 0.5
+  search_advance_surge: 0.25
+  # ---- CENTER: yaw + heave, 不前进不横移（连续居中 5 帧 → APPROACH）----
+  center_eps: 0.25          # 水平+竖直居中判据(归一化偏差)
+  center_confirm_frames: 5
+  edge_yaw_kp: 0.3          # 居中转向 P/D 增益与限幅（D 是阻尼, 防转过头）——**撞球特有**：过门居中只用 sway
+  edge_yaw_kd: 0.0
+  edge_yaw_max: 0.15
+  # ---- APPROACH: 仅 sway 修水平(yaw=0/heave=0) ----
+  # 前进速度与 sway PID 都取 motion.surge_fast/surge_slow、motion.pid_sway（共用，见上）
+  # ---- DASH/STOP: 面积(EMA)达标且连续 2 帧 → 冲刺 1.5s → 全 0 保持 1.0s；丢目标 hold 0.8s 回 SEARCH ----
+  dash_ratio: 0.15          # 面积(EMA)达标阈值
+  dash_confirm_frames: 2
+  dash_dur_s: 1.5           # 冲刺时长（不检测是否撞到）
+  stop_hold_s: 1.0
+  engage_hold_s: 0.8
+
+gate:                      # 过门（相位机 SEARCH→ALIGN→APPROACH→THROUGH；逐状态导读见 gate/过门-状态机与参数.md）
+  timeout_ms: 180000       # ★A 域：老值（D 域 2026-09-18 提到 300000，说"正航向慢但稳"）
+  pass_target: 1            # 完成计数目标：单门 1；高低两门可设 2
+  # ---- 修正 PID：**默认共用 motion.pid_sway / motion.pid_heave** ----
+  # 这里**不写任何增益数字**：gate_task 直接取共用那两套（启动日志打印实际来源与数值）。
+  # 确实要单独一套时才写 pid_sway / pid_heave（同键名同量纲：归一化偏差 ±1）。转向不在这条链上（见 hdg）。
+  align: {confirm_frames: 4, px_x: 0.20, px_y: 0.25}   # ★A 域：老值（D 域 2026-09-26 收紧为 2 / 0.10 / 0.15）
+       # 「居中成功」判据：**全档位一套像素门槛**（归一化像素偏差，±1=半屏；位姿档同用这套）。
+       # px_x/px_y：判"对准"的范围，越大越松（越容易进 APPROACH/creep）。物理换算与调参决策见 md §1/§4.5。
+       # ★ 2026-09-26 收紧 0.20/0.25 → **0.10/0.12**（用户："很快进 fast，把居中阈值缩小一点"）。
+       #   依据（板端 log/gate_one_2026092.jsonl，18.8 s / 162 帧）：
+       #     居中达标那一帧（f=13 进 APPROACH）实测 **dx=-0.079 / dy=-0.167** —— dy 已超竖向余量一倍：
+       #       换算（rectified fx=1023.76 / fy=1151.45 @720p）：横 0.625·z、竖 0.313·z（z=2.16 m）
+       #       旧 0.20 → **0.27 m** 横向容差（门开口余量横 0.16 m）❌ 太大
+       #       旧 0.25 → **0.169 m** 竖向容差（竖余量只有 **0.08 m**）❌ 超标一倍 ⇒ 带着偏就进 fast
+       #       新 0.10 → 0.135 m（≤0.16 ✓）| 新 0.15 → 0.101 m（1.26× 0.08，见下条为什么不能再紧）
+       #   ⚠️ **竖向不能再紧**：heave 是 `pid_heave.kp=1.0`，而执行器死区 0.138 ⇒ |dy|>0.138 才有推力。
+       #     把 px_y 设到 ≤0.138 就等于要求船靠惯性滑进那个窗口 ⇒ 可能永远确认不了居中（卡在 ALIGN）。
+       #     想让竖向更准，要动的是 `pid_heave`（最小舵效地板）或 heave 的 dof_comp，**不是 px_y**。
+       #   ⚠️ 另注：rectified 主点 cx=702.27/cy=409.14 ≠ 画面中心 640/360 ⇒ "正对光轴"的门读数就是
+       #     dx=+0.097 / dy=+0.137（对准目标是**画面中心**，不是光轴；两者差 ~0.12 m @2 m，属
+       #     `body_center_offset` 未标定的范畴）。
+       #   ⚠️ APPROACH 阶段仍在修 sway/heave（只把 surge 加大），所以容差随距离变大不会失控；但**别调回 0.20/0.25**。
+       # ⚠️ 代码兜底 `gate_task._D_ALIGN` 必须与这里同值（有用例 `test_gate_defaults_match_cfg` 守）。
+       # confirm_frames：连续对准帧数。★ 2026-09-26 由 4 降到 **2**（用户：居中都稳 2 帧就转；
+       #   水下水波复杂、画面本来就难维持稳定）。新模型下 mode 每帧在 full/coarse 间跳，4 连帧
+       #   实测 144 帧里一次都没攒到 ⇒ 正航向永远起不来。抗抖改由收紧的 px_* 承担。
+  # 居中**只有 sway 平移、没有 yaw**（2026-09-20 用户定）：姿态修正由下面的 hdg.* 负责，那是 gate 唯一的 yaw 通道。
+  hdg: {enable: true, tol_deg: 8.0, max_step_deg: 0.0, timeout_ms: 30000,
+        turn_timeout_s: 8.0, entry_psi_first: false, psi_first_z_max: 2.5, psi_first_ratio: 0.30}
+       # 「正航向」（ALIGN 的子状态 HDG；实现 `gate/heading_align.py`）：让机身与门法向平行。
+       # ★ 2026-09-27 改成**一次到位**（用户定）：PnP 测到的 full 帧 psi（`_hdg_deg`，EMA）在起转
+       #   那一刻**冻结**成目标角 → `common/turn_deg.py` 按遥测 yaw 闭环转**一次** → 结束。
+       #   旧的「测→转→停稳→再测→迭代」以及**开环盲转**（blind_enable/blind_rate_dps）、
+       #   **开环探向**（probe_*）全部删除：转向只允许闭环；只有 full 帧的 psi 可用（p3p 欠定）。
+       # tol_deg：|psi| ≤ 它 ⇒ 不转（已经够正）。用户定 8~10（psi 帧内噪声本身 3~5°）。
+       # max_step_deg：单次转角上限，**0 = 不设限**（测到多少转多少）。只用于防"垃圾 psi 把船甩出去"。
+       # timeout_ms：正航向总时限；turn_timeout_s：单次转向的闭环超时（超时=带残余航向继续走，不卡死）。
+       # entry_psi_first：**航向优先**（居中还没达标也起转）—— 解「航向歪 ⇒ 门偏一侧 ⇒ 居中确认不了
+       #   ⇒ 不许转 yaw」的死锁。★ 2026-09-26 晚用户定默认 **false**（必须先居中）。
+       #   psi_first_z_max / psi_first_ratio：航向优先的距离门（新鲜 z ≤ 它 **或** 框占比 ≥ 它）。
+       # ⚠️ 转向期间**整条视觉链路被绕开**，档位退化/位姿被拒/角点闪烁都不打断；只有**整门丢失**才中止。
+       # 一键回退：enable: false（本门不正航向，带残余航向进近；冲刺仍有 through.require_align_deg 那道闸）。
+  loiter: {enable: true, timeout_ms: 3000, dx_max: 0.14, dy_max: 0.20}
+       # 「在门口超时兜底」=直冲出口③：**不看档位**，只要 ①框占比 ≥ z.near_lost_ratio
+       #   ②在安全带内（|dx|≤dx_max、|dy|≤dy_max）③连续持续 ≥ timeout_ms → 自己拍板：判过门 + 直冲。
+       # 调参：等太久 → 减小 timeout_ms；误判太多（没对准就冲）→ 收紧 dx_max/dy_max。完全不要 → enable: false。
+  z: {align_max: 4.0, fast_max: 3.0, slow_max: 1.3, cross: 0.7,
+      # ★A 域：本仓库取老值 cross=0.7 —— 下面 09-26 那组说明（0.65 / 0.6 / 0.75）是 **D 域**的收紧，
+      #   与本仓库无关；本仓库的老阈值与老内参（fx 782.5）是**配套**的同一套尺度。
+      # cross = 0.65：★ 2026-09-26 由 0.77 **缩小**（用户："cross 也缩小一点"）——
+      #   当前读数尺度 ≈ 真距（水里）⇒ 触发点 ≈ 真 **0.65 m**，比原来更贴门才起冲刺；
+      #   配合同时收紧的 `align.px_*`（0.10/0.12），"带偏冲门"的两个入口一起变严。
+      #   依据：板端 log/gate_one_2026092.jsonl —— 那一趟是**靠占比/丢门兜底**在 ratio 0.77 才进 THROUGH 的，
+      #     而 z 读数当时是 5.295 的垃圾值（width 档残留），说明"米制阈值在近距不可用"时兜底才是主力。
+      #   回退：改回 0.77（一行）；要进一步缩短冲刺距离就往 0.6 走，但**别低于门框半高 0.28 m + 机身半长**。
+      #   ⚠️ 历史遗留：陆上验证时读数 = 0.70×真距，若哪天决定整组 ×1.43 回填（cross 1.10 等），
+      #     那时这个 0.65 要跟着重算 —— 见 doc/实验待测-runbook.md §B4c。
+      cross_confirm_frames: 2,   # 连续 z≤cross 帧数才判过门(防单帧 PnP 错解冲出去)。**别降到 1**
+      near_lost_m: 1.0,          # ★A 域：老值（D 域 2026-09-26 收紧为 0.6）
+                                 #   那趟就是它在 z=0.868 m 判「已过门」直接满速冲的（psi=30.6°、dy=0.42）
+      near_lost_ratio: 0.60,     # ★A 域：老值（D 域 2026-09-26 收紧为 0.75）
+      z_stale_ms: 1500}          # `_z_last` 的"保鲜期"(ms)：超过它未更新 → 不许参与穿门判定
+      # ⚠️ near_lost_ratio 调小 = 更早判过门（更冒险）；coarse 档**没有测距**，这一条是那一档唯一可靠的近距信号。
+      # ⚠️ z_stale_ms 防"陈旧的 z"：coarse 档会一直带着上一次的 z（实测带过 9.25 的垃圾值）；
+      #    陈旧的小 z 会把远处丢门误判成"已过门" → 满速盲冲。
+      # ⚠️ align_max / fast_max 当前**未参与运算**（Z 只分 slow_max 两档；留作三档扩展）。
+  surge: {creep: 0.20, lost_backward: 0.20, reacquire: 0.25, through: 0.6}
+         # 进近两档 fast/slow **取自 motion.surge_fast/surge_slow**（共用，不在这里重复）；
+         # 要 gate 单独一套就在本段写 fast/slow 覆盖（gate_task 优先读本段）。
+         # creep=coarse/width 慢蠕进；lost_backward=远处短暂丢失的轻微后退(代码取负)；reacquire=后退重取。
+         # through=穿门冲刺（出口①②③共用，`_start_through` 固定取它）。
+         # ⚠️ **任何速度档都不能落在执行器死区 (0, 0.138)**（换算表见 md §1.1）。
+         # ⚠️ through 是全场最高速、也是"撞门能量"最直接的旋钮（撞门 10 分/不撞 30 分）：
+         #    2026-09-18 用户定 0.5→0.6；再加就往 0.7 走，且应同时确认 THROUGH 时长够"冲出去"。回退改回 0.5。
+  width:                     # width 档（只对向 2 角）：慢 creep 靠近 ／ HOLD（无直冲出口）
+    z_max: 1.5               # 粗测距 z ≤ 它 = 够近了，此时只允许 creep 靠近
+                             #   注：判"该不该判过门"用 z.near_lost_ratio（框占比），不是这里
+  coarse: {far_ratio: 0.18, near_ratio: 0.55, align_x: 0.33, align_y: 0.29}
+         # 没有位姿时的走位仲裁：far/near_ratio=门框宽/屏宽 远近判定(0.18≈2.4m / 0.55≈0.78m @fx782)；
+         #   ⚠️ 2026-09-23 复核：@fx782 是旧标注；占比是像素比、与配置 fx 无关 ⇒ **本次不动此值**。
+         # align_x/y=对中阈值(归一化像素)，决定"creep 靠近"还是"HOLD → REACQUIRE 后退"；
+         #   coarse 的框心是最粗的估计 ⇒ 刻意比 align.px_* 略松（有不变量用例守这个形状）。
+         # 仲裁要点：**只有未对准才 HOLD/后退**；对准就 creep 靠近。
+  hold: {max_frames: 20}      # HOLD 无进展帧数 → REACQUIRE(只在"未对准"时累加)
+  reacquire: {max_ms: 800,        # 单次后退上限(ms)
+              max_times: 2,       # 连续这么多次仍拿不到角点 → 放弃后退, 改原地 HOLD
+              stop_ratio: 0.75,   # 闭环后退: 框占比退到进入时的 75% 就停
+              reset_after_ms: 3000}   # 距上次后退超过这么久 → 重新允许 max_times 次后退
+  through: {confirm_ms: 2500, confirm_frames: 8, require_align_deg: 8.0}
+                              # ★ require_align_deg（2026-09-26 新增）：**冲刺前的航向闸门** ——
+                              #   最近一次测到的 psi（`_hdg_deg`，历史值）必须 ≤ 它才允许进 THROUGH。
+                              #   三个出口（z≤cross / 近距丢门 / 门口兜底）**都必须过这道闸**；
+                              #   被拦时写日志字段 `through_block` 并留在原相位继续对准。
+                              #   ≤0 = 关闸（回旧行为）；从没测到过 psi 时放行（没得判）。
+                              # **冲刺时长**(ms) → 判过门（**按时间**，帧数语义下时长随 fps 漂）。
+                              #   confirm_ms<=0 → 退回旧的帧数语义（用 confirm_frames=8）。
+                              #   ⚠️ 时长是实测定的（900→2500：那轮从门口才起步，900ms 冲不出去）；
+                              #      **下次下水按实测航速回填**：confirm_ms ≈ 1000·(起步距离+机身长)/v × 1.3。
+  search: {sweep_s: 2.0, pause_s: 1.0, sway: 0.45}
+         # SEARCH = **左右平移扫视**（过门过程中不允许旋转搜索）。波形：向右 sweep_s → 停 pause_s → 向左同长 → 停。
+         # ⚠️ **必须对称**（正反等时长）：遥测没有横向位置反馈 → 单向平移会一路漂到池壁；等时长 ⇒ 净位移≈0。
+         #   ⚠️ 这是**开环**：抵消依赖左右推力对称，水流会带来缓慢漂移（**未验证**）；
+         #   总时长由 `gate.timeout_ms` 兜底 —— 若现场发现一直往一侧跑，先降 `sway`。
+         # sway：平移速度(|DOF|)，**不经过 PID**。0.45 ≈ 25% 推力（该通道曲线最弱，见 md §1.1 推力表）。
+         #   `sweep_s<=0` → 只停不扫（原地待机）。**SEARCH 不前进**（保留"看不见就别动"的保守性）。
+  pose_hold_frames: 10        # 帧间防抖：丢姿态时的保持帧数
+
+debug:                     # 通信调试
+  tx_frame_hex: true        # 终端打印每次发出的 11B 运动帧（真串口下）
+  tx_frame_log_ms: 0     # 打印/遥测节流(毫秒，200=5Hz；0=每帧都打)：帧打印 / 下位机深度姿态打印
+  tel_log_ms: 200

@@ -160,7 +160,7 @@ def main():
             print("   %-5s %4d 帧: p10=%+6.1f p50=%+6.1f p90=%+6.1f std=%5.1f°"
                   % (nm, len(v), v[int(0.1 * len(v))], st.median(v),
                      v[int(0.9 * len(v)) - 1], st.pstdev(v)))
-        # ⚠️ 2026-09-22 新加：居中达标却**跳过正航向**的原因（水里复盘第一条要看这个）
+        # ⚠️ 水里复盘第一条就看这段：居中达标却**跳过正航向**的原因
         skips = {}
         for r in rows:
             sk = r.get("hdg_skip")
@@ -170,8 +170,8 @@ def main():
             print("   ⚠️ 有 %d 帧记录了「居中达标但跳过正航向」：%s"
                   % (sum(skips.values()),
                      "；".join("%s×%d" % (k, v) for k, v in sorted(skips.items(), key=lambda x: -x[1]))))
-            print("      最常见是 mode=p3p/width（只有 full 帧的 psi 可用；width 档从不进 HDG）。"
-                  "想让它在原地等一帧新鲜 full：`comm.gate.hdg.wait_fresh_ms` 设 1500~2000")
+            print("      最常见是 no_psi（还没测到过 full 帧的 psi）或 done（本门已做过正航向）。"
+                  "注：正航向现在是**一次到位**，不重测、不迭代")
         elif not hd:
             print("   （本段日志没有 hdg 也没有 hdg_skip：正航向根本没被触发过）")
         if len(full_h) >= 5:
@@ -184,7 +184,7 @@ def main():
                   "噪声底用静态 dump 测（tools/analyze/analyze_heading.py）")
 
     # ---- ⑦c 水平通道"能动力"：为什么调不动 ----
-    # ⚠️ 2026-09-20 起**居中只有 sway 通道**（`comm.gate.align_yaw` 已删除；
+    # ⚠️ 别把"居中"当成能用 yaw：居中只有 sway 通道（`comm.gate.align_yaw` 已删除；
     #     gate 里唯一的 yaw 来源是 ALIGN.HDG 正航向 → 增益 comm.motion.turn_pid）。
     yaw_out = float((S.get("comm.motion.turn_pid", None) or {}).get("out_max", 0.45) or 0.45)
     sway_out = float((S.get("comm.gate.pid_sway", None) or {}).get(
@@ -215,8 +215,8 @@ def main():
         print("   没有进入过 THROUGH")
     for dx, dy, z, md, rt in th[:10]:
         if md == "coarse":
-            # coarse 档没有测距：日志里的 z 是上一次 width/位姿留下的陈旧值（可能是垃圾），
-            # 拿它换算 cm 会得到一个假数（现场见过 9.25 → "偏心 20cm"）。
+            # ⚠️ 别用 z 换算 cm：coarse 档没有测距，日志里的 z 是上一次 width/位姿留下的
+            #    陈旧值（可能是垃圾）。
             print("   dx=%+.3f dy=%+.3f 框占比=%.2f mode=coarse → **该档无测距，别用 z 换算 cm**"
                   "（z=%s 是陈旧值）" % (dx, dy, rt, "%.2f" % z))
         else:

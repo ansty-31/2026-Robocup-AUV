@@ -9,6 +9,7 @@
 import math
 import os
 import sys
+import threading
 import time
 
 import base.settings as S
@@ -21,8 +22,8 @@ except ImportError:
     HAS_SERIAL = False
 
 # 限深保护的兜底阈值（m）：**必须与 cfg/comm.yaml 的 `depth_guard.min_depth_m` 同值**。
-#   它只在"配置缺键"时才生效，但那个方向很危险：原先写 0.3，而现场定死的是 0.55 →
-#   一旦配置读不到，机身可以从 0.55 一路浮到 0.30 —— **露出水面 = 本次比赛立即停止**。
+#   只在"配置缺键"时才生效，但那个方向很危险：兜底值一旦偏小，限深就从现场设定值一路放宽到
+#   兜底值 —— **露出水面 = 本次比赛立即停止**。
 #   有不变量用例 `test_base.py::test_depth_guard_fallback_matches_cfg` 钉住两者相等。
 _D_MIN_DEPTH_M = 0.55
 
@@ -138,6 +139,20 @@ class UartController(object):
         self._last_tx_log = 0
         # ---- 下位机遥测（深度等）与限深保护状态 ----
         self.telemetry = TEL.TelemetryReceiver()
+        # 离线复现用：`AUV_SIM_TEL_JSONL=<当时的 task.jsonl>` ⇒ 不发串口，改为回放那段遥测
+        #   （视觉来自 `AUV_CAM_VIDEO` 的视频，航向/深度来自当时的真值 ⇒ 闭环才有机会复现）
+        self._tel_playback = None
+        _tp = os.environ.get("AUV_SIM_TEL_JSONL")
+        if _tp:
+            if not self.sim:
+                print("[TEL] ⚠️ 设了 AUV_SIM_TEL_JSONL 但不是 SIM 模式（AUV_SIM_MODE=0）→ 忽略回放，"
+                      "用真串口遥测（要回放请同时设 AUV_SIM_MODE=1）")
+            else:
+                try:
+                    self._tel_playback = TEL.TelPlayback(_tp)
+                except Exception as e:
+                    print("[TEL] 遥测回放装载失败：%s" % e)
+                    self._tel_playback = None
         self._last_tel_log_ms = 0
         self._last_guard_log_ms = 0
         self._warned_no_tel = False
@@ -145,6 +160,8 @@ class UartController(object):
         self.guard_blocks = 0          # 累计被限深压掉的上浮帧数
         self._dof_log_f = None
         self._last_dof_t = time.monotonic()
+        self._tx_lock = threading.Lock()   # 串口写锁：看门狗线程也要写（硬停），不能与主线程交错
+        self._watchdog = None              # 轴饱和看门狗（下面按配置/环境启动；早退分支也要有这个属性）
         log_path = os.environ.get("AUV_DOF_LOG")
         if log_path:
             try:
@@ -165,6 +182,30 @@ class UartController(object):
             except Exception as e:
                 print("[UART] 打开失败：%s；退回 SIM 模式" % e)
                 self.sim = True
+
+        # ---- 轴饱和看门狗（独立线程；默认：真串口开、SIM 关）----
+        self._watchdog = None
+        try:
+            self._start_watchdog()
+        except Exception as e:
+            print("[UART] 轴看门狗启动失败：%s" % e)
+
+    def _start_watchdog(self):
+        """按 `comm.watchdog.*` 与环境变量 `AUV_WATCHDOG=0/1` 决定是否启动（SIM 默认不开）。"""
+        env = os.environ.get("AUV_WATCHDOG")
+        on = bool(S.get("comm.watchdog.enable", True))
+        if env is not None:
+            on = env.strip().lower() in ("1", "on", "true", "yes")
+        elif self.sim:
+            return                      # SIM（无硬件/用例）：默认不开，免得 os._exit 打断 pytest
+        if not on:
+            print("[UART] 轴看门狗：关闭（comm.watchdog.enable=false 或 AUV_WATCHDOG=0）")
+            return
+        self._watchdog = _AxisWatchdog(
+            self,
+            max_same_dir_s=float(S.get("comm.watchdog.max_same_dir_s", 5.0) or 0.0),
+            min_off_b=int(S.get("comm.watchdog.min_off_b", 13) or 13),
+            poll_ms=int(S.get("comm.watchdog.poll_ms", 50) or 50)).start()
 
     # ---------------- 帧/发送 ----------------
     def _current_frame(self):
@@ -211,7 +252,11 @@ class UartController(object):
         """读空串口接收缓冲 → 遥测解析（深度/姿态）。无串口、无数据 = 空操作。
 
         发送路径每帧都调它（见 `_write`），所以遥测的实时性跟着心跳（≥20Hz）。
+
+        SIM + `AUV_SIM_TEL_JSONL`：不发串口，改为**回放一段录制的遥测**（离线复现闭环用）。
         """
+        if self._tel_playback is not None:
+            return self._tel_playback.pump(self.telemetry)
         if self.sim or self._ser is None:
             return 0
         try:
@@ -269,8 +314,7 @@ class UartController(object):
         一律原样 —— 所以它是"单独调下潜这一路"的旋钮，不影响其它通道。
 
         背景（为什么要单独放大）：DOF→字节→下位机 `RC_Matching*`（映射值 ≤35 直接返回 0）
-        使实际推力远小于 DOF 数字（0.20→20%、0.30→30%、0.60→60%，见 gate 文档 §1.1）；
-        下潜偏弱时就把这一路放大，比在任务层加补偿/脉冲简单得多。
+        使实际推力远小于 DOF 数字；下潜偏弱时就把这一路放大，比在任务层加补偿/脉冲简单得多。
 
         注：很小的下潜指令（如 −0.05）即使放大也仍可能落在死区(<0.138)内 —— 要连很小的
         指令也变成有效推力，`dive_scale` 得给足（≈3~4）。
@@ -369,7 +413,8 @@ class UartController(object):
         if self.sim:
             return True
         try:
-            self._ser.write(frame)
+            with self._tx_lock:                # 看门狗线程可能同时写（硬停），必须串行化
+                self._ser.write(frame)
             self._drain_rx()
             return True
         except Exception as e:
@@ -421,9 +466,9 @@ class UartController(object):
         """**真正停住**：连发中性帧走完 ramp，再用遥测 yaw 验证它停下来了。
 
         为什么不能只发一帧 `neutral()`：`_ramp_step` 对 yaw/surge/sway/heave 做字节级
-        平滑，`force=True` 只绕过心跳节流、**不绕过 ramp** → 单帧发出时轴字节还在半路
-        （yaw 84→128 只走到 ~95，仍是 −0.26 舵）。而下位机**没有无帧超时停车**，
-        随后的 `close()` 一关串口，船就锁在"最后一个还在转的字节"上（现场踩到）。
+        平滑，`force=True` 只绕过心跳节流、**不绕过 ramp** → 单帧发出时轴字节还在半路；
+        而下位机**没有无帧超时停车**，随后的 `close()` 一关串口，船就锁在"最后一个还在转的
+        字节"上（现场踩到，见 doc/_注释历史_fragments/base_tests.md）。
 
         做法：① 连发中性帧，次数按 `ramp.speed_per_s` 与"最大偏离 127 字节"算够；
               ② 静置 `settle_s` 期间继续发中性，同时用**遥测 yaw** 看有没有还在转；
@@ -532,6 +577,108 @@ class UartController(object):
             except Exception:
                 pass
             self._ser = None
+
+
+class _AxisWatchdog(object):
+    """**轴饱和看门狗**（用户 2026-09-27 定，阈值 5.0s）：同一轴、同一方向**连续**发轴 ≥ `max_same_dir_s` ⇒
+    **硬停 + 强制退出**。
+
+    为什么要独立线程、要放在 `base/uart.py`：
+      · 任务可能**卡在某个循环里**（现场"一开始进 turn 就卡住"）——写在任务控制流里的保护
+        那时根本跑不到；只有独立线程 + 串口这个唯一出口拦得住。
+      · 只看**实际下发的轴字节**（`uart._axes`，已过 ramp），不关心是谁发的（任务/手动/脚本）。
+      · 越界时**必须先硬停再退出**：下位机没有"无帧超时停车"，直接退出/关串口会把船锁在
+        最后那个非中位字节上（现场踩过）⇒ 先 `estop()`（连发原始中性帧，绕过 ramp），
+        再补一串中性帧，最后才强制退出。
+      · `on_trip` 可注入（用例换成记录器，避免 `os._exit` 把 pytest 带走）。
+    """
+
+    AXES = ("yaw", "surge", "heave", "sway")
+
+    def __init__(self, uart, max_same_dir_s=5.0, min_off_b=13, poll_ms=50,
+                 on_trip=None, log=None):
+        self.uart = uart
+        self.max_same_dir_s = float(max_same_dir_s or 0.0)
+        self.min_off_b = int(min_off_b or 0)
+        self.poll_ms = max(10, int(poll_ms or 50))
+        self.on_trip = on_trip
+        self.log = log or print
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="axis-watchdog", daemon=True)
+
+    def start(self):
+        if self.max_same_dir_s <= 0:
+            self.log("[UART] 轴看门狗：关闭（max_same_dir_s=0）")
+            return self
+        self.log("[UART] 轴看门狗：同一方向连续发轴 ≥ %.1fs ⇒ 硬停 + 强制退出（巡检 %dms，"
+                 "判据 |偏离中位| ≥ %d 字节）" % (self.max_same_dir_s, self.poll_ms, self.min_off_b))
+        self._thread.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+
+    def _run(self):
+        try:
+            mid = int(S.comm.frame.axis_mid)
+        except Exception:
+            mid = 128
+        dirs = [0, 0, 0, 0]
+        t0 = [None, None, None, None]
+        while not self._stop.wait(self.poll_ms / 1000.0):
+            try:
+                axes = list(self.uart._axes[:4])
+            except Exception:
+                continue
+            now = time.monotonic()
+            for i, b in enumerate(axes):
+                try:
+                    off = int(b) - mid
+                except Exception:
+                    continue
+                if abs(off) < self.min_off_b:
+                    dirs[i], t0[i] = 0, None
+                    continue
+                d = 1 if off > 0 else -1
+                if dirs[i] != d:
+                    dirs[i], t0[i] = d, now
+                    continue
+                if t0[i] is not None and (now - t0[i]) >= self.max_same_dir_s:
+                    self._trip(i, int(b), now - t0[i])
+                    return
+
+    def _trip(self, i, byte, held_s):
+        mid = int(S.comm.frame.axis_mid)
+        name = self.AXES[i] if i < len(self.AXES) else ("axis%d" % i)
+        self.log("[UART] ⛔ **轴看门狗**：%s 轴沿同一方向连续发了 %.1fs（字节 %d ⇒ 偏离中位 %+d）"
+                 " ⇒ **硬停 + 强制退出**（任务可能卡死了；先让船停下再退）"
+                 % (name, held_s, byte, byte - mid))
+        try:
+            self.uart.estop()                    # 连发原始中性帧（绕过 ramp）
+        except Exception:
+            pass
+        try:
+            if getattr(self.uart, "_ser", None) is not None:
+                with self.uart._tx_lock:
+                    for _ in range(20):
+                        self.uart._ser.write(build_neutral_frame())
+                        time.sleep(0.02)
+        except Exception:
+            pass
+        if self.on_trip is not None:
+            try:
+                self.on_trip(name, held_s, byte)
+            except Exception:
+                pass
+            return
+        # ★ 退出前**必须 flush**：`os._exit()` 不走 stdio 清理 ⇒ 重定向/管道下这条最关键的日志
+        #   （以及 estop 的消息）会**整段丢掉**。板端实测踩到过：只看到 exit=9，看不到为什么。
+        for _f in (sys.stdout, sys.stderr):
+            try:
+                _f.flush()
+            except Exception:
+                pass
+        os._exit(9)                              # 强制退出（用户要求：把线程掐死）
 
 
 def install_signal_handlers(uart):

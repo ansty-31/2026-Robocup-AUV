@@ -141,8 +141,8 @@ def main():
 
     conf = a.conf if a.conf is not None else S.vision.model.score_threshold
     if a.per_cell:
-        # ⚠️ 老版本写的是 max(0.4, conf-0.1)：把 --conf 0.05 悄悄变成 0.40，
-        #    于是"没有 cell ≥0.40"被误读成"模型失效"。现在**按传入值**（默认 0.05）。
+        # ⚠️ 别把 --conf 抬成 max(0.4, conf-0.1)：那会把"没有 cell ≥0.40"误读成"模型失效"；
+        #    这里按传入值（默认 0.05）。
         pc = float(os.environ.get("AUV_KPT_PERCELL_CONF", "0.05")) \
             if a.conf is None else max(0.01, float(a.conf))
         per_cell_report(outs, labels, pre.size, conf=pc)

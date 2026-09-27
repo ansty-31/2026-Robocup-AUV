@@ -2,7 +2,7 @@
 """tests/tasks/test_gate_flow.py — gate 相位机：档位仲裁 / 通道选择 / 出口兜底 / 正航向接入
 
 守的是：
-  1. coarse 档：**只有未对准才后退** —— 对准时不下发后退速度（实测"来回退"的主因）；
+  1. coarse 档：**只有未对准才后退** —— 对准时不下发后退速度（"来回退"的根因）；
   2. 水平通道选择与符号：中心只用 sway、yaw 只在 ALIGN.HDG 出现；
   3. SEARCH 是**左右平移扫视**（不是旋转），波形与 cfg 一致；
   4. 出口兜底：近距丢门判过门（②）、在门口超时兜底 loiter（③）、THROUGH 按时长；
@@ -11,6 +11,8 @@
 
 全部用合成检测（真实标定相机模型 + 手工 2D 角点），不依赖权重/串口/水池。
 """
+import time
+
 import numpy as np
 import pytest
 
@@ -115,8 +117,8 @@ def _task(fn):
 def drop(request):
     """缺配置用例的参数：整段缺失 / 单个键缺失 / 另一段缺键。
 
-    ⚠️ 这个夹具曾被一次删夹具的正则误伤（连它上面的 `@pytest.fixture` 装饰器一起被吃掉），
-    症状是 `fixture 'drop' not found` —— 以后用正则删函数时注意别跨过装饰器行。
+    ⚠️ 别用正则删本夹具：正则很容易跨过 `@pytest.fixture` 装饰器行一起吃掉，
+    症状是 `fixture 'drop' not found`（出过一次，见 doc/_注释历史_fragments/base_tests.md）。
     """
     return request.param
 
@@ -161,7 +163,7 @@ def test_horizontal_channel_is_sway_only_and_signed():
     """居中阶段的水平修正：**只有 sway 平移**，方向正确，且真的出力（> 执行器死区）。
 
     约定：+sway = 右移（下位机 `command_left_right = RC[7]-RC[8]`；门在画面右 → 取正）。
-    ⚠️ 2026-09-20 用户定：**删除像素档/位姿档的 yaw 居中通道**（原 `align_yaw.*`）——
+    ⚠️ **像素档/位姿档的 yaw 居中通道已删除**（原 `align_yaw.*`，2026-09-20 用户定）——
     所以本用例只查 sway；`yaw` 在 gate 里只允许由 ALIGN.HDG 的正航向产生
     （守这条的是 `test_yaw_never_used_for_centering`）。
     """
@@ -185,8 +187,8 @@ def test_horizontal_channel_is_sway_only_and_signed():
 def test_yaw_only_during_align():
     """yaw **只在正航向(ALIGN.HDG)里**下发：THROUGH 段必须 yaw=0（冲的时候不许转头）。
 
-    到达 THROUGH 走的是**出口③「在门口超时兜底」**（原 dash 出口已删除）：门口对准后
-    连续停留 ≥ loiter.timeout_ms 就自己拍板 —— 顺便也验了这条兜底。
+    到达 THROUGH 走的是**出口③「在门口超时兜底」**：门口对准后连续停留 ≥
+    loiter.timeout_ms 就自己拍板 —— 顺便也验了这条兜底。
     """
     def det_fn():
         # 整框（coarse）且门很大（z=0.6 → 占比≈0.71 ≥ near_lost_ratio 0.60）→ 已到门口
@@ -265,11 +267,10 @@ ACT_DEADZONE = 0.138
 
 
 def test_no_speed_preset_inside_actuator_deadzone():
-    """没有任何速度档位落在执行器死区里（0.12 那种"看着有值、实际 0 推力"）。
+    """没有任何速度档位落在执行器死区里（那种"看着有值、实际 0 推力"的档位）。
 
-    `surge.creep`/`lost_backward` 原来都是 0.12 → 有效推力 **0%**（蠕进/轻微后退从未发生）。
     允许的值：0（明确表示"不要这个动作"）或 ≥ 死区线。
-    ⚠️ 2026-09-20 起 **`gate.search.sway` 也一起查**（SEARCH 的平移扫视同样要真的出力）。
+    ⚠️ `gate.search.sway` 也一起查（SEARCH 的平移扫视同样要真的出力）。
     """
     g = S.comm.gate
     bad = []
@@ -296,8 +297,7 @@ def test_no_speed_preset_inside_actuator_deadzone():
 def test_gate_gains_follow_motion_changes(monkeypatch):
     """**共用的证据**：改 `comm.motion` 的增益，gate 构造出来立刻跟着变（没有第二份数字）。
 
-    这条保证"一处调、两个任务同时生效"，也保证不会再出现两套参数各自漂移
-    （sway 反号那次就是"两任务各一套"的产物）。
+    这条保证"一处调、两个任务同时生效"，也保证不会再出现两套参数各自漂移。
     """
     monkeypatch.setitem(S.comm.motion, "pid_sway",
                         S.Y(dict(S.comm.motion.pid_sway, kp=3.25)))
@@ -340,12 +340,6 @@ def _kpt_output_one_cell(vis_logit):
 
 
 
-    # （原先还有「直冲安全带必须比对准门槛更严」两条断言 —— dash 功能已整体删除，
-    #   安全带 dx_max/dy_max 不再是配置项，故随之去掉。）
-
-
-
-
 # ------------------------------------------------- 10. 水平通道 / 执行器死区 / 兜底默认值
 # 下位机链路：DOF→字节(128+127v)→Rc2MyRcKey→RC_Matching*(映射≤35→0)
 #   ⇒ |DOF| < 0.138 一点推力都没有（数字由固件公式算出，见 gate 文档 §1.1）
@@ -357,19 +351,16 @@ _ACT_DEADZONE = 0.138
 def test_gate_defaults_match_cfg():
     """**配置守卫**：代码里的兜底默认值必须与 `cfg/*.yaml` 同值（缺配置时行为不变）。
 
-    为什么值得一条用例：这些字面量曾经悄悄漂开，而漂开的方向有的很危险 ——
-      · `_D_SURGE.creep/lost_backward = 0.12` → 落在执行器死区里 = 该动作**0 推力**；
-      · `_D_PNP.reproj_px = 8.0` → cfg 实测已放宽到 20，8px 会拒掉绝大多数候选位姿；
-      · `_D_THROUGH.confirm_ms = 900` → cfg 现场已改 2500（"没冲出去"的主因）；
-      · `_D_ALIGN.px_x/px_y` 0.25/0.26 → 用户已收紧到 0.20/0.25；
-      · `timeout_ms` 180000 → cfg 300000。
+    为什么值得一条用例：这些字面量曾经悄悄漂开，而漂开的方向有的很危险
+    （具体漂移值与后果见 doc/_注释历史_fragments/base_tests.md）。
     三条反向检查：
-      · **cfg 里出现的键必须真的被读到**（拼错键名会静默失效 —— `hdg.fresh_ms` 就这么漏过）；
+      · **cfg 里出现的键必须真的被读到**（拼错键名会静默失效）；
       · **共用参数（comm.motion）**：cfg 的 motion 段必须与代码兜底同值；
       · **共用值不许在任务段重复一份**（gate 段不许再抄 sway/heave 增益或 fast/slow 速度档）。
     """
     import gate.gate_task as gt
     from common.cfgnode import MOTION_DEFAULTS
+    from common.turn_deg import _D_TURN_PID
     from gate.heading_align import _D_HDG
     from gate.gate_postproc import _D_DET, _D_POST, _D_SELECT
 
@@ -386,6 +377,8 @@ def test_gate_defaults_match_cfg():
         ("comm.gate.through", gt._D_THROUGH, G.through),
         ("comm.gate.search", gt._D_SEARCH, G.search),
         ("comm.gate.hdg", _D_HDG, G.hdg),
+        # 转向原语（gate 的正航向与 .sh 脚本共用同一套参数）
+        ("comm.motion.turn_pid", _D_TURN_PID, S.comm.motion.turn_pid),
         ("vision.gate.pnp", gt._D_PNP, V.pnp),
         ("vision.gate.geometry", gt._D_GEOM, V.geometry),
         # 解码后处理（规范 doc/gate_pose_decode_spec.md §4；实现 gate/gate_postproc.py）
@@ -500,7 +493,7 @@ def _task_no_det():
 
 def test_align_near_lost_declares_pass_instead_of_search():
     """**现场 bug 回归**：width/coarse 的 creep 把船送到门口后整门丢失时，
-    ALIGN 相位必须**判过门并直冲**，而不是防抖后回 SEARCH（原先就是后者：0 分 + 原地旋转）。
+    ALIGN 相位必须**判过门并直冲**，而不是防抖后回 SEARCH（回 SEARCH = 0 分 + 原地旋转）。
 
     判据 = 最后一次检测到的**框占比** ≥ `z.near_lost_ratio`（门快装不下/机身已进门框）。
     """
@@ -611,13 +604,15 @@ def test_loiter_timeout_commits_through():
 
 # ------------------------------------------------- 16. 正航向（ALIGN.HDG）端到端
 class _HullWorld(object):
-    """假世界：机身航向 H（正=右）随 yaw 指令积分；门的航向误差 psi = psi0 − H。
+    """假世界：机身航向 H（正=右）随 yaw 指令积分；门的航向误差 psi = psi0 + H（现场约定）。
 
     检测用旋转后的位姿投影生成（4 角 → full），门心始终投影在画面正中（所以先"居中"能过），
     只有**航向**是歪的 —— 正是这条新功能要处理的场景。
     """
 
-    def __init__(self, psi0=20.0, z=1.5, gain=60.0, imag_sign=1.0):
+    def __init__(self, psi0=20.0, z=1.5, gain=60.0, imag_sign=-1.0):
+        # imag_sign=-1 = **真机极性**（板端实测：+yaw 命令使遥测 yaw 减小）。改这里之前先看
+        # `common/turn_deg.py::yaw_sign()` 与 log/_board_gate_one_latest.jsonl。
         self.psi0 = float(psi0)
         self.z = float(z)
         self.gain = float(gain)
@@ -626,14 +621,19 @@ class _HullWorld(object):
 
     @property
     def psi(self):
-        return self.psi0 - self.H
+        return self.psi0 + self.H          # 现场约定：右转 ⇒ psi 变大
+
+    @property
+    def yaw_tel(self):
+        """下位机回传的绝对航向（= 机身转角 × 遥测极性）。"""
+        return self.H * self.imag_sign
 
     def det(self):
         import cv2
         # 门**绕自身中心**转 theta（rvec 是物体自身旋转），中心仍放在光轴上（tvec 不转）
         #   ⇒ 门心投影在画面正中（能过"居中"），只有航向是歪的（psi=theta）。
         #   ⚠️ 若把中心位置也一起转（tvec=R@[0,0,z]），门心会偏出画面 fx·tanθ 像素 → 永远居不中。
-        theta = self.psi0 - self.H
+        theta = self.psi0 + self.H
         R = cv2.Rodrigues(np.array([0.0, np.radians(theta), 0.0]))[0]
         rvec = cv2.Rodrigues(R)[0].ravel()
         tvec = np.array([0.0, 0.0, self.z])
@@ -678,11 +678,11 @@ def test_heading_align_turns_the_hull_parallel_then_proceeds(monkeypatch):
     assert "hdg" in acts, "居中达标后应进入正航向（实际动作序列尾部=%s）" % acts[-8:]
     # 转对了方向（psi>0 = 机身左偏 → 右转）且残差收敛到阈值内
     ys = [f[3] for f in task.uart.frames if abs(f[3]) > 1e-9]
-    assert task._hdg.last_dir == "右转", \
-        "psi>0（机身左偏）应右转，实际 %s" % task._hdg.last_dir
+    assert task._hdg.last_dir == "左转", \
+        "psi>0 应左转（现场定），实际 %s" % task._hdg.last_dir
     big = [y for y in ys if abs(y) > 0.05]          # 转向主体（近目标会有极小反向修正，属正常）
-    assert big and all(y > 0 for y in big), "转向主体应为正（+yaw=右转）：%s" % sorted(set(big))
-    assert w.H > 0, "净效果应是机身右转，实际 H=%.1f°" % w.H
+    assert big and all(y < 0 for y in big), "转向主体应为负（-yaw=左转）：%s" % sorted(set(big))
+    assert w.H < 0, "净效果应是机身左转，实际 H=%.1f°" % w.H
     assert abs(w.psi) <= float(S.comm.gate.hdg.tol_deg) + 1e-6, \
         "转完残余航向 %.1f° 应 ≤ 阈值 %.1f°" % (w.psi, float(S.comm.gate.hdg.tol_deg))
     # HDG 期间只转：不前进/不平移/不升降
@@ -701,37 +701,90 @@ def test_heading_align_turns_the_hull_parallel_then_proceeds(monkeypatch):
 
 
 
-def test_heading_turn_is_not_interrupted_by_degraded_mode(monkeypatch):
-    """**转向期间不被画面干扰**（用户定）：先居中再转，转的时候信任测好的航向角 ——
-    档位退化到 width（只剩 2 角）、位姿被拒，都**不许打断**正在进行的转向。
+class _LiveUart(_Uart):
+    """串口 = 真船：每次下发都推进假世界，遥测跟着变（真机就是这样闭环的）。"""
 
-    构造：门心居中、机身歪 25° → 进 HDG 开始转；转到一半把检测换成"只有上边 2 角"（width 档）
-    → 转向必须照常走完（遥测 yaw 闭环），最终机身转到与门法向平行。
+    def __init__(self, world):
+        _Uart.__init__(self, yaw_deg=0.0)
+        self.world = world
+        self.n = 0
+
+    def send_dof(self, surge=0.0, sway=0.0, heave=0.0, yaw=0.0):
+        _Uart.send_dof(self, surge, sway, heave, yaw)
+        self.world.send(yaw, dt=0.05)
+        self.telemetry.yaw_deg = self.world.yaw_tel
+        self.n += 1
+
+
+def test_turn_runs_to_completion_inside_one_frame(monkeypatch, tmp_path):
+    """**运行期（生产时钟域）**：一次 `process()` 调用就把整次转向跑完再返回。
+
+    这条走的是**生产路径**（`_turn_inner_loop` 按 `turn_pid.period` 20Hz 阻塞推进），
+    与用例里那种"假时钟每帧一步"不同：起转后画面立刻全空，转向仍在同一次调用里
+    转完并给结论 —— 即"脱离主循环、做完再回来"。
+
+    ⚠️ **时钟域必须用生产那一个**：`main.py` 传的是 `int(time.time()*1000)`（epoch 毫秒）。
+    这条用例曾经用 `time.monotonic()*1000`，正好等于 `use_wall` 判据写错时唯一认得的那个钟
+    ⇒ **bug 被用例掩盖**（生产里内层闭环整个被跳过、转向退化成每帧一步、`gate_loop` 日志不触发）。
+    所以这里固定用 `time.time()`，并顺带断言 `turn_log` 的 `gate_loop` 真的落了盘。
     """
-    w = _HullWorld(psi0=25.0)
-    phase = {"turning_seen": 0}
-    sticky = {"on": False}
+    import time
+    tlog = tmp_path / "turn_calls.jsonl"
+    monkeypatch.setenv("AUV_TURN_LOG", str(tlog))
+    # 这条用例只喂 3 帧检出 ⇒ 居中确认必须 ≤2 帧（固定成代码兜底值，别依赖现场调参）
+    monkeypatch.setitem(S.comm.gate, "align", S.Y(dict(
+        S.comm.gate.get("align", {}), confirm_frames=2)))
+    w = _HullWorld(psi0=12.0)
+    calls = {"n": 0}
 
     def fn():
-        # **只在"正在转向"（yaw 指令非 0）的那些帧降级** —— 模拟真实的「转向中途档位退化 +
-        #   位姿被拒」。
-        #   ⚠️ 2026-09-26 改语义：以前是"一旦转过就永久 sticky 降级"，那在**逐步转向**
-        #   （max_step_deg=10）下必然收敛不了 —— 每步转完都要重测，永久没有 full 帧就永远
-        #   测不到新 psi（那是设计使然，不是"被打断"）。本用例只守"**转向本身不被打断**"，
-        #   所以降级窗口限定在转向期间；转完恢复 full，它才能迭代收敛。
-        fr = task_holder["t"].uart.frames if task_holder["t"] is not None else []
-        sticky["on"] = bool(fr) and abs(fr[-1][3]) > 1e-9
-        if sticky["on"]:
-            phase["turning_seen"] += 1
-            d = w.det()[0]
-            return [Det("gate", 0.95, d.x, d.y, d.w, d.h,
-                        kpts=d.kpts, kpt_conf=np.array([0.95, 0.95, 0.0, 0.0], np.float32))]
+        calls["n"] += 1
+        return [] if calls["n"] > 3 else w.det()      # 起转之后画面里什么都没有
+
+    uart = _LiveUart(w)
+    task = GateTask(uart, _Hub(fn), CAM.width, CAM.height)
+    frame = np.zeros((CAM.height, CAM.width, 3), np.uint8)
+    blocked = 0.0
+    for _ in range(6):
+        t0 = time.time()                              # ★ 生产时钟域（epoch 毫秒）
+        task.process(frame, int(t0 * 1000))
+        dt = time.time() - t0
+        calls_during = calls["n"]
+        if task._hdg.iters >= 1:
+            blocked = dt
+            break
+    assert blocked > 0.0, "这一帧应当**阻塞**着把转向跑完（实际 %.3fs，%s）" % (blocked, task._hdg.summary())
+    # ★ 内层闭环真的跑过 ⇒ turn_log 里必有 gate_loop（它写在 while 循环体内）
+    if tlog.exists():
+        txt = tlog.read_text(encoding="utf-8")
+        assert "gate_loop" in txt, "内层闭环没跑（没有 gate_loop 记录）—— 时钟域判据又坏了"
+        assert '"event": "enter"' in txt or '"event":"enter"' in txt
+    assert task._hdg.iters == 1 and task._hdg.state == "done", task._hdg.summary()
+    assert calls["n"] == calls_during, "转向期间不该再调检测（画面全空也不影响）"
+    assert abs(w.psi) <= float(S.comm.gate.hdg.tol_deg) + 1e-6, "残余 %.1f°" % w.psi
+    assert abs(uart.frames[-1][3]) < 1e-9, "转完必须收舵（yaw=%.3f）" % uart.frames[-1][3]
+
+
+def test_vision_is_not_consulted_while_turning(monkeypatch):
+    """**转向期间连检测都不做**（用户 2026-09-27：一次转向是自包含动作，做完再回来）。
+
+    比"档位降级不打断"更强：转向期间 `hub.detect_list` 根本不会被调用 —— 画面丢了、
+    门转出视野、水花糊了、检测崩了，都不可能影响这次转向。
+    """
+    w = _HullWorld(psi0=25.0)
+    calls = {"detect": 0, "during_turn": 0}
+    holder = {"t": None}
+
+    def fn():
+        calls["detect"] += 1
+        t = holder["t"]
+        if t is not None and t._hdg.turning and not t._hdg.finished():
+            calls["during_turn"] += 1
         return w.det()
 
-    task_holder = {"t": None}
     uart = _Uart(yaw_deg=0.0)
     task = GateTask(uart, _Hub(fn), CAM.width, CAM.height)
-    task_holder["t"] = task
+    holder["t"] = task
     frame = np.zeros((CAM.height, CAM.width, 3), np.uint8)
     hist = []
     for i in range(250):
@@ -741,15 +794,48 @@ def test_heading_turn_is_not_interrupted_by_degraded_mode(monkeypatch):
         w.send(uart.frames[-1][3], dt=0.1)
         if task.last_info["phase"] in ("APPROACH", "THROUGH"):
             break
-    assert phase["turning_seen"] > 0, "用例前提：应确实在转向"
-    # 转向必须**走完**（而不是被打断在半路）：迭代次数≥1、且已离开 turn 状态。
-    #   注：转完要重测，而 sticky 降级下没有 full 帧 → 它会停在 SETTLE 等重测（这是对的，
-    #   不是失败）；要验的就是"这一段转向没被画面打断"。
-    assert task._hdg.iters >= 1, "应完成至少一次转向，实际 iters=%d" % task._hdg.iters
-    assert task._hdg.state != "turn", \
-        "档位退化把转向卡在半路了（state=%s，psi 残余=%.1f°）" % (task._hdg.state, w.psi)
+    assert "hdg" in [h["action"] for h in hist], "应进过正航向（实际 %s）" % [h["action"] for h in hist][:12]
+    assert calls["during_turn"] == 0, \
+        "转向期间调用了检测 %d 次（转向必须完全脱离主循环）" % calls["during_turn"]
+    assert task._hdg.iters == 1 and task._hdg.state != "turn", \
+        "转向应自包含地走完（%s）" % task._hdg.summary()
+    assert abs(w.psi) <= float(S.comm.gate.hdg.tol_deg) + 1e-6, "残余 %.1f°" % w.psi
+
+
+def test_turn_completes_even_if_gate_disappears(monkeypatch):
+    """**画面里门消失了也要把角度转完**（用户 2026-09-27 定）。
+
+    转 25° 时门必然转出视野 —— 这是正常现象，不是"丢门"⇒ 不许拿它当中止理由。
+    语料里检测从起转那一刻起就返回"什么都没有"（空列表），转向仍必须走完并给结论。
+    """
+    w = _HullWorld(psi0=25.0)
+    st = {"n": 0, "gone": False}
+
+    def fn():
+        st["n"] += 1
+        if st["gone"]:
+            return []                       # 门彻底消失：画面里什么都没有
+        return w.det()
+
+    uart = _Uart(yaw_deg=0.0)
+    task = GateTask(uart, _Hub(fn), CAM.width, CAM.height)
+    frame = np.zeros((CAM.height, CAM.width, 3), np.uint8)
+    hist = []
+    for i in range(200):
+        if task._hdg.turning and not st["gone"]:
+            st["gone"] = True               # 起转后第一帧就让门消失
+        uart.telemetry.yaw_deg = w.H * w.imag_sign
+        task.process(frame, 1000 + 100 * i)
+        hist.append(dict(task.last_info))
+        w.send(uart.frames[-1][3], dt=0.1)
+        if task._hdg.iters >= 1:
+            break
+    assert st["gone"], "用例前提：应确实起转并在转向中丢门"
+    assert task._hdg.iters == 1, "转向应走完一次（%s）" % task._hdg.summary()
+    assert task._hdg.state == "done", "丢门把转向打断了（state=%s）" % task._hdg.state
     assert abs(w.psi) <= float(S.comm.gate.hdg.tol_deg) + 1e-6, \
-        "转向应走完并转正，残余 %.1f°" % w.psi
+        "门消失后照样要转到位（残余 %.1f°）" % w.psi
+    assert abs(uart.frames[-1][3]) < 1e-9, "转完必须收舵（最后一条 yaw=%.3f）" % uart.frames[-1][3]
 
 
 # ---------------------------------------------- HDG 跳过原因 / wait_fresh_ms
@@ -777,80 +863,50 @@ def _offset_px(dx):
     return (CAM.width / 2.0 + dx, CAM.height / 2.0)
 
 
-def test_hdg_skip_reason_when_trigger_frame_is_p3p(monkeypatch):
-    """触发帧是 p3p 时怎么办 —— **新旧两套语义都在这里守**。
-
-    2026-09-23（用户定）：`entry_stale_ok=true`（默认）⇒ 只要曾经测到过 full 帧的 psi 就
-    **起转**，不再因为"这一刻不是 full"而跳过正航向（旧行为会 skip → APPROACH → 带着残余航向进近）。
-    旧行为用 `entry_stale_ok=false` 显式关掉即可复现（记录 `hdg_skip=mode=p3p` 并进 APPROACH）。
-    """
-    specs = [(_offset_px(320), FULL_C), (_offset_px(320), FULL_C),
-             (None, FULL_C), (None, P3P_C), (None, P3P_C), (None, P3P_C)]
-    hdg_base = dict(S.comm.gate.get("hdg", {}), wait_fresh_ms=0)
-
-    # ---- 新语义（默认）：进 HDG，不再跳过 ----
-    monkeypatch.setitem(S.comm.gate, "hdg", S.Y(dict(hdg_base, entry_stale_ok=True)))
-    task = GateTask(_Uart(), _seq_hub(specs), CAM.width, CAM.height)
-    _st, hist = _run(task, 12)
-    acts = [h["action"] for h in hist]
-    assert "hdg" in acts, "entry_stale_ok=true 时 p3p 触发帧也应进正航向（实际 %s）" % acts
-
-    # ---- 旧语义（显式关掉）：skip 原因=mode，直接进近，且全程不发 yaw ----
-    monkeypatch.setitem(S.comm.gate, "hdg", S.Y(dict(hdg_base, entry_stale_ok=False)))
-    task2 = GateTask(_Uart(), _seq_hub(specs), CAM.width, CAM.height)
-    _st2, hist2 = _run(task2, 12)
-    skips = [h.get("hdg_skip") for h in hist2 if h.get("hdg_skip")]
-    assert skips, "关掉开关后应记录跳过原因（动作=%s）" % [h["action"] for h in hist2]
-    assert "mode=p3p" in skips[0], "原因应指出帧模式，实际 %r" % skips[0]
-    assert task2.phase == "APPROACH", "跳过正航向应直接进近，实际 %s" % task2.phase
-    assert all(abs(f[3]) < 1e-9 for f in task2.uart.frames), "跳过后不该发任何 yaw"
-
-
 def test_hdg_skip_reason_when_disabled(monkeypatch):
+    """`hdg_skip` 的三个原因：off（未启用）/ done（本门已做过）/ no_psi（没测到过 full 的 psi）。"""
     task = _task(lambda: [])
-    task._hdg_cfg = dict(task._hdg_cfg, enable=False, wait_fresh_ms=0)
+    task._hdg_cfg = dict(task._hdg_cfg, enable=False)
     assert "off" in task._hdg_skip_reason("full", 1000)
     task._hdg_cfg = dict(task._hdg_cfg, enable=True)
     task._hdg_done = True
     assert "done" in task._hdg_skip_reason("full", 1000)
     task._hdg_done = False
-    task._hdg_deg, task._hdg_ms = 3.0, 900
-    assert "stale" in task._hdg_skip_reason("full", 2000)
+    assert "no_psi" in task._hdg_skip_reason("full", 1000)
 
 
-def test_wait_fresh_holds_then_aligns_when_a_full_frame_arrives(monkeypatch):
-    """`wait_fresh_ms>0`：触发帧不是 full 时**原地等**（动作 wait_hdg、不下发 surge），
-    等到 full 帧就进正航向 —— 斜门/远距只在部分帧出 4 角时正需要这个。"""
-    monkeypatch.setitem(S.comm.gate, "hdg",
-                        S.Y(dict(S.comm.gate.get("hdg", {}), wait_fresh_ms=1500)))
-    specs = [(_offset_px(320), FULL_C), (_offset_px(320), FULL_C),
-             (None, FULL_C)] + [(None, P3P_C)] * 4 + [(None, FULL_C)] * 6
-    task = GateTask(_Uart(), _seq_hub(specs), CAM.width, CAM.height)
-    st, hist = _run(task, 30)
-    acts = [h["action"] for h in hist]
-    assert "wait_hdg" in acts, "应出现等待动作（实际 %s）" % acts[:12]
-    waits = [f for f, h in zip(task.uart.frames, hist) if h["action"] == "wait_hdg"]
-    assert all(abs(f[0]) < 1e-9 for f in waits), "等待期间不许下发 surge"
-    assert "hdg" in acts, "等到 full 后应进入正航向（实际 %s）" % acts[:16]
+def test_hdg_starts_even_when_trigger_frame_is_p3p(monkeypatch):
+    """触发帧是不是 full **不影响起转**：只要曾经测到过 full 帧的 psi，就用那个 psi 起转。
 
-
-def test_wait_fresh_times_out_then_proceeds(monkeypatch):
-    """等超时了仍然要往下走（不能卡死在 GOLDEN）。
-
-    ⚠️ 这条路径只在 `entry_stale_ok=false`（旧语义）下可达：默认 `true` 时"曾经有 full 帧
-    测量"就起转，压根不会走 wait_fresh_ms 的等待分支。
+    新模型下 mode 每帧在 full/p3p/coarse 间跳，死等"本帧恰好 full"等于永远不转。
+    （这件事**只有一套语义**，不许再加放宽开关 —— 旧 `entry_stale_ok` 已随离散迭代删除。）
     """
-    monkeypatch.setitem(S.comm.gate, "hdg",
-                        S.Y(dict(S.comm.gate.get("hdg", {}),
-                                 wait_fresh_ms=300, entry_stale_ok=False)))
     specs = [(_offset_px(320), FULL_C), (_offset_px(320), FULL_C),
-             (None, FULL_C)] + [(None, P3P_C)] * 10
+             (None, FULL_C), (None, P3P_C), (None, P3P_C), (None, P3P_C)]
     task = GateTask(_Uart(), _seq_hub(specs), CAM.width, CAM.height)
-    st, hist = _run(task, 25)
+    _st, hist = _run(task, 12)
     acts = [h["action"] for h in hist]
-    assert "wait_hdg" in acts, "应先等待（实际 %s）" % acts[:12]
-    assert task.phase == "APPROACH", \
-        "等超时应进 APPROACH（动作尾部=%s，phase=%s）" % (acts[-5:], task.phase)
+    assert "hdg" in acts, "p3p 触发帧也应进正航向（实际 %s）" % acts
+
+
+def test_no_psi_skips_heading_and_proceeds(monkeypatch):
+    """**没有 full 帧的 psi** ⇒ 记 `hdg_skip=no_psi`，直接进近（不许卡在 ALIGN），且一根舵都不发。
+
+    同时钉住：一次到位之后，旧设计的那几个"来回反馈/开环"机关**不许复活**
+    （等待新鲜 full、历史 psi 兜底、离散迭代、盲转）。
+    """
+    task = _task(lambda: [])
+    task._hdg_done = False
+    assert "no_psi" in task._hdg_skip_reason("full", 1000)
+
+    import inspect
+    from gate import gate_task as GT
+    src = inspect.getsource(GT.GateTask)
+    for dead in ("wait_fresh_ms", "wait_hdg", "_hdg_hist", "_hdg_fresh", "psi_stale",
+                 "settle_ms", "measure_frames", "max_iters", "blind",
+                 "entry_stale_ok", "dir_suspect"):
+        assert dead not in src, \
+            "旧设计的 `%s` 还在 gate_task 里（应随「一次到位」一起删除）" % dead
 
 
 def test_width_mode_never_starts_heading_align():
@@ -861,3 +917,324 @@ def test_width_mode_never_starts_heading_align():
     src = inspect.getsource(GT.GateTask._on_width)
     assert "_hdg_ready" not in src and "SUB_HDG" not in src, \
         "width 档不应启动正航向（若真要放开，先说明理由并改这条用例）"
+
+
+
+# ------------------------------------------------- 17. 「转完反向平移」= 主循环里的一个状态
+def _drive_to_sway_back(w, shrink=None, z_after_turn=None, frames=80, dt=100):
+    """驱动到「反向平移」状态激活（转向结束那一刻）。
+
+    `z_after_turn`：转向一开始就把门"挪远"（z 变大 ⇒ 框变小、P 3P 的 z 也变大），
+    用来模拟"刚转走的那个门在视野里的替代者"；`shrink`：不改 z、只缩框。
+    """
+    uart = _Uart(yaw_deg=0.0)
+    task = GateTask(uart, _Hub(lambda: w.det()), CAM.width, CAM.height)
+    frame = np.zeros((CAM.height, CAM.width, 3), np.uint8)
+    for i in range(frames):
+        uart.telemetry.yaw_deg = w.H * w.imag_sign
+        task.process(frame, 1000 + dt * i)
+        if task._hdg.turning and z_after_turn is not None:
+            w.z = z_after_turn
+            z_after_turn = None
+        if task._hdg.turning and shrink is not None:
+            w.shrink = shrink
+            shrink = None
+        w.send(uart.frames[-1][3], dt=dt / 1000.0)
+        if task._post_sway_until_ms is not None:
+            return task, uart, 1000 + dt * i        # 激活帧的时基（状态内帧要顺它往后走）
+    return task, uart, 1000 + dt * (frames - 1)
+
+
+class _ShrinkWorld(_HullWorld):
+    """转过之后把框缩到 shrink 倍（不缩时 = 1.0）。"""
+
+    def __init__(self, *a, **kw):
+        self.shrink = float(kw.pop("shrink", 1.0))
+        self.turned = False
+        _HullWorld.__init__(self, *a, **kw)
+
+    def send(self, yaw_cmd, dt=0.1):
+        if abs(float(yaw_cmd)) > 1e-9:
+            self.turned = True
+        _HullWorld.send(self, yaw_cmd, dt)
+
+    def det(self):
+        ds = _HullWorld.det(self)
+        if self.turned and self.shrink != 1.0:
+            d = ds[0]
+            return [Det(d.kind, d.score, d.x + int(d.w * (1 - self.shrink) / 2),
+                        d.y + int(d.h * (1 - self.shrink) / 2),
+                        max(1, int(d.w * self.shrink)), max(1, int(d.h * self.shrink)),
+                        kpts=d.kpts, kpt_conf=d.kpt_conf)]
+        return ds
+
+
+def test_sway_back_is_a_main_loop_state_and_keeps_measuring():
+    """「反向平移」是**主循环里的一个状态**：判据照跑（ψ 继续刷新），只覆盖本帧下发的指令。
+
+    正确形态下 ψ 每帧都在刷新；曾经那种"把位姿链整段旁路、ψ 冻在起转前的旧值"的写法是
+    自转的根因（2026-09-27，证据见 doc/_注释历史_fragments/base_tests.md）。
+    场景：转完之后视野里是**更远的门**（z 1.5→2.2 m，Δz=0.7 > same_z_m=0.5 ⇒ 判成"不是我刚丢的门"）。
+    """
+    w = _ShrinkWorld(psi0=25.0, z=1.5)
+    task, uart, t0 = _drive_to_sway_back(w, z_after_turn=2.2)
+    assert task._post_sway_until_ms is not None, "转向结束应进入「反向平移」状态"
+    assert task._hdg.last_dir == "左转", task._hdg.last_dir
+    frame = np.zeros((CAM.height, CAM.width, 3), np.uint8)
+    acts, psis = [], []
+    for i in range(5):                                  # 状态内 5 帧（窗口 600ms / 100ms 每帧）
+        if task._post_sway_until_ms is None:
+            break
+        uart.telemetry.yaw_deg = w.H * w.imag_sign
+        task.process(frame, t0 + 100 * (i + 1))     # ★ 时间必须顺着激活帧往后走
+        acts.append(task.last_info["action"])
+        psis.append(task._hdg_deg)
+        w.send(uart.frames[-1][3], dt=0.1)
+    assert acts and all(a == "sway_back" for a in acts), \
+        "状态内只许发反向平移（实际 %s）" % acts
+    tail = uart.frames[-len(acts):]
+    assert all(abs(f[3]) < 1e-9 and abs(f[0]) < 1e-9 and abs(f[2]) < 1e-9 for f in tail), \
+        "「反向平移」期间不许发 yaw/surge/heave：%s" % [(f[0], f[2], f[3]) for f in tail]
+    assert all(f[1] > 0 for f in tail), "左转完 ⇒ 右移（sway>0）：%s" % [f[1] for f in tail]
+    # ★ 关键：位姿链没被旁路 ⇒ 状态内 ψ 仍在刷新（不再冻在起转前的 25.0）
+    got = [round(float(p), 2) for p in psis if p is not None]
+    assert len(set(got)) >= 2, "状态内 ψ 必须继续刷新（实测 %s）—— 冻结 ψ 就是自转的根因" % got
+    assert got and got[0] != round(25.0, 2), "第一帧就该看到新的 ψ（实测 %s）" % got
+
+
+def test_sway_back_never_locks_up_even_if_every_frame_is_a_far_gate():
+    """**回归用例**：状态内每帧都被判成"远门"时，也必须**到期退出**（绝不永久停摆）。"""
+    w = _ShrinkWorld(psi0=25.0, z=1.5)
+    task, uart, t0 = _drive_to_sway_back(w, z_after_turn=2.2)
+    assert task._post_sway_until_ms is not None
+    frame = np.zeros((CAM.height, CAM.width, 3), np.uint8)
+    acts = []
+    for i in range(12):
+        uart.telemetry.yaw_deg = w.H * w.imag_sign
+        task.process(frame, t0 + 100 * (i + 1))
+        acts.append(task.last_info["action"])
+        w.send(uart.frames[-1][3], dt=0.1)
+    assert task._post_sway_until_ms is None, "到期必须退出状态（实测仍在 %s）" % task._post_sway_until_ms
+    assert any(a != "sway_back" for a in acts), "退出后必须恢复正常流程（实际 %s）" % acts
+    assert task.last_info["phase"] in ("ALIGN", "APPROACH", "THROUGH", "SEARCH"), task.last_info["phase"]
+    assert task.last_info["substate"] != "SWAY_BACK", "退出后子状态不许还停在 SWAY_BACK"
+
+
+def test_sway_back_exits_when_the_lost_gate_comes_back():
+    """刚丢的那个门一回来（同门判据过）⇒ 立刻退出状态，交回视觉；且这一帧 ψ 已刷新。"""
+    w = _ShrinkWorld(psi0=25.0, z=1.5)                 # z 不变 ⇒ 判成同一个门
+    task, uart, t0 = _drive_to_sway_back(w)
+    assert task._post_sway_until_ms is not None, "门被甩出画面后应进入状态"
+    frame = np.zeros((CAM.height, CAM.width, 3), np.uint8)
+    uart.telemetry.yaw_deg = w.H * w.imag_sign
+    task.process(frame, t0 + 100)
+    assert task._post_sway_until_ms is None, "同一个门回来了就该退出（实测仍在）"
+    assert task.last_info["action"] != "sway_back", task.last_info["action"]
+    assert task._hdg_deg is not None and abs(float(task._hdg_deg)) < 25.0, \
+        "退出那一帧 ψ 应已重新测量（实测 %s）" % task._hdg_deg
+
+
+class _BlockingStopUart(_Uart):
+    """转向收尾硬停**真的阻塞**（真船实测：无遥测 0.70s / 有遥测静止 1.31s / 还在转 2.51s）。"""
+
+    def __init__(self, cost_s=0.0, **kw):
+        _Uart.__init__(self, **kw)
+        self.cost_s = float(cost_s)
+        self.blocked_s = 0.0
+
+    def stop_hard(self, quiet=True, **kw):
+        time.sleep(self.cost_s)
+        self.blocked_s += self.cost_s
+        return True
+
+
+def test_post_sway_starts_after_the_turn_end_hard_stop():
+    """**回归（2026-09-27 用户问「转完之后那个平移到底生效没有」）**：平移窗口必须从**硬停结束**起算。
+
+    `comm.gate.hdg.stop_hard`（默认 true）是**阻塞**的：实测 0.70s（无遥测）/1.31s（有遥测、静止）
+    /2.51s（还在转），见 `base/uart.py::stop_hard`。窗口若在硬停**之前**就开（600ms），会被整段吃光
+    ⇒ 生产里只发得出 1 帧平移 ≈ 等于没有平移 —— 而"转完门被甩出画面"正是这个状态要救的场景。
+    帧时基按生产的方式走（硬停真实耗时计入时间轴），因此这条用例在旧写法下必红。
+    """
+    w = _ShrinkWorld(psi0=25.0, z=1.5)
+    uart = _BlockingStopUart(cost_s=0.7)
+    task = GateTask(uart, _Hub(lambda: w.det()), CAM.width, CAM.height)
+    task._hdg_cfg = dict(task._hdg_cfg)
+    task._hdg_cfg["post_sway_ms"] = 400.0            # 窗口 < 阻塞耗时 ⇒ 旧写法必然吃光
+    # ★ 模拟生产的**整帧阻塞**：转向内层（真机 20Hz 帧内闭环 1~3s）+ 硬停 0.7s 紧挨着，
+    #   中间没有任何一帧。只折算硬停、不折算转向 ⇒ 窗口照样一出世就过期。
+    turn_block_s = 0.6
+    _orig_inner = task._turn_inner_loop
+
+    def _slow_inner(yaw_cmd, now_ms=0):
+        out = _orig_inner(yaw_cmd, now_ms)
+        if task._hdg.finished() and not getattr(_slow_inner, "_slept", False):
+            time.sleep(turn_block_s)                 # 这一次转向在本帧内阻塞了这么久才结束
+            _slow_inner._slept = True
+        return out
+
+    task._turn_inner_loop = _slow_inner
+    frame = np.zeros((CAM.height, CAM.width, 3), np.uint8)
+    t0 = 1000
+    z_flip = 2.2                       # 转完视野里是"更远的门"（Δz=0.7 > 0.5 ⇒ 判成不是我丢的那个）
+    acts, act_now, act_until = [], None, None
+    for i in range(120):
+        uart.telemetry.yaw_deg = w.H * w.imag_sign
+        now = t0 + 100 * i + int(uart.blocked_s * 1000.0)   # ★ 硬停的真实耗时计入帧时基
+        task.process(frame, now)
+        if task._hdg.turning and z_flip is not None:
+            w.z, z_flip = z_flip, None
+        w.send(uart.frames[-1][3], dt=0.1)
+        if uart.blocked_s > 0 and task._post_sway_until_ms is not None:
+            if act_now is None:                      # 硬停刚结束的那一帧：记下窗口起点
+                act_now, act_until = now, task._post_sway_until_ms
+            acts.append(task.last_info["action"])
+        if acts and task._post_sway_until_ms is None:
+            break
+    assert uart.blocked_s > 0, "本用例必须真的走到「转向收尾硬停」"
+    assert getattr(_slow_inner, "_slept", False), "本用例必须真的模拟到「转向帧内阻塞」"
+    assert task._post_sway_until_ms is None, "窗口到期必须退出状态"
+    # ★ 不变量（用户 2026-09-27 要的）：窗口起点 **在硬停结束之后**，不是"转向结束"那一刻
+    assert act_now is not None and act_until is not None, "没抓到硬停结束那一帧"
+    _blocked_ms = int((turn_block_s + uart.blocked_s) * 1000.0)
+    assert act_until >= act_now + _blocked_ms + 400 - 1, (
+        "平移窗口必须开在**整块阻塞（转向+硬停）之后**：起点 %s，帧起点 %s + 阻塞 %dms + 窗口 400ms"
+        % (act_until, act_now, _blocked_ms))
+    assert len(acts) >= 4, (
+        "硬停阻塞 %.1fs 之后，「反向平移」仍须按窗口(%.0fms)推进 ≥4 帧；实测 %d 帧 %s"
+        % (uart.blocked_s, task._hdg_cfg["post_sway_ms"], len(acts), acts))
+
+
+def test_sway_back_z_first_then_ratio_fallback(monkeypatch):
+    """判"门回来了吗"：**z 优先**；z 拿不到才退回框占比，且**不得小于原 70%**（暂定 0.7）。
+
+    用户 2026-09-27 定：优先信息 z；如果 z 一直被"新鲜帧"卡着（当帧 coarse 无位姿 / 位姿过期 /
+    转前没测到过 z），就相信框占比。
+    """
+    task = GateTask(_Uart(yaw_deg=0.0), _Hub(lambda: []), CAM.width, CAM.height)
+    big = Det("gate", 0.9, 0.0, 0.0, 0.50 * CAM.width, 0.30 * CAM.height)   # 参照：占比 0.50
+    small = Det("gate", 0.9, 0.0, 0.0, 0.30 * CAM.width, 0.30 * CAM.height)  # 0.6×（< 70%）
+    mid = Det("gate", 0.9, 0.0, 0.0, 0.40 * CAM.width, 0.30 * CAM.height)    # 0.8×（≥ 70%）
+    assert big and small and mid
+    task._post_sway_z_ref, task._post_sway_ratio_ref = 1.50, 0.50
+    # ① z 优先：z 说话时框大小不参与裁决
+    assert task._post_sway_same_gate(small, 1.90) is True, "|Δz|=0.4 ≤ 0.5 ⇒ 同一个门（哪怕框小）"
+    assert task._post_sway_same_gate(mid, 2.20) is False, "|Δz|=0.7 > 0.5 ⇒ 不是同一个门（哪怕框够大）"
+    # ② z 拿不到 ⇒ 退框占比，阈值 = 原 70%
+    assert task._post_sway_same_gate(mid, None) is True, "0.8× ≥ 0.7× ⇒ 同一个门"
+    assert task._post_sway_same_gate(small, None) is False, "0.6× < 0.7× ⇒ 不是同一个门（继续推）"
+    # ③ 本帧没检出 ⇒ 永远不算"门回来了"
+    assert task._post_sway_same_gate(None, 1.50) is False
+    assert task._post_sway_same_gate(None, None) is False
+    # ④ 两道闸都设 0 ⇒ 判据整体关掉（任何检出都算；没检出仍不算）
+    monkeypatch.setitem(S.comm.gate, "hdg", S.Y(dict(
+        S.comm.gate.get("hdg", {}), post_sway_same_z_m=0, post_sway_far_ratio=0)))
+    assert task._post_sway_same_gate(small, 9.9) is True, "两闸都关 ⇒ 任何检出都算「门回来了」"
+    assert task._post_sway_same_gate(None, 9.9) is False, "没检出仍然不算"
+
+
+class _CoarseAfterTurn(_HullWorld):
+    """转过之后只给"整框可信、角点全缺"的检出（coarse 档 ⇒ **没有 z**）⇒ 只能用框占比判。"""
+
+    def __init__(self, *a, **kw):
+        self.scale = float(kw.pop("scale", 0.5))
+        self.turned = False
+        _HullWorld.__init__(self, *a, **kw)
+
+    def send(self, yaw_cmd, dt=0.1):
+        if abs(float(yaw_cmd)) > 1e-9:
+            self.turned = True
+        _HullWorld.send(self, yaw_cmd, dt)
+
+    def det(self):
+        ds = _HullWorld.det(self)
+        if self.turned:
+            d = ds[0]
+            return [Det(d.kind, d.score, d.x, d.y, max(1, int(d.w * self.scale)), d.h,
+                        kpts=d.kpts, kpt_conf=np.zeros(4, np.float32))]
+        return ds
+
+
+def test_sway_back_without_z_falls_back_to_box_ratio():
+    """没有 z（coarse）时走占比退路：框缩到 50%（< 70%）⇒ 判"不是同一个门" ⇒ 继续推、到期退出。"""
+    w = _CoarseAfterTurn(psi0=25.0, z=1.5, scale=0.5)
+    task, uart, t0 = _drive_to_sway_back(w)
+    assert task._post_sway_until_ms is not None, "门被甩出画面后应进入反向平移状态"
+    frame = np.zeros((CAM.height, CAM.width, 3), np.uint8)
+    acts = []
+    for i in range(10):
+        uart.telemetry.yaw_deg = w.H * w.imag_sign
+        task.process(frame, t0 + 100 * (i + 1))
+        acts.append(task.last_info["action"])
+        w.send(uart.frames[-1][3], dt=0.1)
+    assert "sway_back" in acts, "没有 z 且框只剩 50% ⇒ 必须继续反向平移（实际 %s）" % acts
+    assert task._post_sway_until_ms is None, "到期必须退出（实测 %s）" % task._post_sway_until_ms
+
+
+def test_turn_aborts_immediately_when_saturated_too_long():
+    """**满舵保护**（用户 2026-09-27 定）：命令饱和到 ±out_max 持续 `sat_max_s` ⇒ 立刻停。
+
+    现场形态："一开始上来就不停地转、超时保护也不起作用" ⇒ 不能只指望 turn 自己的超时
+    （它要求每帧都被 step 到）。满舵超过阈值就先停，比超时更早生效。
+    """
+    from common.turn_deg import TurnCore
+    core = TurnCore(deg=60.0, left=True, cfg={"sat_max_s": 0.3}, log=lambda *a: None)
+    core.start(0)
+    t = 0
+    for _ in range(60):
+        t += 50
+        core.step(t, 0.0)                     # 遥测恒 0（船不动）⇒ 闭环永远满舵
+        if core.state == core.ABORTED:
+            break
+    assert core.state == core.ABORTED, "满舵久了必须中止（实际 %s）" % core.state
+    assert core.why == "sat", "中止原因应为 sat（实际 %r）" % core.why
+    assert 300.0 <= core._sat_ms <= 500.0, "应在 ~0.3s 满舵后停（实际 %.0f ms）" % core._sat_ms
+    assert abs(core.out) < 1e-9, "中止后必须收舵（out=%.3f）" % core.out
+
+
+def test_turn_end_does_a_hard_stop(monkeypatch, tmp_path):
+    """转向阶段结束时必须**硬停**（连发中性帧走完 ramp + 遥测验证），不许留半路 ramp 的 yaw。"""
+    import time
+    monkeypatch.setenv("AUV_TURN_LOG", str(tmp_path / "turn_calls.jsonl"))
+    monkeypatch.setitem(S.comm.gate, "align", S.Y(dict(
+        S.comm.gate.get("align", {}), confirm_frames=2)))
+    w = _HullWorld(psi0=20.0)
+    uart = _LiveUart(w)
+    task = GateTask(uart, _Hub(lambda: w.det()), CAM.width, CAM.height)
+    frame = np.zeros((CAM.height, CAM.width, 3), np.uint8)
+    for _ in range(6):
+        task.process(frame, int(time.time() * 1000))
+        if task._hdg.iters >= 1:
+            break
+    assert task._hdg.iters >= 1, "本次转向没跑完（%s）" % task._hdg.summary()
+    assert getattr(uart, "neutral_calls", 0) >= 3, \
+        "转向收尾必须硬停（连发中性帧），实际 neutral 次数=%s" % getattr(uart, "neutral_calls", 0)
+
+
+def test_sway_back_yields_to_through_and_to_a_running_turn():
+    """**互锁回归（2026-09-27 用户问「平移窗口会不会把旋转/冲刺卡死」）**：
+    `_set_info` 是唯一下发口，平移若在里面**无条件覆盖** 调用方的 action，就会出现两种抢指令：
+
+      ① `action == "through"` 掉进 else 被改写成 sway_back ⇒ **冲刺的 surge 被清零**最长一个窗口；
+      ② 转向内层循环（真实时钟域 20Hz，帧内阻塞）经同一入口发 yaw ⇒ yaw 被清零 ⇒ **转向推不动**。
+
+    约定：**平移让位于转向与冲刺**（它只是"把门拉回视野"的最低优先级补偿），并且立刻作废窗口。
+    """
+    w = _ShrinkWorld(psi0=25.0, z=1.5)
+    task, uart, t0 = _drive_to_sway_back(w, z_after_turn=2.2)   # 判成远门 ⇒ 窗口保持存活
+    assert task._post_sway_until_ms is not None
+    # ① 冲刺帧：surge 必须原样发出去，且窗口作废
+    task._set_info("through", surge=0.35)
+    assert task.last_info["action"] == "through", task.last_info["action"]
+    assert abs(uart.frames[-1][0] - 0.35) < 1e-9, \
+        "冲刺的 surge 被平移压掉了：%r" % (uart.frames[-1],)
+    assert task._post_sway_until_ms is None, "进冲刺就该作废平移窗口"
+    # ② 转向帧：yaw 必须原样发出去（窗口活着时也不许清零）
+    task, uart, t0 = _drive_to_sway_back(_ShrinkWorld(psi0=25.0, z=1.5), z_after_turn=2.2)
+    assert task._post_sway_until_ms is not None
+    task._hdg.state = "turn"                     # 假装又起转了（生产里起转前会清窗口）
+    task._set_info("hdg", yaw=-0.30)
+    assert abs(uart.frames[-1][3] + 0.30) < 1e-9, \
+        "转向的 yaw 被平移清零了（转向会推不动）：%r" % (uart.frames[-1],)
+    assert task.last_info["action"] != "sway_back", task.last_info["action"]
+    assert task._post_sway_until_ms is None, "转向进行中就该作废平移窗口"

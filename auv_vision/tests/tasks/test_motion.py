@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
-"""tests/tasks/test_motion.py — 运动原语：额定转角 `TurnCore` + 离散正航向 `HeadingAligner`。
+"""tests/tasks/test_motion.py — 运动原语：额定转角 `TurnCore` + 正航向 `HeadingAligner`。
 
 两半都是"遥测 yaw 闭环"状态机（转角是原语；正航向是 gate ALIGN 的子状态），
 所以离线用**假船**测：遥测 yaw 按 `角速率 × 下发的 yaw DOF × dt` 积分，
 时钟与 sleep 全部注入 → 确定性、毫秒级跑完。
-  · 转角（前半）：`common/turn_deg.py`；**缺遥测拒转**是默认行为（要盲转必须显式）。
-  · 正航向（后半）：`gate/heading_align.py`；「测→转→停稳→再测」，只吃 full 帧的 psi。
+
+假船的默认极性 = **真机极性**（命令 +yaw 时遥测 yaw **减小**）—— 谁把 `dof_map.yaw.sign` /
+`telemetry.yaw_sign` / 接线改了，这里会先红。（板端实测依据见
+doc/_注释历史_fragments/base_tests.md）
 """
 import os
 import sys
@@ -15,9 +17,13 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import base.settings as S                                          # noqa: E402
-from common.turn_deg import turn, turn_cfg, wrap180                # noqa: E402
-from gate.heading_align import (ABORTED, DONE, GIVEUP, MEASURE, SETTLE, TURN,
-                                HeadingAligner, hdg_cfg)            # noqa: E402
+from common.turn_deg import turn, turn_cfg, wrap180, yaw_sign             # noqa: E402
+from gate.heading_align import (ABORTED, DONE, GIVEUP, TURN,             # noqa: E402
+                                HeadingAligner, hdg_cfg)
+
+# 真机极性：+yaw 命令 → 遥测 yaw 减小（σ = -1）
+BOARD_SIGN = -1.0
+
 
 # ======================================================================
 # 额定转角（common/turn_deg.py）
@@ -28,7 +34,7 @@ class _Tel(object):
 class _FakeBoat(object):
     """假船：下发的 yaw DOF → 遥测 yaw 按 imag_sign 方向积分（纯积分器，无延迟）。"""
 
-    def __init__(self, imag_sign=1.0, gain=60.0, start_yaw=170.0, dt=0.05):
+    def __init__(self, imag_sign=BOARD_SIGN, gain=60.0, start_yaw=170.0, dt=0.05):
         self.telemetry = _Tel()
         self.telemetry.yaw_deg = start_yaw
         self.imag_sign = imag_sign
@@ -69,54 +75,81 @@ def _run_turn(boat, **kw):
 def _yaw_cmds(boat):
     return [c[3] for c in boat.cmd if abs(c[3]) > 1e-9]
 
-@pytest.mark.parametrize("imag_sign", (1.0, -1.0))
-def test_turn_left_reaches_rated_angle(imag_sign):
-    """左转 90°：无论遥测正方向如何，遥测转角都应达到 -90°×imag_sign。
+def test_yaw_sign_is_a_fixed_derivation_not_a_measurement():
+    """**极性 σ 是算出来的常量**（固件 × dof_map × telemetry），不配置、不探向、不现场测。
+
+    （当初把 σ 当成 +1 曾闭合成正反馈，板端实测依据见 doc/_注释历史_fragments/base_tests.md。）
+    """
+    sig, src = yaw_sign()
+    assert sig == pytest.approx(-1.0), "出厂极性应为 -1（%s），实测 %s" % (src, sig)
+    assert "dof_map" in src and "telemetry" in src
+    # 两个旋钮任一翻转，σ 自动跟着翻 —— 不允许"配置与代码各记一套符号"
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setitem(S.comm.dof_map, "yaw", {"axis": 0, "sign": -1})
+        assert yaw_sign()[0] == pytest.approx(+1.0)
+        monkeypatch.setitem(S.comm.dof_map, "yaw", {"axis": 0, "sign": 1})
+        monkeypatch.setitem(S.comm, "telemetry", S.Y(dict(S.comm.telemetry, yaw_sign=-1)))
+        assert yaw_sign()[0] == pytest.approx(+1.0)
+    finally:
+        monkeypatch.undo()
+    assert yaw_sign()[0] == pytest.approx(-1.0)
+
+def test_turn_left_reaches_rated_angle():
+    """左转 90°：遥测 yaw 应转出 +90°（真机极性下 +yaw 命令 → yaw 减小 ⇒ 左转 = yaw 增大）。
 
     起点 170°（回绕边界附近）→ 左转 90° 会跨过 ±180，所以这条同时验回绕。
     """
-    b = _FakeBoat(imag_sign=imag_sign)
+    b = _FakeBoat()
     y0 = b.telemetry.yaw_deg
-    rc, logs = _run_turn(b, deg=90.0, left=True, timeout=20.0, imag_sign=imag_sign)
+    rc, logs = _run_turn(b, deg=90.0, left=True, timeout=20.0)
     assert rc == 0, "应到达目标角，logs=%s" % logs[-3:]
     got = wrap180(b.telemetry.yaw_deg - y0)
-    want = -90.0 * imag_sign
-    assert abs(got - want) <= 8.0, "实测 %.1f° 应≈目标 %.1f°" % (got, want)
+    assert abs(got - 90.0) <= 8.0, "实测 %.1f° 应≈目标 +90°" % got
     assert b.neutral_calls >= 1, "结束时必须回中位"
     ys = _yaw_cmds(b)
     assert ys and all(y < 0 for y in ys), "左转不该出现正（右转）舵：%s" % set(ys)
 
 def test_turn_right_uses_positive_yaw():
-    b = _FakeBoat(imag_sign=1.0, start_yaw=0.0, gain=30.0)
+    b = _FakeBoat(start_yaw=0.0, gain=30.0)
     rc, _ = _run_turn(b, deg=90.0, left=False, timeout=20.0)
     assert rc == 0
-    assert abs(wrap180(b.telemetry.yaw_deg - 0.0) - 90.0) <= 8.0
+    assert abs(wrap180(b.telemetry.yaw_deg - 0.0) + 90.0) <= 8.0, "右转应转出 -90°（真机极性）"
     ys = _yaw_cmds(b)
     assert ys and all(y > 0 for y in ys), "右转应是正舵（+yaw=右转）"
 
 def test_pid_eases_off_near_the_target_and_respects_out_max():
-    """**用 PID 的判据**：① 命令不过 out_max；② 近目标时自动收力（不是一路满舵到点）。
-
-    这一条正是"定点转角"比"固定舵量 + 容差"强的地方：远了满舵、近了减速。
-    """
+    """**用 PID 的判据**：① 命令不过 out_max；② 近目标时自动收力（不是一路满舵到点）。"""
     cfg, _src = turn_cfg()
     om = float(cfg["out_max"])
-    b = _FakeBoat(imag_sign=1.0, start_yaw=0.0, gain=40.0)
+    b = _FakeBoat(start_yaw=0.0, gain=40.0)
     rc, _ = _run_turn(b, deg=90.0, left=True, timeout=20.0)
     assert rc == 0
     ys = [abs(y) for y in _yaw_cmds(b)]
     assert max(ys) <= om + 1e-9, "命令不该超过限幅 %.2f（实际 %.3f）" % (om, max(ys))
-    # 最后 3 条非零命令应明显小于峰值（收力）
     assert min(ys[-3:]) < 0.5 * max(ys), \
         "近目标没收力（峰值 %.3f，末段 %s）→ 说明不是 PID 闭环" % (max(ys), ys[-3:])
 
-def test_turn_gains_are_independent_from_ball(monkeypatch):
-    """**独立不变量**（2026-09-18 用户定）：转角这套 PID 不跟小球那套联动。
+def test_loop_converges_without_limit_cycle():
+    """**必须"逐步收敛"，不许原地极限环**（2026-09-27 仿真抓到的真问题）。
 
-    小球是"像素误差居中"的调参，转角是"额定角度机动"，量纲/工况都不同；
-    用户明确要独立（"0.3 有点大"）。所以：改 `comm.ball.edge_yaw_kp` **不得**影响转角，
-    反之亦然；来源必须报 `turn_pid(独立)`。
+    现行 cfg 是 `kd=0 / deadzone_deg=6`：一次转到位、出力不反号（导致极限环的旧参数
+    `kd=0.10 / deadzone_deg=3.0` 及其失效过程见 doc/_注释历史_fragments/base_tests.md）。
     """
+    cfg, _ = turn_cfg()
+    assert float(cfg["kd"]) == pytest.approx(0.0), "kd 必须为 0（见 cfg/comm.yaml 的 turn_pid 注释）"
+    b = _FakeBoat(start_yaw=75.07, gain=200.0)      # 增益按板端实测量级取
+    rc, _ = _run_turn(b, deg=52.6, left=False, timeout=10.0)
+    assert rc == 0, "应一次转到位（实际退出码 %s）" % rc
+    res = wrap180(b.telemetry.yaw_deg - (75.07 - 52.6))     # 真机极性：右转 → yaw 减小
+    assert abs(res) <= float(cfg["deadzone_deg"]) + 1.0, "残余 %.2f° 应落在到达窗内" % res
+    outs = _yaw_cmds(b)
+    flips = sum(1 for i in range(1, len(outs)) if outs[i] * outs[i - 1] < 0)
+    assert flips <= 2, "出力来回反号 %d 次 ⇒ 极限环（不是收敛）" % flips
+
+
+def test_turn_gains_are_independent_from_ball(monkeypatch):
+    """**独立不变量**（2026-09-18 用户定）：转角这套 PID 不跟小球那套联动。"""
     cfg0, src0 = turn_cfg()
     assert src0 == "turn_pid(独立)", "默认来源应为独立那套，实际=%s" % src0
     kp0 = float(cfg0["kp"])
@@ -125,7 +158,6 @@ def test_turn_gains_are_independent_from_ball(monkeypatch):
     assert float(cfg1["kp"]) == pytest.approx(kp0), \
         "改了 ball.edge_yaw_kp 却把转角 PID 带跑了 → 又变成联动（用户要独立）"
     assert src1 == "turn_pid(独立)"
-    # 显式覆盖仍然生效（cfg 是唯一来源）
     monkeypatch.setitem(S.comm.motion, "turn_pid",
                         dict(S.comm.motion.get("turn_pid", {}), kp=0.7))
     cfg2, _ = turn_cfg()
@@ -134,19 +166,21 @@ def test_turn_gains_are_independent_from_ball(monkeypatch):
 def test_timeout_reports_how_far_it_actually_turned():
     """舵效不足（几乎不转）→ 退出码 4；转了一部分但没到位 → 3。都带实测角度。"""
     b = _FakeBoat(gain=0.2)                       # 极弱
-    rc, logs = _run_turn(b, deg=90.0, left=True, timeout=3.0)
+    # sat_max_s=0：本用例测的是**超时**那条保护，先把"满舵+无进展即停"这条新保护关掉，
+    #   否则新保护会先中止（两条保护的职责不同，用例要各自隔离）。
+    rc, logs = _run_turn(b, deg=90.0, left=True, timeout=3.0, sat_max_s=0.0)
     assert rc == 4, "几乎没转应报 4，实际 %s" % rc
     assert any("超时" in s for s in logs)
     assert any("实测只转了" in s for s in logs)
     assert b.neutral_calls >= 1
 
     b2 = _FakeBoat(gain=8.0)                      # 能转但很慢
-    rc2, _ = _run_turn(b2, deg=90.0, left=True, timeout=3.0)
+    rc2, _ = _run_turn(b2, deg=90.0, left=True, timeout=3.0, sat_max_s=0.0)
     assert rc2 == 3, "转了一部分应报 3，实际 %s" % rc2
 
 def test_refuses_to_turn_without_telemetry():
-    """**默认行为**（2026-09-18 用户定：接口只有角度）：没有遥测 → **拒转**（rc=5），
-    一根转向指令都不许发（不能"以为转了 90° 其实瞎转"），但必须回中位、不能挂死。"""
+    """**默认行为**：没有遥测 → **拒转**（rc=5），一根转向指令都不许发
+    （不能"以为转了 90° 其实瞎转"），但必须回中位、不能挂死。**没有盲转备案。**"""
     b = _FakeBoat()
     b.telemetry.yaw_deg = None
     rc, logs = _run_turn(b, deg=90.0, left=True, timeout=5.0, wait_tel_s=0.5)
@@ -155,28 +189,36 @@ def test_refuses_to_turn_without_telemetry():
     assert b.neutral_calls >= 1, "拒转也要回中位"
     assert any("拒绝转向" in s for s in logs)
 
-def test_blind_turn_is_angle_over_rate():
-    """显式 `--blind`（mode=timed）才盲转：时长必须是 **角度 ÷ 角速率假设**，不是拍脑袋的秒数。"""
-    b = _FakeBoat()
-    b.telemetry.yaw_deg = None
-    rc, logs = _run_turn(b, deg=90.0, left=True, timeout=5.0, wait_tel_s=0.5,
-                    mode="timed", blind_rate_dps=30.0)      # 90/30 = 3.0s → 60 帧@0.05s
-    assert rc == 2
-    ys = _yaw_cmds(b)
-    assert ys and all(y < 0 for y in ys), "盲转也要按方向给舵"
-    # 60 帧 ±2 帧；发送循环是"先发后 sleep"，所以帧数≈时长/周期
-    assert 58 <= len(ys) <= 62, "盲转时长应为 90/30=3s（≈60 帧），实际 %d 帧" % len(ys)
-    assert len(ys) == pytest.approx(60, abs=2)
-    assert any("盲转" in s for s in logs)
+def test_divergence_guard_stops_the_turn():
+    """**方向自证**（唯一的兜底，不是测量）：命令朝一边、船朝另一边 ⇒ 停转（rc=6）。
+
+    构造：假船极性与真机相反（+yaw 命令使 yaw **增大**）⇒ 闭环变正反馈。
+    必须"转一点点就停"，而不是像板端那样一路转到 120°+ 把门甩出画面。
+    """
+    b = _FakeBoat(imag_sign=+1.0, start_yaw=0.0, gain=60.0)      # 反极性
+    # sat_max_s=0：本用例测**方向自证**，新保护（满舵无进展即停）会抢在前面 ⇒ 隔离掉
+    rc, logs = _run_turn(b, deg=30.0, left=True, timeout=20.0, sat_max_s=0.0)
+    assert rc == 6, "反极性应被方向自证拦下（rc=6），实际 %s（logs=%s）" % (rc, logs[-2:])
+    turned = abs(wrap180(b.telemetry.yaw_deg - 0.0))
+    limit = 30.0 + float(turn_cfg()[0]["div_deg"]) + 3.0
+    assert turned <= limit, "反极性下实测转了 %.1f° > 上限 %.1f°（兜底没生效）" % (turned, limit)
+    assert any("方向自证失败" in s for s in logs)
+    assert b.neutral_calls >= 1
+    # 关掉兜底（div_deg=0）→ 只能靠超时收场（旧行为：一路转到底，转出 limit 之外）
+    b2 = _FakeBoat(imag_sign=+1.0, start_yaw=0.0, gain=60.0)
+    rc2, _ = _run_turn(b2, deg=30.0, left=True, timeout=6.0, div_deg=0.0, sat_max_s=0.0)
+    turned2 = abs(wrap180(b2.telemetry.yaw_deg - 0.0))
+    assert rc2 == 3 and turned2 > limit, \
+        "div_deg=0 时应退回旧行为（一路转到 %.1f° 才超时）—— 这就是兜底存在的理由" % turned2
 
 
 # ======================================================================
-# 离散正航向（gate/heading_align.py）
+# 正航向（gate/heading_align.py）：PnP 目标角 → 转一次 → 结束
 # ======================================================================
 class _World(object):
-    """假船 + 假门：h=机身转角(正=右)，psi=psi0−h，遥测 yaw=h×imag_sign。"""
+    """假船 + 假门：h=机身转角(正=右)，psi=psi0+h（现场约定：右转使 psi 变大），遥测 yaw=h×imag_sign。"""
 
-    def __init__(self, psi0=20.0, imag_sign=1.0, gain=60.0, dt=0.05, stuck=False):
+    def __init__(self, psi0=20.0, imag_sign=BOARD_SIGN, gain=60.0, dt=0.05, stuck=False):
         self.psi0 = float(psi0)
         self.imag_sign = float(imag_sign)
         self.gain = float(gain)
@@ -187,7 +229,7 @@ class _World(object):
 
     @property
     def psi(self):
-        return self.psi0 - self.h
+        return self.psi0 + self.h
 
     @property
     def yaw_tel(self):
@@ -197,199 +239,159 @@ class _World(object):
         self.cmds.append(float(yaw_cmd))
         if not self.stuck:
             self.h += float(yaw_cmd) * self.gain * self.dt
-def _run_hd(aligner, world, frames=1200, psi_fresh=True, lost_after=None,
-         telemetry=True, cfg_over=None):
+def _run_hd(aligner, world, frames=1200, lost_after=None, telemetry=True, cfg_over=None,
+            on_frame=None):
+    """按帧推进 aligner；`on_frame(i)` 是每帧回调（用来数帧/断言状态）。"""
     now = 0
     logs = []
     if cfg_over:
         aligner.cfg.update(cfg_over)
     aligner.log = logs.append
+    if not aligner.finished():
+        aligner.start(now, psi=world.psi)      # gate_task 的 `_hdg_start` 就这一句
     states = []
     for i in range(frames):
+        if on_frame is not None:
+            on_frame(i)
         lost = lost_after is not None and i >= lost_after
-        st, yaw = aligner.step(now, psi_deg=world.psi, psi_fresh=psi_fresh,
-                               yaw_telemetry=(world.yaw_tel if telemetry else None),
+        st, yaw = aligner.step(now, yaw_telemetry=(world.yaw_tel if telemetry else None),
                                gate_lost=lost)
-        aligner.psi_meas = aligner.psi_meas
         world.send(yaw)
         states.append(st)
-        if aligner.finished() or st in (DONE, GIVEUP, ABORTED):
+        if aligner.finished():
             break
         now += int(world.dt * 1000)
     return states, logs, now
 
-@pytest.mark.parametrize("imag_sign", (1.0, -1.0))
-def test_converges_with_one_turn(imag_sign):
-    """psi=+20°（门法向偏画面右 = 机身左偏）→ 应**右转** ~20° → 重测后 |psi|≤阈值 → DONE。"""
-    w = _World(psi0=20.0, imag_sign=imag_sign)
-    # 极性经 turn_kwargs 传给转角原语（探向已停用，不再靠它自动测）
-    al = HeadingAligner(log=lambda *a: None,
-                        turn_kwargs={"imag_sign": float(imag_sign)})
-    states, logs, _now = _run_hd(al, w, frames=1200, cfg_over=dict(tol_deg=8.0))
-    assert al.state == DONE, "应收敛，实际 %s（logs=%s）" % (al.state, logs[-3:])
-    # ★ 2026-09-26：改成**逐步收敛**（默认每步 ≤15°）⇒ 20° 的目标要 2 步；只要求"收敛"不再要求"一步到位"
-    assert al.iters >= 1, "至少转一次（实际 %d 次）" % al.iters
-    assert al.last_target_deg <= float(hdg_cfg()["max_step_deg"]) + 1e-6, \
-        "每步目标不得超过 max_step_deg（实际 %.1f°）" % al.last_target_deg
-    assert al.last_dir == "右转", "psi>0 应右转，实际 %s" % al.last_dir
-    assert abs(w.psi) <= 8.0 + 1e-6, "转完残余 psi=%.1f° 应 ≤ 阈值" % w.psi
-    # 转向命令是正（右转）且不超过限幅
-    nz = [c for c in w.cmds if abs(c) > 1e-9]
-    assert nz and all(c > 0 for c in nz), "右转不该出现负舵：%s" % set(nz)
-    assert max(abs(c) for c in nz) <= turn_cfg()[0]["out_max"] + 1e-9, \
-        "转向舵不该超过 motion.turn_pid.out_max"
-    assert any("已与光轴平行" in s for s in logs)
+def test_converges_with_one_turn():
+    """psi=+20° → **左转 20°** → 结束（现场定；见 heading_align.start 的注释）。
 
-def test_no_remeasure_while_turning():
-    """**不在转动中重测**：转向期间即使喂进"已经平行"的 psi，也不能因此提前收敛。
-
-    每个 TURN 帧之间我们故意把 psi 改成 0（模拟"转动中测量不可信/会骗人"），
-    aligner 必须仍然把冻结的那次转向走完，然后才重新测量。
+    一次到位：目标角在起转那一刻冻结，转完就是 DONE，**只转一次**。
     """
     w = _World(psi0=20.0)
     al = HeadingAligner(log=lambda *a: None)
-    now = 0
-    turn_frames = 0
-    saw_zero_psi_during_turn = False
-    for i in range(2000):
-        if al.state == TURN:
-            turn_frames += 1
-            psi = 0.0                      # ← 转动中喂"假的已平行"
-            saw_zero_psi_during_turn = True
-        else:
-            psi = w.psi
-        st, yaw = al.step(now, psi_deg=psi, psi_fresh=True,
-                          yaw_telemetry=w.yaw_tel)
-        w.send(yaw)
-        now += int(w.dt * 1000)
-        if al.state in (DONE, GIVEUP, ABORTED):
-            break
-    assert saw_zero_psi_during_turn, "用例前提：应确实经历过 TURN"
-    assert turn_frames >= 3, "转向应持续多帧（实际 %d 帧）" % turn_frames
-    assert al.iters >= 1, "应至少完成一次转向（实际 %d）" % al.iters
-    # 转向期间那 5 帧"假 0"没有被当成测量样本 → 收敛靠的是转动之后的真实测量
-    assert al.state in (DONE, GIVEUP), "应给出结论，实际 %s" % al.state
+    _run_hd(al, w)
+    assert al.state == DONE, "应收敛，实际 %s（%s）" % (al.state, al.summary())
+    assert al.iters == 1, "只该转一次（实际 %d 次）" % al.iters
+    assert al.last_dir == "左转", "psi>0 应左转（现场定），实际 %s" % al.last_dir
+    assert al.last_target_deg == pytest.approx(20.0), "目标角就是测到的 psi（%s）" % al.summary()
+    assert abs(w.psi) <= float(hdg_cfg()["tol_deg"]) + 1e-6, "转完残余 psi=%.1f°" % w.psi
+    nz = [c for c in w.cmds if abs(c) > 1e-9]
+    assert nz and all(c < 0 for c in nz), "左转不该出现正舵：%s" % set(nz)
+    assert max(abs(c) for c in nz) <= turn_cfg()[0]["out_max"] + 1e-9
 
-def test_gives_up_after_max_iters_and_continues():
-    """迭代用完仍不达标 → GIVEUP（**带残余航向继续走**），且次数严格受限。"""
-    w = _World(psi0=60.0, stuck=True)      # 卡住：怎么转 psi 都不变
-    # 单次转向超时压到 1s，好让 3 次都装进总超时里（真实默认：转向 8s + 总 30s）
+def test_right_turn_when_psi_is_negative():
+    """psi=-25° → **右转 25°**，舵全为正。"""
+    w = _World(psi0=-25.0)
+    al = HeadingAligner(log=lambda *a: None)
+    _run_hd(al, w)
+    assert al.state == DONE and al.last_dir == "右转", al.summary()
+    nz = [c for c in w.cmds if abs(c) > 1e-9]
+    assert nz and all(c > 0 for c in nz), "右转不该出现负舵：%s" % set(nz)
+    assert abs(w.psi) <= float(hdg_cfg()["tol_deg"]) + 1e-6
+
+def test_target_angle_is_frozen_while_turning():
+    """**转动中不重测**：目标角在起转那一刻冻结成死数。
+
+    结构保证：转向期间 `HeadingAligner.step()` **根本收不到 psi**（入参只有
+    now_ms / yaw_telemetry / gate_lost）⇒ 转动中测到的"假已平行"不可能提前结束转向。
+    """
+    import inspect
+    params = list(inspect.signature(HeadingAligner.step).parameters)
+    for dead in ("psi_deg", "psi_fresh", "psi_stale"):
+        assert dead not in params, "转向中不该再接收 %s（一次到位的结构性保证）：%s" % (dead, params)
+    w = _World(psi0=20.0)
+    al = HeadingAligner(log=lambda *a: None)
+    seen = {"turn": 0}
+
+    def on_frame(i):
+        if al.state == TURN:
+            seen["turn"] += 1
+
+    _run_hd(al, w, on_frame=on_frame)
+    assert seen["turn"] >= 3, "转向应持续多帧（实际 %d）" % seen["turn"]
+    assert al.state == DONE and al.iters == 1, al.summary()
+    assert abs(w.psi) <= float(hdg_cfg()["tol_deg"]) + 1e-6, "转完残余 %.1f°" % w.psi
+
+
+def test_stuck_turn_times_out_then_gives_up():
+    """转不动（卡住）→ **只转一次**、超时后 GIVEUP（带残余航向继续走），不反复重试。"""
+    w = _World(psi0=60.0, stuck=True)
     al = HeadingAligner(log=lambda *a: None, turn_kwargs=dict(timeout=1.0))
-    states, logs, _ = _run_hd(al, w, frames=5000)
+    _, logs, _ = _run_hd(al, w, frames=5000)
     assert al.state == GIVEUP, "应放弃而不是死循环，实际 %s" % al.state
-    assert al.iters == int(al.cfg["max_iters"]), \
-        "转向次数应正好等于 max_iters=%d，实际 %d" % (al.cfg["max_iters"], al.iters)
+    assert al.iters == 1, "一次到位 ⇒ 只该有一次转向（实际 %d）" % al.iters
     assert any("带残余航向继续走" in s for s in logs)
 
-def test_step_cap_is_10_by_default_and_zero_means_unlimited():
-    """**逐步收敛是新默认**：出厂 cfg 每次只转 10°（转完重测再转下一档）。
-
-    2026-09-26 晚改：09-18 定的是"不设限"（测多少一次转多少），但真机实测 yaw=0.45 下转速
-    **86~106°/s**：命令 52.6° 却总共转了 ≈126°（驱动 65° + 惯性 61°），门被甩出画面。
-    现在 `max_step_deg=15` 恢复"逐步收敛"；显式配 0 仍可回到不设限的旧行为。
-    """
-    from base.settings import comm as _C
-    assert float(_C.gate.hdg.max_step_deg) == 10.0, \
-        "出厂 cfg 的 gate.hdg.max_step_deg 应为 10（逐步收敛）"
-    assert int(_C.gate.hdg.max_iters) >= 5, "步长 15° 时迭代上限要够（≥5）"
-    # max_step_deg=0（显式）→ 回到"不设限"：一帧就按测得的 60° 转
+def test_step_cap_clamps_single_turn_and_zero_means_unlimited():
+    """`max_step_deg` 只是安全钳位：0（出厂）= 按测到的 psi 转；>0 才限幅。"""
     w = _World(psi0=60.0, stuck=True)
-    al = HeadingAligner(cfg=dict(hdg_cfg(), max_step_deg=0.0), log=lambda *a: None)
-    _run_hd(al, w, frames=200)
-    assert al.last_target_deg == pytest.approx(60.0), \
-        "max_step_deg=0 = 不设限：首次目标应等于测得的 60°，实际 %.1f°" % al.last_target_deg
-    # 显式配成 25° → 每步限到 25°
+    al0 = HeadingAligner(log=lambda *a: None)
+    _run_hd(al0, w, frames=4)
+    assert al0.last_target_deg == pytest.approx(60.0), \
+        "max_step_deg=0 应不设限（实际 %.1f°）" % al0.last_target_deg
     w2 = _World(psi0=60.0, stuck=True)
     al2 = HeadingAligner(cfg=dict(hdg_cfg(), max_step_deg=25.0), log=lambda *a: None)
-    _run_hd(al2, w2, frames=200)
+    _run_hd(al2, w2, frames=4)
     assert al2.last_target_deg == pytest.approx(25.0), \
-        "配了 max_step_deg=25 应限幅到 25°，实际 %.1f°" % al2.last_target_deg
-    # 默认（cfg = 15）→ 每步 15°
-    w3 = _World(psi0=60.0, stuck=True)
-    al3 = HeadingAligner(log=lambda *a: None)
-    _run_hd(al3, w3, frames=200)
-    assert al3.last_target_deg == pytest.approx(10.0), \
-        "默认应逐步转（10°），实际 %.1f°" % al3.last_target_deg
+        "配了 max_step_deg=25 应限幅到 25°（实际 %.1f°）" % al2.last_target_deg
 
-def test_settle_waits_until_rotation_stops():
-    """静止窗：遥测 yaw 还在变时**不许**进入测量（转完还没停稳就测会得到坏角度）。"""
+def test_small_psi_is_left_alone():
+    """|psi| ≤ tol_deg ⇒ 直接 DONE，一根舵都不发（不为了 2~3° 去推一下）。"""
+    w = _World(psi0=3.0)
     al = HeadingAligner(log=lambda *a: None)
-    al.cfg.update(dict(settle_ms=400, settle_tol_deg=2.0))
-    now = 0
-    moving = [30.0]                       # 一直以 30°/帧在动
-    reached_measure_at = None
-    for i in range(40):
-        moving[0] += 30.0                 # 遥测 yaw 持续变化
-        st, _y = al.step(now, psi_deg=20.0, psi_fresh=True, yaw_telemetry=moving[0])
-        if st == MEASURE and reached_measure_at is None:
-            reached_measure_at = i
-        now += 50
-    assert reached_measure_at is None, "还在转就进了测量（第 %s 帧）" % reached_measure_at
-    assert al.state == SETTLE, "应停在静止窗，实际 %s" % al.state
+    _, logs, _ = _run_hd(al, w, frames=200)
+    assert al.state == DONE and al.iters == 0, al.summary()
+    assert all(abs(c) < 1e-9 for c in w.cmds), "不该有任何转向指令"
+    assert any("不转" in s for s in logs)
+
+def test_no_psi_no_turn():
+    """没有 PnP 目标角 ⇒ GIVEUP，不转（没有"开环盲转"这条路）。"""
+    w = _World(psi0=20.0)
+    al = HeadingAligner(log=lambda *a: None)
+    st, yaw = al.start(0, psi=None)
+    assert st == GIVEUP and abs(yaw) < 1e-9
+    assert all(abs(c) < 1e-9 for c in w.cmds)
 
 def test_gate_lost_aborts_immediately():
     """转向中整门丢失 → 立刻中止（不再发任何转向指令），本门不再尝试。"""
     w = _World(psi0=45.0)
     al = HeadingAligner(log=lambda *a: None)
-    states, logs, _ = _run_hd(al, w, frames=600, lost_after=None)
-    # 重新来一次：在第一次转向中途丢门
-    al.reset()
-    w2 = _World(psi0=45.0)
+    al.start(0, psi=w.psi)
     now = 0
-    turns = 0
     for i in range(600):
-        st, yaw = al.step(now, psi_deg=w2.psi, psi_fresh=True,
-                          yaw_telemetry=w2.yaw_tel, gate_lost=False)
-        if al.state == TURN:
-            turns += 1
-            if turns > 3:                       # 转了几帧后丢门
-                st, yaw = al.step(now, psi_deg=w2.psi, psi_fresh=True,
-                                  yaw_telemetry=w2.yaw_tel, gate_lost=True)
-                assert al.state == ABORTED
-                assert abs(yaw) < 1e-9, "丢门时本帧不许再给转向舵"
-                break
-        w2.send(yaw)
+        st, yaw = al.step(now, yaw_telemetry=w.yaw_tel, gate_lost=False)
+        if al.state == TURN and i > 3:                  # 转几帧后丢门
+            st, yaw = al.step(now, yaw_telemetry=w.yaw_tel, gate_lost=True)
+            assert al.state == ABORTED
+            assert abs(yaw) < 1e-9, "丢门时本帧不许再给转向舵"
+            break
+        w.send(yaw)
         now += 50
     assert al.state == ABORTED and al.finished(), "中止后应视为已结束（放行到下一步）"
 
 def test_disabled_switches_off_completely():
-    """`enable: false` → 永远 finished、不发任何指令（可一键回退到旧行为）。"""
+    """`enable: false` → 永远 finished、不发任何指令（一键关掉正航向）。"""
     al = HeadingAligner(cfg=dict(hdg_cfg(), enable=False), log=lambda *a: None)
     assert al.finished()
-    st, yaw = al.step(0, psi_deg=30.0, psi_fresh=True, yaw_telemetry=0.0)
+    st, yaw = al.step(0, yaw_telemetry=0.0)
     assert st == al.state and abs(yaw) < 1e-9
 
+def test_no_telemetry_never_turns():
+    """**没有遥测 yaw ⇒ 不转**（ABORTED，且全程零舵）。
 
-def test_stale_measurement_is_not_used():
-    """**不新鲜的 psi 不算测量**（p3p / 旧帧 / 非 full）→ 攒不够就 GIVEUP，绝不乱转。"""
-    w = _World(psi0=30.0)
-    al = HeadingAligner(log=lambda *a: None)
-    states, logs, _ = _run_hd(al, w, frames=3000, psi_fresh=False)
-    assert al.state == GIVEUP, "应放弃，实际 %s" % al.state
-    assert al.iters == 0, "没有可靠测量就不该转，实际转了 %d 次" % al.iters
-    assert all(abs(c) < 1e-9 for c in w.cmds), "不该有任何转向指令"
-    assert any("没攒够" in s for s in logs)
-
-    # 没有遥测：2026-09-23 起**默认盲转**（`blind_enable=true`）—— 照样把航向转正，
-    # 只是单次转角精度取决于假设角速率（`motion.turn_pid.blind_rate_dps`），转完用 psi 复核再迭代。
-    # 现场依据：板端日志里唯一的 HDG 尝试在 settle 停了 2.98s ≈ wait_tel_ms 就 giveup，
-    # 此后本门 hdg_skip=done 再没转过（"hdg 一直 giveup"）。
-    w2 = _World(psi0=20.0)
-    al2 = HeadingAligner(log=lambda *a: None)
-    _run_hd(al2, w2, frames=8000, telemetry=False)
-    assert al2.state in (DONE, GIVEUP), "无遥测盲转也要走完，不能卡死，实际 %s" % al2.state
-    assert any(abs(c) > 1e-9 for c in w2.cmds), "盲转模式必须真的发转向指令"
-    assert al2.iters >= 1, "盲转同样要记账迭代次数"
-
-    # 想回到旧行为（无遥测 ⇒ 一根舵都不发、直接放弃）：把开关关掉
-    w3 = _World(psi0=20.0)
-    al3 = HeadingAligner(log=lambda *a: None)
-    _run_hd(al3, w3, frames=8000, telemetry=False, cfg_over={"blind_enable": False})
-    assert al3.state == GIVEUP, "blind_enable=false 应保持旧行为，实际 %s" % al3.state
-    assert all(abs(c) < 1e-9 for c in w3.cmds), "旧行为下不该有任何转向指令"
+    这条守的是用户定的原则：转向只允许闭环，**不留开环盲转备案**
+    （`blind_enable` 那种"角度÷假设角速率"定时盲转已删除，不许复活）。
+    """
+    w = _World(psi0=20.0)
+    al = HeadingAligner(log=lambda *a: None, turn_kwargs=dict(wait_tel_s=0.5))
+    _, logs, _ = _run_hd(al, w, frames=400, telemetry=False)
+    assert al.state == ABORTED, "无遥测应中止，实际 %s" % al.state
+    assert all(abs(c) < 1e-9 for c in w.cmds), "无遥测时一根舵都不许发：%s" % set(w.cmds)
+    assert any("拒绝转向" in s for s in logs)
 
 def test_p3p_frames_do_not_feed_the_filter():
-    """**p3p 的 psi 不许进滤波器**（3 点解欠定，实测航向 std 64~69°）。
+    """**p3p 的 psi 不许进滤波器**（3 点解欠定，航向 std 极大）。
 
     做法：同一个 GateTask 先喂一帧 full（建立测量），再喂一帧 p3p（旋转过的、会测出别的值）
     → `_hdg_deg` / `_hdg_ms` 必须保持 full 那帧的值不变。
@@ -431,13 +433,3 @@ def test_p3p_frames_do_not_feed_the_filter():
         task.process(frame, 1200 + 100 * k)                # 全是 p3p
     assert task._hdg_deg == kept and task._hdg_ms == kept_ms, \
         "p3p 帧污染了航向测量（%.1f → %.1f）" % (kept, task._hdg_deg)
-
-    # 样本判据只有一条：**必须 full 帧**。
-    # ⚠️ 2026-09-23（用户定）：`fresh_ms` 的过期比较已删 —— 它本来就是空转的
-    #    （full 帧当帧就把 `_hdg_ms` 刷成 now ⇒ age≡0；非 full 帧在 mode 判据就 return False）
-    #    ⇒ 现在**时间不再影响**样本可用性，只有 mode 影响。
-    assert task._hdg_fresh("full", kept_ms) is True
-    assert task._hdg_fresh("full", kept_ms + 10 * 3600 * 1000) is True, \
-        "过期不再判死（fresh_ms 已不参与判据，见 gate/gate_task.py::_hdg_fresh 注释）"
-    assert task._hdg_fresh("p3p", kept_ms) is False, "p3p 任何时候都不算可用测量"
-    assert task._hdg_fresh("coarse", kept_ms) is False, "coarse 同样不算可用测量"

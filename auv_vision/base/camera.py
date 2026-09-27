@@ -3,8 +3,17 @@
 
 配置：cfg/vision.yaml camera.front / camera.down（各自 type/device/宽高/fps/标定）。
 调用：create_camera("front" | "down")；返回对象仅实现 read()。
+
+**视频回放**（离线复现/回归；默认行为不变，只在设了环境变量时生效）：
+    AUV_SIM_MODE=1 AUV_CAM_VIDEO=/path/clip.mp4 [AUV_CAM_VIDEO_FPS=30] \
+        AUV_TASK_LOG=log/replay.jsonl python3 main.py --task gate
+  · `AUV_CAM_VIDEO`：把前视相机源换成该视频文件（cfg 一个字段都不动）；
+  · **必须**同时 `AUV_SIM_MODE=1`（只打印、不发串口），否则回放会真的驱动船；
+  · 主循环没有帧率节流 ⇒ 回放按视频原生 fps（或 AUV_CAM_VIDEO_FPS）自己节拍，
+    保证时间基与真机一致（HDG 的 PID/超时都按真实时间算）。
 """
 import os
+import time
 
 import numpy as np
 
@@ -27,6 +36,77 @@ class Camera(object):
     def close(self):
         """释放相机资源（子类按需覆写）。"""
         pass
+
+
+# ---------------------------------------------------------------------------
+# 视频文件回放（离线复现：把一段录制视频当成前视相机）
+# ---------------------------------------------------------------------------
+class VideoFileCamera(Camera):
+    """把视频文件当相机用（见模块头「视频回放」）。**只用于离线复现/回归**。
+
+    要点：
+      · 打开视频**不指定后端**（`cv2.VideoCapture(path)`）⇒ 文件与设备都能开；
+      · 主循环没有节流 ⇒ 这里按 `play_fps` 自己睡，避免"以解码速度飞快跑完"导致时间基被压缩；
+      · 读完返回 None（只打印一次），主循环空转直到任务自身超时/过门结束。
+    """
+
+    def __init__(self, cfg, path, fps=None):
+        if not HAS_CV2:
+            raise RuntimeError("需要 opencv-python(cv2) 才能读视频")
+        super().__init__(cfg.width, cfg.height, cfg.fps)
+        self.path = str(path)
+        self._cap = cv2.VideoCapture(self.path)
+        if not self._cap.isOpened():
+            raise RuntimeError("无法打开视频 %s" % self.path)
+        try:
+            native = float(self._cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        except Exception:
+            native = 0.0
+        want = float(fps or 0.0)
+        self.play_fps = want if want > 0 else (native if 5.0 <= native <= 120.0 else float(self.fps))
+        self.frames = 0            # 已消费到的帧号（含被丢掉的）
+        self.dropped = 0           # 因消费者慢而跳过的帧数（真机会自然丢帧，这里显式做）
+        self._t0 = None
+        self._eof_logged = False
+        print("[CAM] 视频回放：%s（原生 %.1f fps ⇒ 按 %.1f fps 节拍）"
+              % (self.path, native, self.play_fps))
+
+    def read(self):
+        """**Real-time 语义**（与真机相机一致）：消费者慢 ⇒ 丢帧给你最新的一帧；消费者快 ⇒ 等到该帧的时刻。
+
+        为什么必须这样：主循环是"读一帧→处理一帧"，真机上处理慢就自然丢帧（时间基仍是真实时间）。
+        若顺序回放不丢帧，19.8s 的片子会被拉成几十秒 ⇒ HDG 的 PID/超时/循环全变味，复现就失真了。
+        """
+        if self._t0 is None:
+            self._t0 = time.monotonic()
+        elapsed = time.monotonic() - self._t0
+        want = int(elapsed * self.play_fps)          # 此刻"直播"应该播到第几帧
+        while self.frames < want:                    # 落后 ⇒ 丢帧（grab 不解码，便宜）
+            if not self._cap.grab():
+                break
+            self.frames += 1
+            self.dropped += 1
+        due = self._t0 + (self.frames + 1) / max(1e-6, self.play_fps)
+        wait = due - time.monotonic()
+        if wait > 0:                                 # 超前 ⇒ 等到该帧的时刻
+            time.sleep(min(wait, 1.0))
+        ok, buf = self._cap.read()
+        if not ok:
+            if not self._eof_logged:
+                print("[CAM] 视频回放结束：读出 %d 帧、跳过 %d 帧" % (self.frames, self.dropped))
+                self._eof_logged = True
+            time.sleep(0.05)
+            return None
+        self.frames += 1
+        if buf.shape[1] != self.width or buf.shape[0] != self.height:
+            buf = cv2.resize(buf, (int(self.width), int(self.height)))
+        return buf
+
+    def close(self):
+        try:
+            self._cap.release()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +279,10 @@ def create_camera(which, fallback_sim=None):
     typ = cfg.type
     fallback = S.vision.camera.fallback_sim if fallback_sim is None \
         else fallback_sim
+    vid = os.environ.get("AUV_CAM_VIDEO")
+    if vid and which == "front":
+        # 回放：显式环境变量优先于 cfg（cfg 不动；默认不设 = 行为完全不变）
+        return VideoFileCamera(cfg, vid, fps=os.environ.get("AUV_CAM_VIDEO_FPS"))
     try:
         if typ == "sim":
             return SimCamera(which)

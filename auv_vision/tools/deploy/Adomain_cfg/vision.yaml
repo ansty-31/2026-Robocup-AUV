@@ -1,0 +1,167 @@
+# =============================================================
+# vision.yaml — 纯视觉参数（相机 / 图像补偿 / 模型推理 / 仿真 / 任务视觉目标）
+# 仅供本工程识别推理链路使用；训练数据集制作在 PC 工程（RDKX5-YOLOv11n-）
+# =============================================================
+
+camera:
+  # 真机相机打开失败时自动退化到该相机的 sim（软自适应，联调友好）
+  fallback_sim: true
+  front:                 # 前视：撞球/过门使用
+    type: usb            # sim | usb
+    device: 0            # usb: 0 或 /dev/videoN
+    width: 1280
+    height: 720
+    fps: 30
+    calibration: cfg/front_camera.yaml   # 去畸变标定 yaml（null=跳过）
+    # ★A 域实验（2026-09-27）：**PnP 专用标定**（新内参 fx=1207.6，09-23 水下重标）。
+    #   上面那份 calibration 是**老内参 fx=782.5**（AUV_4 的配套域，只用于去畸变/检测，
+    #   本身不准：可逆半径 520 px < 画幅角 753 px）。两者不同 ⇒ gate_decode 用
+    #   common/domain_map.py 把角点从检测域严格映射到 PnP 域，于是"老权重照用、
+    #   米制几何按新内参"。留空或填同一个文件 ⇒ 不映射（= 加该模块之前的行为）。
+    #   验证：python3 tools/check/check_domain_map.py
+    calibration_pnp: cfg/front_camera_pnp.yaml
+  down:                  # 下视(IMX415 MIPI)：保留（录素材/未来任务用）；**当前策略不使用下视**
+    type: sim            # sim | mipi
+    device: /dev/video1
+    width: 640
+    height: 360
+    fps: 20
+    calibration: null
+
+stream:
+  # 前视画面推流（零转码 MJPEG；推流端 manual/stream.py + base/camera.py）。
+  # 语义：**谁打开相机谁顺带推流**（UVC 只允许单进程取流）→ 开录像/识别都能同时推、不争相机。
+  # 实测代价与方案见 doc/前视USB相机低延迟推流方案.md；临时开：AUV_STREAM=1（env 优先于本开关）。
+  enable: false            # 默认关（调任务时一般在板端直接看画面）
+  host: 192.168.137.2      # 水面 PC 的 IP（接收脚本/ffplay 跑在这台机器上）
+  port: 5000               # UDP 端口（PC: ffplay -f mjpeg "udp://@:5000"）
+  stream_fps: 30           # 推流帧率上限（相机 720p MJPG 有 60fps 档，可按带宽调）
+  pkt: 8000                # UDP 切片大小（1316 更保守，8000 更省 CPU）
+
+image:
+  # 识别前图像链路（推理统一入口）
+  # ★ chain：**识别方案（域）**，决定 remap 与 resize/enhance 的先后，**必须与门权重同域**：
+  #   D = 新方案（resize640 → enhance → remap@640）↔ 阶段一 `g240_i16` 权重（本仓库默认）
+  #   A = 原方案（remap@720p → resize640 → enhance）↔ AUV_4 权重（配 clahe_clip: 0.5）
+  #   跨域掉点：拿 A 权重喂 D 链的图像，角点会飘。板端两仓库分工见 tools/README.md §6。
+  chain: A
+  undistort: true                # true: cv2.remap 去畸变（需对应 camera.*.calibration）
+  white_balance_bgr: [1.0, 1.05, 1.15]   # 白平衡通道增益（B,G,R）轻微
+  clahe_clip: 0.5                # ★A 域：老值 0.5（D 域 2026-09-23 起关闭为 0，省 ~8 ms/帧）
+                                 # ⚠️ A 域（chain: A / AUV_4）**必须 0.5**，不是 0
+  gamma: 0.85                    # gamma LUT（<1 提亮，1.0=关闭）
+
+color:
+  line_red:                # 下视红色标示线（任务二）
+    rgb: {r_min: 150, g_max: 90, b_max: 90}     # 无 cv2 时的 RGB 近似
+    hsv: {h1: [0, 12], h2: [168, 180], s_min: 90, v_min: 90}  # cv2 双区间
+    min_area_ratio: 0.002
+
+model:
+  mode: hbm_runtime               # mock | hbm_runtime | onnx（mock=虚拟测试）
+  format: rdk_x5_bin       # RDK X5 模型必须是 X5 OE 工具链(hb_mapper makertbin)产出的 .bin
+                           # 注意：.hbm 是车载 J5/J6/S100(Nash) 格式，X5(Bayes-e) 无法加载！
+  # ===== 双权重（ball 与 gate 分离，各自独立）=====
+  path: models/yolo11n_detect_bayese_640x640_nv12.bin
+  strict_x5_bin: true      # true: 拒绝 .hbm 后缀并提示正确编译链路
+  input_size: 640          # 模型方形输入
+  input_name: images         # hbm_runtime 输入名（板端报错时填模型实际名）
+  fast_nv12: true         # true: 用 cv2 快速 NV12(快~30x, 标准BT.601色度)；false: 原 numpy 版
+  score_threshold: 0.5
+  nms_threshold: 0.45
+  labels: [blue_ball, gate, red_ball]   # 类别顺序必须与训练/导出一致（决定解码类别）
+  # 权重② gate keypoint：ball 走 model.path、gate 走 task_models.gate，互不影响。
+  # path 为空 → gate 用 mock 联调 / 或跳过（取决于 model.mode）
+  task_models:
+    gate: {path: models/gate_kpt_auv4_bayese_640x640_nv12.bin,
+    # ★ 本仓库 = 板端**旧仓库（A 域，原识别方案）**：门权重 AUV_4（md5 `d38b803e…`）。
+    #   配套：image.chain: A（remap@720p → resize640 → enhance）+ image.clahe_clip: 0.5
+    #   + 老内参 cfg/front_camera.yaml（fx 782.5）+ 老阈值（score 0.5 / conf_thr 0.7）。
+    #   两个**新功能**（转角度、解码后约束）随代码进来，其键取新值：
+    #   `gate.postproc.*`（解码后约束）、`comm.gate.hdg.*` + `comm.motion.turn_pid.*`（转角度）。
+    #   分工与同步方式：tools/README.md §6 / tools/deploy/sync_Adomain_repo.sh。
+           kind: keypoint, labels: [gate],
+           kpt_order: [TL, TR, BR, BL]}   # 门 keypoint 权重(4角点)
+    # ★ 2026-09-26 换代：**阶段一 g240_i16 版**（md5 `ef52c18b…`，3,938,787 B）。
+    #   契约与后处理约束见 **`doc/gate_pose_decode_spec.md`**（输入 NV12/640/squish、输出
+    #   9 张量 float NHWC、kpt `x_px = x_cell × stride` 且 **v 要自己 sigmoid**）。
+    #   上一代 `gate_kpt_bayese_640x640_nv12.bin` 已移入 `bak/bakup_auv5/`（回退改回这一行即可）。
+
+mission:
+  target_color: blue       # 任务目标球颜色：red | blue
+
+sim:                       # 虚拟相机（前视/下视各自仿真）
+  noise: 8
+  front: {}                # 前视虚拟：噪声底（目标识别走 mock 检测）
+  down:
+    red_line: {enable: true, width: 30, dx_offset: 0.0}
+  ball:                    # mock 检测器出球序列
+    appear_frame: 5
+    ratio_start: 0.05
+    ratio_step: 0.006
+    hit_ratio: 0.85
+    center_jitter: 0.03
+
+debug:                     # 运行监测（仅本工程调试用）
+  show_video: true          # 弹窗显示带识别框的相机画面（无 DISPLAY/cv2 时自动跳过）
+  overlay_text: true        # 画面叠加 状态/任务信息
+gate:                         # 过门（§3 几何 / keypoint / PnP 参数）
+  geometry: {frame_w: 0.70, frame_h: 0.50, bar_width: 0.05,   # ★A 域：老标尺（D 域按卷尺实测改为 0.77/0.56）
+             sym_bars: true, body_center_offset: 0.0}
+             # frame_w/frame_h：门框**外轮廓**尺寸(m)，PnP 深度的**唯一标尺**。
+             #   ★ **陆上实验（2026-09-22 21:00 前）确认的最终值 = 0.77 × 0.56**
+             #     （卷尺实测外缘 77×56 cm，管外径 5 cm；`ruler_calib.py --gate` 反演 W_eff = 0.78~0.80）。
+             #     旧值 0.70/0.50 让 z 读小 9.1%（0.70/0.77）⇒ 那时 `z.cross=0.7` 实际在真 0.77 m 触发；
+             #     换到 0.77/0.56 后，`comm.gate.z.cross` 必须**同步**设成 0.77 才是同一个物理触发点。
+             #   ⚠️ 水下还要用水下那份内参（`cfg/front_camera.yaml`，fx=782.5）验证折射因子 k。
+             # body_center_offset：相机—机身安装偏置(m)，**只读入、不参与运算**（未标定）。
+             # bar_width/sym_bars：未参与运算（keypoint 只标外轮廓四角，留作记录）。
+  det: {conf: 0.5}   # ★A 域：老候选框阈值（= 老 model.score_threshold；D 域 0.6）
+      # ★ 2026-09-26（`doc/gate_pose_decode_spec.md` §6 `CONF`）：**候选框 score 阈值，只作用于 gate**。
+      #   刻意**不复用** `model.score_threshold`（当前 0.6，是 ball/gate **共用**的；
+      #   它被谁改过都别指望 gate 跟着变）——给 gate 调阈值不该顺手改掉撞球的行为。
+      #   `preview_detect.py --conf` 会覆盖这里。
+  postproc: {edge_tol: 0.10, min_edges: 2, geom_check: true}
+      # ★ 解码后处理（规范 §4；实现 `gate/gate_postproc.py`，调用点 `gate_decode.detect`）：
+      #   edge_tol  = **重复框**判据里"边重合"的容忍 = 该比例 × 小框短边；
+      #   min_edges = 至少几条边重合才算同一个门 → 丢**小框**（且要求小框 conf 更低）。
+      #   ⚠️ 判据**不是包含关系**：远处第二个门可能落在近门框内，用包含会误删真门（规范实测误删 15 个）。
+      #   geom_check = 四角实例的"顺序合法 + 不自交"过滤（触发率 0~1.5%，用来挡退化实例）。
+  select: {mode: near}
+      # ★ 选门策略（规范 §4，2026-09-26 用户定）：
+      #   near   = **近距离优先**（默认）。没有逐门 PnP 之前用**框宽**做测距代理（z ≈ fx·W/w，单调）；
+      #            并列再比可信角点数/置信和/score。⚠️ 代理不是真测距（未验证），斜门/倒影下需实测复核。
+      #   corner = 2026-09-18 的旧行为（角点更全更可信优先，防水面倒影形成的"第二个门框"抢门）。
+      #            要回退成旧行为：把这里改成 corner（一行，不动代码）。
+  keypoint: {conf_thr: 0.7, vis_thr: 0.5}   # ★A 域：老工作点（D 域随阶段一权重改为 0.8/0.5）；与 comm 无对应项
+      # ★ 2026-09-26：随阶段一权重换代，按 `doc/gate_pose_decode_spec.md` §6 的工作点重设
+      #   （`V_MIN = 0.8`）——旧值 0.9/0.7 是给上一代权重现场试出来的，不是本模型的标定值。
+      # conf_thr：**任务侧**可信下限（= 规范的 `V_MIN`）——判 mode / 选门 / 计数（gate_task）。
+      #   4 个角点都 ≥ 它才算 `mode == full`；**psi 只吃 full 帧** ⇒ 直接决定正航向能不能启动。
+      #   ⚠️ 别改回 0.5（鬼点/倒影会被当真角点）。
+      # vis_thr ：**解码期**硬门限——低于它的角点在解码阶段 conf 被清 0，下游看不到。
+      #   刻意**与 conf_thr 解耦且更低**（0.5 < 0.8）：规范 §7.2 说低 v 角点的**坐标是垃圾、
+      #   不许参与 PnP**，但"看不见它"就没法诊断门为什么不全 ⇒ 让它留在画面/日志里，
+      #   由 conf_thr 这一层保证它进不了 mode/PnP。null = 沿用 conf_thr（历史行为）。
+      # ⚠️ 代码兜底 `gate_task._D_KPT` 必须与 conf_thr 同值（有用例 test_gate_defaults_match_cfg 守）。
+      # 阈值实测依据见 gate/过门-状态机与参数.md §9.2；挑阈值用
+      #   `preview_detect.py --gate-kpt`（它按 vis_thr=0.0 显示模型原始置信度，不受这里影响）。
+  kpt_mem: {enable: false, alpha: 0.4, beta: 0.1, valid_ms: 800,
+            k_sigma: 3.0, r_min_px: 10.0, r_max_px: 80.0,
+            sigma_init_px: 8.0, sigma_lambda: 0.15, sigma_floor_px: 0.5,
+            w_min: 0.0, conf_floor: 0.05, recall_conf: 0.45, conf_decay: 0.35,
+            max_missing_frames: 5, min_frames: 2}
+            # 门角点"逐点软融合"——**可选功能，默认关**（enable: false → 角点单帧直用，
+            #   等价于没集成这个功能）。开关优先级：AUV_GATE_KPT_MEM > 这里 enable > 兜底 false。
+            # ⚠️ 板端曾因 `enable: flase`（拼写错）被 bool('flase')=True 而**实际一直开着**
+            #    → 现在用 cfgnode.flag() 按字符串语义解析，开关本身也要核对。
+            # ⚠️ recall_conf(0.45) **必须 < keypoint.conf_thr**，否则"回忆点"会被 mode 判成
+            #    真实可见 → 拿外推点解 PnP 必失败。
+            # 算法（置信度加权 / 历史分布定半径 / α-β 平均 / 短消失回忆 / 长丢失衰减）与
+            # 实测见 doc/算法说明-gate-角点逐点融合滤波.md；调参影响见 过门-状态机与参数.md §4.2。
+  pnp: {reproj_px: 20.0, z_min: 0.2, z_max: 15.0, refine: true,
+        max_z_jump_m: 0.8}       # 帧间 z 突变>该值视为错解弃帧(防满速冲门)
+  # reproj_px：候选位姿重投影 RMS 上限(px)。**实测 8px 会拒掉约 88% 候选位姿**
+  #   （模型四角固有残差 ≈10~18px），现场放宽到 20；candidate 可用率与选值理由见
+  #   gate/过门-状态机与参数.md §9.2。⚠️ 位姿被拒 → 强制退化 coarse → 居中收敛不了。
+  #   安全网：pnp.max_z_jump_m 弃帧 + 上帧位姿消歧（放宽它不等于放任错解）。

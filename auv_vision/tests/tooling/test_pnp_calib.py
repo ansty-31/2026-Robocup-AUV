@@ -130,7 +130,7 @@ def test_calib_recovers_correct_scale_when_cfg_matches(tmp_path):
 def test_calib_recovers_real_door_size_from_wrong_cfg(tmp_path):
     """**核心用例**：cfg 标 0.70×0.50（外轮廓），真实是 0.60×0.40（开口内缘）。
 
-    这是现场最可能的情况（历史观察：PnP 解出的 z 比粗估大 ~20%）。工具必须报出
+    这是现场最可能的情况（门框外轮廓 vs 开口内缘）。工具必须报出
     ① a ≈ 1.17（z 系统性偏大）② 建议的门宽 ≈ 0.60、门高 ≈ 0.40。
     反演不出来 = 工具没在反演标尺，那这份实验就白做了。
     """

@@ -29,7 +29,7 @@ PnP 的深度 `z_meas = fx_cfg·W_cfg/Δu` 里有两个未知量在只看门框�
 -------------------------
   · 每次解算至少 **2 档**（3 档可做留一校验）；`skew` 超过 ±2% 的档**先别用**（靶面没正对）；
   · `fx` 的用途：与 `vision.camera.front.calibration` 里的 fx 比 ⇒ `k_med = fx_cfg/fx_med`；
-    水下解出 `fx_water ≈ 782.5 ± 5%` ⇒ 现用标定在水里仍有效，跑船的米制阈值不用改；
+    水下解出的 `fx_water` 若与 cfg 差距在几个百分点内 ⇒ 现用标定在水里仍有效，米制阈值不用改；
   · `c` 的用途：之后所有卷尺读数都按 `z_true = z_tape + c` 换算。
 """
 from __future__ import annotations
@@ -64,8 +64,7 @@ def z_from_name(s):
 def du_from_points(p):
     """由三个刻度点算跨度(px)：**欧氏距离**，任意方向都成立。
 
-    ⚠️ 早期版本用 `p[2][0]-p[0][0]`（x 差）—— 卷尺竖着放时它直接得 0
-    （2026-09-22 现场实测：竖向 379 px 的真实跨度被算成 2 px）。靶面与光轴垂直时
+    ⚠️ 别改回 `p[2][0]-p[0][0]`（x 差）—— 卷尺竖着放时它直接得 0。靶面与光轴垂直时
     `z=const` 平面到图像是均匀缩放，所以欧氏距离 = `(f/z)·L`，与靶线在画面里的方向无关。
     """
     q = np.asarray(p, dtype=np.float64).reshape(-1, 2)
@@ -112,7 +111,7 @@ def load_records(paths):
                         skipped += 1
                         continue
                     du = r.get("du")
-                    # ⚠️ **优先用 `p` 重算**：`du` 可能是早期版本（把竖向跨度算成 x 差）写下的，
+                    # ⚠️ **优先用 `p` 重算**：`du` 可能是把竖向跨度算成 x 差的旧版本写下的，
                     #    三点才是原始观测。两者不一致时以 `p` 为准，这样老记录自动被治好。
                     if r.get("p"):
                         du = du_from_points(r["p"])            # 欧氏距离（任意方向）
@@ -221,7 +220,7 @@ def solve(recs):
         for i in range(len(recs)):
             sub = [r for j, r in enumerate(recs) if j != i]
             # ⚠️ 子集必须**保留每个轴的档**，否则那个焦距在子集里根本没有约束
-            #    （2026-09-22 自检：丢掉某轴唯一的档后，留一会给出 fx=-223 这种垃圾）。
+            #    （丢掉某轴唯一的档后，留一会给出 fx=-223 这种垃圾）。
             if {r["axis"] for r in sub} != set(axes):
                 continue
             try:

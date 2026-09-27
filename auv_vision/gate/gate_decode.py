@@ -75,8 +75,8 @@ def decode_yolo11_kpt(outputs, labels, frame_w, frame_h,
     kch = _KPT_PER_PT * kpt_dim
     bins = np.arange(reg_max, dtype=np.float32)
     # ⚠️ 按 **(网格 g, 通道 C)** 自描述分组，**不依赖张量顺序**。
-    #    2026-09-26 板端实测：同一个 bin 用 hbm_runtime 跑两次，返回 dict 里 9 个张量的
-    #    排列都不一样（形状都对、位置乱序）⇒ **任何按顺序取输出的写法都会静默错**。
+    #    排列都不一样（形状都对、位置乱序）⇒ **任何按顺序取输出的写法都会静默错**
+    #    （hbm_runtime 同一 bin 连跑两次即复现，见 doc/注释历史.md）。
     #    ONNX 文件里的顺序（output0/566/567/…，见 doc/gate_pose_decode_spec.md §2）只是
     #    导出清单，不是运行时保证。
     grids = {}
@@ -173,7 +173,7 @@ class GateKeypointBackend(object):
         #   ④ 0.5
         self._vis_thr = self.resolve_vis_thr(vis_thr)
         # 预处理器只建一次（remap 映射缓存随实例复用；原先每帧新建 → 每帧白扔一次
-        # initUndistortRectifyMap，1280x720 下实测 ~1.3ms/帧）
+        # initUndistortRectifyMap，1280x720 下约 1.3 ms/帧）
         from common.preprocess import ModelPreprocessor
         self._pre = ModelPreprocessor(
             calib_path=S.vision.camera.front.calibration)

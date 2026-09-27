@@ -1,7 +1,7 @@
 #!/bin/bash
 # check_board_parity.sh — 检查"本地代码 == 最后移植到板端的代码"
 #
-# 用法（在 tools/ 下或任意位置都行；工程根自动定位到上一级）：
+# 用法（任意位置都行；脚本自己定位工程根与清单目录）：
 #   bash tools/deploy/check_board_parity.sh              # 本地 vs tools/deploy/board_parity.md5（无需板子，毫秒级）
 #   AUV_SSH=/home/ansty/RDKX5/.ssh_x5.sh \
 #     bash check_board_parity.sh --board          # 再与板端比对（**1 次 SSH 批量取 md5**，秒级）
@@ -14,7 +14,7 @@
 #   ② --board 也全绿 = 板端确实装的就是这份代码。
 #   只读操作：不写板端、不改本地。
 set -u
-# 本脚本在 tools/deploy/ 下 → 工程根 = 上**两**级；清单与驱动脚本同目录（tools/deploy/）
+# 工程根 = 本脚本目录的上**两**级；清单与驱动脚本同目录（tools/deploy/）
 TOOLS_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$TOOLS_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
@@ -36,6 +36,20 @@ done
 
 [ -f "$MANIFEST" ] || { echo "缺少 $MANIFEST"; exit 2; }
 
+# 「本地≠板端是**故意的**」分叉清单（与 deploy_to_board.sh 读同一个文件）：
+#   ★ 命中的文件不算不一致 —— 否则 --board 永远报 [板端不同] 并 exit 1，
+#     "检查长期红着"就等于没有检查。分叉是有意的，就明确报出来，别报成失败。
+FORK_FILE="$TOOLS_DIR/board_forks.txt"
+FORKS=""
+if [ -f "$FORK_FILE" ]; then
+  FORKS=$(sed -e 's/#.*//' "$FORK_FILE" | awk 'NF{print $1}' | sort -u)
+fi
+is_fork() {
+  local x="$1" f
+  for f in $FORKS; do [ "$f" = "$x" ] && return 0; done
+  return 1
+}
+
 # 解析一行 → "md5<TAB>路径<TAB>是否板端实测(1/0)"；注释/空行不输出
 parse() {
   awk '
@@ -53,8 +67,10 @@ parse() {
 echo "==== [1/2] 本地 vs $MANIFEST ===="
 local_bad=0; n=0
 unver=0; unver_list=""
+n_fork=0; fork_list=""
 while IFS=$'\t' read -r md5 f verified; do
   [ "$ONLY_VERIFIED" = "1" ] && [ "$verified" != "1" ] && continue
+  if is_fork "$f"; then n_fork=$((n_fork+1)); fork_list="$fork_list $f"; continue; fi
   n=$((n+1))
   if [ ! -f "$f" ]; then
     echo "  [缺失] $f"; local_bad=$((local_bad+1)); continue
@@ -67,13 +83,16 @@ while IFS=$'\t' read -r md5 f verified; do
     local_bad=$((local_bad+1))
   fi
   # ⚠️ 无方括号 = 清单里只记了"本地值"，**没有板端核对证据**。
-  #    这类条目比的是"本地 vs 本地"，不能当作"与板端一致"（2026-09-18 踩过：
-  #    板端把 kd 改成 0.05，本地报"逐字节一致"）。必须单独暴露出来。
+  #    这类条目比的是"本地 vs 本地"，不能当作"与板端一致"（板端手改过本地是看不见的）。
   if [ "$verified" != "1" ]; then
     unver=$((unver+1)); unver_list="$unver_list $f"
   fi
 done < <(parse)
 echo "  检查本地文件 $n 个，不一致 $local_bad 个"
+if [ "$n_fork" != "0" ]; then
+  echo "  · 故意分叉 $n_fork 个（本地≠板端，见 tools/deploy/board_forks.txt，不算不一致）："
+  for f in $fork_list; do echo "        [分叉] $f"; done
+fi
 if [ "$local_bad" = "0" ]; then
   if [ "$unver" = "0" ]; then
     echo "  ✓ 本地与\"最后同步到板端的状态\"逐字节一致（全部 $n 个都有板端核对记录）"
@@ -88,9 +107,8 @@ else
 fi
 
 # 1b) **本地有、清单没有**的源文件 —— 这类文件 deploy_to_board.sh **永远不会上传**
-#     ⚠️ 2026-09-20 加：新文件（common/turn_deg.py / gate/heading_align.py …）漏在清单外时，
-#        部署会把"新 gate_task.py + 缺 heading_align.py"这种半套状态推上板 → 板端 import 即崩；
-#        而本脚本原先只遍历清单、**完全看不见这些文件**（静默通过）。
+#     ⚠️ 别省掉这段：新文件漏在清单外时，部署会把"新 gate_task.py + 缺 heading_align.py"
+#        这种半套状态推上板 → 板端 import 即崩；而只遍历清单的检查**看不见这些文件**（静默通过）。
 #     收录规则与 --write 里那段 find 保持一致（改了那边记得同步这里）。
 new_list=""
 while IFS= read -r f; do
@@ -105,7 +123,9 @@ done < <(find . -type f \( -name '*.py' -o -name '*.sh' -o -name '*.md' -o -name
     -not -path './bak/*' -not -path './log/*' -not -path './rec/*' \
     -not -path './models/*' -not -path '*/__pycache__/*' -not -name '*.pyc' \
     -not -name 'check_board_parity.sh' -not -name 'board_parity.md5' \
-    -not -name 'deploy_to_board.sh' -not -name 'tidy_board_bak.sh' \
+    -not -name 'deploy_to_board.sh' -not -name 'tidy_board_bak.sh' -not -name 'board_forks.txt' \
+      -not -name 'board_forks_Adomain.txt' -not -name 'sync_Adomain_repo.sh' \
+      -not -path './tools/deploy/Adomain_cfg/*' \
     -not -name 'ssh_x5*.sh' -not -name 'askpass*.sh' \
     -not -name '.*' | sed 's|^\./||' | sort)
 new_cnt=0
@@ -132,11 +152,12 @@ if [ "$BOARD" = "1" ]; then
   trap 'rm -f "$TMPL" "$TMPR" "$TMPC"' EXIT
   parse > "$TMPL"
 
-  remote_bad=0; rn=0
+  remote_bad=0; rn=0; rn_fork=0; rfork_list=""
   if [ "$SLOW" = "1" ]; then
     # 老路径：每个文件一次 SSH（几十秒~几分钟）
     while IFS=$'\t' read -r md5 f verified; do
       [ "$ONLY_VERIFIED" = "1" ] && [ "$verified" != "1" ] && continue
+      if is_fork "$f"; then rn_fork=$((rn_fork+1)); rfork_list="$rfork_list $f"; continue; fi
       rn=$((rn+1))
       r=$(timeout 20 $AUV_SSH "md5sum $BOARD_DIR/$f 2>/dev/null | cut -d' ' -f1" 2>/dev/null </dev/null | tr -d '\r\n')
       if [ -z "$r" ]; then
@@ -161,6 +182,7 @@ if [ "$BOARD" = "1" ]; then
     while read -r m p; do RM["$p"]="$m"; done < "$TMPR"
     while IFS=$'\t' read -r md5 f verified; do
       [ "$ONLY_VERIFIED" = "1" ] && [ "$verified" != "1" ] && continue
+      if is_fork "$f"; then rn_fork=$((rn_fork+1)); rfork_list="$rfork_list $f"; continue; fi
       rn=$((rn+1))
       r="${RM[$f]:-}"
       if [ -z "$r" ]; then
@@ -171,7 +193,14 @@ if [ "$BOARD" = "1" ]; then
     echo "  （批量模式：1 次 SSH，用时 $(( $(date +%s) - T0 ))s）"
   fi
   echo "  比对板端文件 $rn 个，不一致 $remote_bad 个"
-  [ "$remote_bad" = "0" ] && echo "  ✓ 板端就是这份代码" || echo "  ✗ 板端与本地有差异"
+  if [ "$rn_fork" != "0" ]; then
+    echo "  · 故意分叉 $rn_fork 个（板端保留自己的值，见 tools/deploy/board_forks.txt）："
+    for f in $rfork_list; do
+      rm_=$(timeout 20 $AUV_SSH "md5sum $BOARD_DIR/$f 2>/dev/null | cut -d' ' -f1" 2>/dev/null </dev/null | tr -d '\r\n')
+      echo "        [分叉] $f  本地=$(md5sum "$f" 2>/dev/null | cut -d' ' -f1) 板端=${rm_:-缺失}"
+    done
+  fi
+  [ "$remote_bad" = "0" ] && echo "  ✓ 板端就是这份代码（分叉项除外）" || echo "  ✗ 板端与本地有差异"
 
   # 2b) --write：把清单刷成"当前实测"（匹配 → [ md5 path ]；不匹配/缺失 → 无方括号）
   if [ "$WRITE" = "1" ]; then
@@ -190,7 +219,9 @@ if [ "$BOARD" = "1" ]; then
       -not -path './bak/*' -not -path './log/*' -not -path './rec/*' \
       -not -path './models/*' -not -path '*/__pycache__/*' -not -name '*.pyc' \
       -not -name 'check_board_parity.sh' -not -name 'board_parity.md5' \
-      -not -name 'deploy_to_board.sh' -not -name 'tidy_board_bak.sh' \
+      -not -name 'deploy_to_board.sh' -not -name 'tidy_board_bak.sh' -not -name 'board_forks.txt' \
+      -not -name 'board_forks_Adomain.txt' -not -name 'sync_Adomain_repo.sh' \
+      -not -path './tools/deploy/Adomain_cfg/*' \
       -not -name 'ssh_x5*.sh' -not -name 'askpass*.sh' \
       -not -name '.*' | sed 's|^\./||' >> "$LIST"
     sort -u "$LIST" -o "$LIST"
@@ -203,8 +234,10 @@ if [ "$BOARD" = "1" ]; then
       echo "#"
       echo "# 格式：[ md5  文件 ] = 已与板端逐字节核对一致（板端实测证据）；无方括号 = 仅本地记录"
       echo "# 注意：tools/deploy/ 下的 check_board_parity.sh / deploy_to_board.sh / board_parity.md5 /"
-      echo "#       tidy_board_bak.sh 是\"本地驱动\"工具，不入清单（板端不需要）；"
+      echo "#       tidy_board_bak.sh / board_forks*.txt / Adomain_cfg/ 是\"本地驱动\"工件，不入清单；"
       echo "#       tools/deploy/archive_baks.sh 入清单（板端维护用 → 板端 <根>/tools/deploy/archive_baks.sh）"
+      echo "# 故意分叉（本地≠板端）的文件见 tools/deploy/board_forks.txt：deploy 不上传、本检查不报错；"
+      echo "#   这类条目在本清单里是**无方括号**的（记本地值，板端不是这份字节）—— 属正常，不是漏核对"
       echo "# cfg/vision.yaml **与 comm.yaml 一样整份同步**（本地是唯一参数源：下水前要 red 就改本地）；"
       echo "#   板端手改过该文件的话，下次 deploy 会被本地覆盖（覆盖前会备份到 bak/deploy_<stamp>/）"
       echo "# 更新：$(date +%m%d_%H%M%S)（--write 实测刷新：1 次 SSH 批量核对）"

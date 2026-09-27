@@ -43,7 +43,8 @@ def psi_line(info, tol_deg=8.0):
     """HUD 的「偏转角」一行（**纯函数**，便于用例）。返回 `(文本, BGR 颜色)`。
 
     `psi`（`last_info["hdg"]`）= **门法向相对光轴的夹角**：0 = 机身正对门；
-    `+` = 门法向偏画面右（机身左偏）⇒ 该**右转**。只有 `full` 帧测得出来。
+    `+` ⇒ 该**左转**、`-` ⇒ 该**右转**（2026-09-27 现场定，方向依据见
+    doc/_注释历史_fragments/base_tests.md）。只有 `full` 帧测得出来。
 
     · 没有测量时显示 `--`（**别显示 0** —— 0 会被现场误读成"已经正了"）；
     · `|psi| ≤ tol` → 绿（已收敛）；否则黄（还要转）；`hdg_skip` 有值 → 橙（这一趟跳过了正航向）。
@@ -294,10 +295,10 @@ class AppController(object):
             for k, v in info.items():
                 if isinstance(v, bool) or v is None or isinstance(v, (int, float, str)):
                     rec[k] = v
-            # 下位机遥测也写进日志（2026-09-23）：**转向方向/ 摆动极性这些只能靠
-            # "命令 vs 遥测 vs 视觉"三者对齐来判**，stdout 的 `[UART←]` 没有时间戳、
-            # 事后对不上帧；写进 JSONL 后就能逐帧核对（`tyaw`=遥测绝对航向(°)、
-            # `ttel`=遥测帧年龄(ms)、`tdep`=深度(m)、`trol`/`tpit`=横滚/俯仰）。
+            # 下位机遥测也写进日志：**转向方向/摆动极性这些只能靠"命令 vs 遥测 vs 视觉"
+            # 三者对齐来判**，stdout 的 `[UART←]` 没有时间戳、事后对不上帧；写进 JSONL 后
+            # 就能逐帧核对（`tyaw`=遥测绝对航向(°)、`ttel`=遥测帧年龄(ms)、`tdep`=深度(m)、
+            # `trol`/`tpit`=横滚/俯仰）。
             try:
                 tel = getattr(getattr(task, "uart", None), "telemetry", None)
                 if tel is not None:

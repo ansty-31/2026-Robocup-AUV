@@ -136,7 +136,7 @@ def test_report_mentions_k_and_skew_warning():
 # ------------------------------------------------------------------ CLI 接线
 def test_cli_registers_measure_option():
     """`--measure` 必须注册在 `parse_args` **之前** —— 否则 `--help` 里看不到它、
-    传进去还会报 "unrecognized arguments"（2026-09-22 我自己踩过这个坑）。"""
+    传进去还会报 "unrecognized arguments"（踩过一次，见 doc/_注释历史_fragments/base_tests.md）。"""
     import contextlib
     import io
     buf = io.StringIO()
@@ -157,8 +157,11 @@ def test_measure_requires_out(tmp_path):
 
 
 def test_span_stats_vertical_span_not_zero():
-    """**2026-09-22 实测踩过**：卷尺竖着放时旧代码用 x 差 → 379 px 的真实跨度被算成 2 px。
-    现在用欧氏距离，任意方向都成立。"""
+    """跨度必须用**欧氏距离**：卷尺竖着放时也在意真实像素跨度（不能只取 x 差）。
+
+    （只取 x 差会把真实跨度算成个位数像素，2026-09-22 实测踩过，见
+    doc/_注释历史_fragments/base_tests.md。）
+    """
     st = LC.span_stats([(679, 456), (677, 275), (681, 77)])
     assert st["du"] == pytest.approx(379.0, abs=0.05)
     assert abs(st["theta_deg"]) > 85                       # 竖直
@@ -313,7 +316,7 @@ def test_solve_separates_fx_and_fy():
 
 def test_solve_rank_deficient_is_rejected():
     """同一轴上重复同一距离 ⇒ 该列与 c 列线性相关 ⇒ 3 未知量实际只有 2 个自由度。
-    必须报错，而不是像 2026-09-22 自检里那样给出 fx=-223 px 这种垃圾。"""
+    必须报错，不许给个垃圾解出来。"""
     recs = [_rec("h1.jpg", 2.0, 0.5, 270.0, 0.0), _rec("h2.jpg", 2.0, 0.5, 270.0, 0.0),
             _rec("v.jpg", 3.0, 1.0, 370.0, 89.0)]
     with pytest.raises(ValueError, match="秩不足"):

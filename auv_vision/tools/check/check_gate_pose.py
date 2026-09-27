@@ -33,7 +33,7 @@ except ValueError:
 cam = board_camera()
 obj3 = object_points()
 V = S.vision.gate
-# 兜底值 == 当前 cfg（别在这里抄旧值：0.5/0.7/0.9 都是改配置前的历史字面量）
+# 兜底值 == 当前 cfg（别在这里改回历史字面量）
 conf_thr = float(S.get("vision.gate.keypoint.conf_thr", 0.8))
 pnp = V.get("pnp", {}) or {}
 reproj_thr = float(pnp.get("reproj_px", 20.0))

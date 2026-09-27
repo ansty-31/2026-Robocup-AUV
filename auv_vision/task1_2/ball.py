@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """ball.py — 任务一 撞球（BallTask）· 运动逻辑融合版
 
-运动链（三段式运动移植自早期独立实验，**该实验目录已删除**；**视觉识别仍用本项目**）：
+运动链（三段式运动；**视觉识别用本项目**）：
 
   SEARCH   无目标：原地**脉冲旋转**（spin_s/pause_s）+ 周期性慢速前进探测
            （转 spin_s → 停 pause_s，停的间隙让检测有静止帧）
@@ -13,7 +13,7 @@
            最高那档）冲刺 dash_dur_s，**不检测有没有撞到**
   STOP     冲刺结束 → 全 0 保持 stop_hold_s（**稳定停住**）→ DONE("hit")
 
-丢目标（沿用原思路的阶梯）：短时丢失（帧窗口）→ 保持/惯性 → hold（原地全 0，
+丢目标（阶梯）：短时丢失（帧窗口）→ 保持/惯性 → hold（原地全 0，
 engage_hold_s）→ 回 SEARCH。**CENTER 阶段丢失绝不前进**（居中不允许带前进）。
 时限：`comm.ball.timeout_ms`（当前 cfg 30s；DASH/STOP 期间不打断，保证命中与停稳都能走完）。
 
@@ -208,7 +208,7 @@ class BallTask(object):
         return "stop", 0.0
 
     def _step_lost(self, now_ms):
-        """丢目标阶梯（沿用原思路）：短时保持/惯性 → hold(原地全 0) → 回 SEARCH。
+        """丢目标阶梯：短时保持/惯性 → hold(原地全 0) → 回 SEARCH。
 
         SEARCH 相位下（含从未见过球、或阶梯走完回到搜索）→ 继续搜索，不再套 hold。
         """

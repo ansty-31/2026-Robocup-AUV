@@ -205,14 +205,62 @@ bash tools/deploy/tidy_board_bak.sh            # 可选：板端备份堆多了�
 
 | 本地 | 板端 |
 |---|---|
-| `auv_vision/auv_vision/`（本目录，工程根） | `/home/sunrise/AUV/` |
-| `tools/deploy/archive_baks.sh` | `/home/sunrise/AUV/tools/deploy/archive_baks.sh`（板端维护用，随部署同步） |
-| `tools/deploy/{deploy_to_board,check_board_parity,tidy_board_bak}.sh`、`tools/deploy/board_parity.md5` | 驱动类**不传**（纯本地驱动） |
+| `auv_vision/auv_vision/`（本目录，工程根） | `/home/sunrise/Desktop/AUV_New/`（**在用副本**，`deploy_to_board.sh` 的默认目标） |
+| `tools/deploy/archive_baks.sh` | `/home/sunrise/Desktop/AUV_New/tools/deploy/archive_baks.sh`（板端维护用，随部署同步） |
+| `tools/deploy/{deploy_to_board,check_board_parity,tidy_board_bak}.sh`、`tools/deploy/board_parity.md5`、`board_forks.txt` | 驱动类**不传**（纯本地驱动） |
 | `tools/{check,analyze}/*.py`、`tools/README.md` | 随部署同步（板端可直接跑判读/自检） |
 | `tests/{platform,tasks,tooling}/*.py` | 随部署同步（板端能跑同一套 pytest） |
 | `cfg/*.yaml`（`vision.yaml` / `comm.yaml` / `front_camera.yaml`） | ⚠️ **默认整份同步**（在清单里，`deploy` 会覆盖板端）——但**下水现场改过板端 cfg 时，这条会把它冲掉**，见下面「陷阱 1」 |
-| `models/*.bin` | `/home/sunrise/AUV/models/`（权重单独管理，不随代码同步） |
+| `models/*.bin` | `/home/sunrise/Desktop/AUV_New/models/`（权重单独管理，**不随代码同步**，见下） |
 | `<板端>/bak/` | 板上备份区：`rollback/`（可直接回滚）+ `archive/`（按时间归档），由 `tidy_board_bak.sh` 维护 |
+
+> **板端另有一份旧工程 `/home/sunrise/AUV/`（09-17 的树，不在任何清单里、部署脚本也不管它）**。
+> 它不是权威副本，只在"故意跑旧一代权重"时才会用到；改动它属于**手工运维**，
+> 不会反映到本地，也不会被 `check_board_parity.sh` 看见。
+> 2026-09-27 手工换过它门权重（见下"权重分发"），当时发现的两个坑：
+> ① 它的 `cfg/vision.yaml` 里 `model.path` / `task_models.gate.path` 都是**绝对路径**，
+>    而旧代码 `gate/gate_detector.py::build_gate_backend` 用 `os.path.exists(path)` **直接判存在、
+>    不解析相对路径** ⇒ 改这份 cfg 必须写绝对路径；
+> ② 它的 `models/` 里有个 `gate_kpt_bayese_640x640_nv12.bin.`（**名字尾部多一个点**），
+>    而 cfg 指的是不带点的名字 ⇒ 权重一直"缺失"、gate 被静默跳过。
+>    换权重时顺手对一遍 `ls -lab models/`，尾点、`.bak` 后缀这类改名都会让配置落空。
+
+### 6.1 权重分发（`models/*.bin` 不走部署脚本）
+
+`models/` 在清单 `find` 的排除项里（`-not -path './models/*'`），所以 **`.bin` 永远靠手工 scp**：
+
+```bash
+/home/ansty/RDKX5/.scp_x5.sh <本地.bin> sunrise@192.168.137.10:/home/sunrise/Desktop/AUV_New/models/
+# 传完必须两端核对 md5（板端时钟不可靠，别看 mtime）
+md5sum <本地.bin>; $AUV_SSH "md5sum /home/sunrise/Desktop/AUV_New/models/<同名>.bin"
+```
+
+换门权重时要**两处一起动**，缺一个就是"文件在、配置还指旧的"：
+
+1. 传 `.bin` 到目标目录 `models/`；
+2. 改 `cfg/vision.yaml` 的 `model.task_models.gate.path`（在用副本用**相对**路径 `models/<名字>.bin`，
+   旧副本 `/home/sunrise/AUV` 用**绝对**路径）；
+3. 改完在板端实跑一次后端加载 + 单帧推理（别只看文件在不在）：
+
+```bash
+$AUV_SSH "cd /home/sunrise/Desktop/AUV_New && python3 - <<'PY'
+import sys; sys.path.insert(0, '.')
+import cv2
+from gate.gate_detector import build_gate_backend
+b = build_gate_backend()
+print('backend =', type(b).__name__ if b is not None else None)   # None = cfg 没指到权重
+d = b.detect(cv2.imread('log/frames/pv_000024.jpg'))              # 有门的样本帧
+print('det =', d)          # 角点应是 TL→TR→BR→BL 的四边形，不交叉
+PY"
+```
+
+**2026-09-27 实测记录（旧副本 `/home/sunrise/AUV` 换门权重）**：把
+`RDKX5-YOLOv11n-/output/weights/gate_kpt_auv4_bayese_640x640_nv12.bin`
+（md5 `d38b803e5823b35696f5711ecd1c30b4`，3,942,297 B）scp 到该目录 `models/`，
+并把 `cfg/vision.yaml` 的 `task_models.gate.path` 指到它（绝对路径）；
+原 cfg 备份在板端 `bak/model_swap_0927_161157/cfg/vision.yaml`。
+实测：`GateKeypointBackend` 加载成功，`log/qframes_B/q_00040.jpg` 检出 1 个门、4 角点序正确。
+⚠️ 该旧副本的门此前**一直是被跳过的**（见上一节 ②），所以这次换权重会把 gate 从"跳过"变成"真跑"。
 
 ## 7. 三个部署陷阱（都真实发生过，部署前逐条过一遍）
 
@@ -234,11 +282,15 @@ diff -u cfg/comm.yaml "$b"        # 逐键看清差异 → 把板端现场值合
   否则 `check_board_parity.sh` 永远不绿）；
 - 覆盖前板端旧文件会自动备份到 `bak/deploy_<时间戳>/`，回滚用 `cp -rp` 即可。
 
-> **2026-09-26 起**：脚本里有一个 `SKIP_FILES` 数组，用来声明"本地≠板端是**故意**的"文件
-> （曾经放 `base/settings.py` 的 SIM_MODE 与 `cfg/comm.yaml` 的台架分叉）。
-> **用户定"全部以本地为准"后它已清空**；要再制造分叉就把路径加进那个数组，别再靠人记。
-> 现状：**板端全量跟本地一致（95/95）**，所以上表"先 diff 再合并"的流程仍然是**改 cfg 前的好习惯**，
-> 但不再有"必须保留"的板端现场值。
+> **分叉清单：`tools/deploy/board_forks.txt`**（2026-09-27 起）—— 声明"本地≠板端是**故意**的"文件。
+> `deploy_to_board.sh` 命中就**不上传**（打一行 `[skip]`），`check_board_parity.sh` 命中就**不算不一致**
+> （打一行 `[分叉]`）。**两个脚本读同一个文件**：只在 deploy 里加、这边不知道，`--board` 就会永远报
+> `[板端不同]` 并 exit 1 —— 检查长期红着等于没有检查。
+> 曾经的两条（`base/settings.py` 的 SIM_MODE、`cfg/comm.yaml` 的台架分叉）在 2026-09-26
+> "全部以本地为准"时清空；**2026-09-27 把本地 `SIM_MODE=True` 推上板端、冲掉真驱动默认值**，
+> 于是 `base/settings.py` 重新入列（板端默认 `False` 真发串口，台架要打印用 `AUV_SIM_MODE=1`）。
+> ⚠️ 分叉粒度是**整个文件**：入列后本地对该文件的改动**不再上板端**，要改必须在板端手工同步。
+> 现状：除此 1 个文件外，**板端全量跟本地一致**；上表"先 diff 再合并"的流程仍是改 cfg 前的好习惯。
 
 ### 陷阱 2：**新文件不在清单里 = 永远传不上板**
 `deploy_to_board.sh` 只遍历 `board_parity.md5` 里的条目；清单由

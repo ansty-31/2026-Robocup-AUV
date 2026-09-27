@@ -1,0 +1,4 @@
+numpy>=1.24
+opencv-python>=4.8
+# YOLO 推理环境按你的模型版本另行安装：
+# pip install ultralytics

@@ -30,7 +30,6 @@ def test_settings_loads_real_yaml_values():
     assert S.vision.gate.pnp.z_max == 15.0
     assert S.comm.frame.header == 0xA5
     # ⚠️ **限深下限是"现场定死"的唯一例外：0.55 不准改**（2026-09-18 用户定）。
-    #    本地曾长期写 0.3，两次整份推板端把它冲掉 → 船可能浮出水面直接结束比赛。
     #    行为本身另有用例（test_depth_guard_blocks_surfacing_only，阈值从 cfg 读、相对判定），
     #    这一条专门钉**数值**：改了它必须有人来解释。
     assert float(S.comm.depth_guard.min_depth_m) == pytest.approx(0.55), \
@@ -385,9 +384,9 @@ def test_depth_guard_stale_action_block_up(monkeypatch):
 
 
 # ---------------------------------------------------------------- 硬停（安全）
-# 2026-09-18 用户水里实测：转角脚本最后只发了一帧 neutral 就关串口 → 船一直转。
 # 根因：_ramp_step 是**字节级平滑**，neutral() 的 force 只绕过心跳节流、不绕过 ramp；
 #       而下位机没有"无帧超时停车"（comm.yaml heartbeat 注释）→ 锁在最后一个非零字节上。
+#       （2026-09-18 用户水里实测到"船一直转"，证据见 doc/_注释历史_fragments/base_tests.md）
 class _CountWrite(object):
     def __init__(self, u):
         self.u = u
@@ -466,3 +465,87 @@ def test_stop_hard_reports_not_stopped_when_yaw_keeps_changing(monkeypatch):
     assert u.stop_hard(verify=True, settle_s=0.1, max_extra=1) is False
 
 
+
+
+# ---------------------------------------------------------------- 轴饱和看门狗
+class _FakeAxesUart(object):
+    """只给看门狗用的最小对象：轴字节 + estop 计数。"""
+
+    def __init__(self):
+        self._axes = [128] * 7
+        self.estops = 0
+        self._ser = None
+
+    def estop(self):
+        self.estops += 1
+
+
+def test_axis_watchdog_trips_when_one_axis_is_held_same_direction():
+    """★ **轴饱和看门狗**（用户 2026-09-27 定）：同一轴、同一方向连续发轴 ≥ max_same_dir_s
+    ⇒ 先硬停（estop）再强制退出（生产里是 `os._exit(9)`；用例注入 on_trip 记录，免得带走 pytest）。
+
+    为什么必须是独立线程：任务可能卡在某个循环里（现场"一开始进 turn 就卡住"），写在任务控制流
+    里的保护那时根本跑不到。
+    """
+    u = _FakeAxesUart()
+    trips = []
+    w = U._AxisWatchdog(u, max_same_dir_s=0.15, min_off_b=13, poll_ms=20,
+                        on_trip=lambda *a: trips.append(a), log=lambda *a: None)
+    w.start()
+    u._axes[3] = 128 + 25              # sway 一直朝 +（= 「转完反向平移」那种持续平移）
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 2.0 and not trips:
+        time.sleep(0.01)
+    w.stop()
+    assert trips, "同一方向持续发轴必须触发看门狗"
+    assert trips[0][0] == "sway", trips[0]
+    assert u.estops == 1, "触发时必须**先硬停**（否则强制退出后船锁在最后那个非中位字节上）"
+
+
+def test_axis_watchdog_ignores_reversals_deadzone_and_short_pulses():
+    """反向对照：**反向交替 / 幅度在判据以内 / 时长不够** 一律不许触发（保护不能误杀正常动作）。"""
+    u = _FakeAxesUart()
+    trips = []
+    w = U._AxisWatchdog(u, max_same_dir_s=0.4, min_off_b=13, poll_ms=20,
+                        on_trip=lambda *a: trips.append(a), log=lambda *a: None)
+    w.start()
+    u._axes[3] = 128 + 12              # ① 幅度 ±12 字节 < min_off_b ⇒ 不算"在发轴"
+    time.sleep(0.5)
+    t0 = time.monotonic()              # ② 同方向但每 100ms 反向一次 ⇒ 连续同向从未到 0.4s
+    while time.monotonic() - t0 < 0.6:
+        u._axes[3] = 128 + (25 if int((time.monotonic() - t0) * 10) % 2 == 0 else -25)
+        time.sleep(0.05)
+    u._axes[3] = 128                   # 清计时
+    time.sleep(0.1)
+    u._axes[3] = 128 + 25              # ③ 同方向只持续 0.15s < 0.4s
+    time.sleep(0.15)
+    u._axes[3] = 128
+    time.sleep(0.3)
+    w.stop()
+    assert not trips, "正常动作被误杀：%s" % trips
+
+
+def test_axis_watchdog_names_match_dof_map():
+    """看门狗报的轴名必须与 `comm.dof_map` 的字节序一致（不然现场日志会指错轴）。"""
+    want = {int(v["axis"]): k for k, v in S.comm.dof_map.items()}
+    assert [U._AxisWatchdog.AXES[i] for i in range(4)] == [want[i] for i in range(4)]
+
+
+def test_axis_watchdog_auto_start_policy(monkeypatch):
+    """开机策略：SIM 默认**不开**（免得 os._exit 打断用例）；`comm.watchdog.enable=false` 与
+    `AUV_WATCHDOG=0` 都能关；`AUV_WATCHDOG=1` 强制开。"""
+    monkeypatch.delenv("AUV_WATCHDOG", raising=False)
+    assert U.UartController(sim=True)._watchdog is None, "SIM 默认不该开看门狗"
+    monkeypatch.setenv("AUV_WATCHDOG", "0")
+    assert U.UartController(sim=True)._watchdog is None
+    monkeypatch.setitem(S.comm, "watchdog", S.Y(dict(S.comm.get("watchdog", {}), enable=False)))
+    monkeypatch.delenv("AUV_WATCHDOG", raising=False)
+    u = U.UartController(sim=True)
+    u.sim = False                      # 假装真串口（不真开串口）：配置关 ⇒ 仍然不开
+    u._watchdog = None
+    u._start_watchdog()
+    assert u._watchdog is None, "comm.watchdog.enable=false 必须真的关掉"
+    monkeypatch.setenv("AUV_WATCHDOG", "1")   # 环境变量优先级最高
+    u._start_watchdog()
+    assert isinstance(u._watchdog, U._AxisWatchdog)
+    u._watchdog.stop()

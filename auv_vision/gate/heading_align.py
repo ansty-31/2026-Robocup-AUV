@@ -1,79 +1,56 @@
 # -*- coding: utf-8 -*-
-"""heading_align.py — ALIGN 阶段的「正航向」：**测 → 转 → 停稳 → 再测**（离散迭代）。
+"""heading_align.py — ALIGN 的「正航向」：**PnP 测出目标角 → 交给 turn_deg 转一次 → 结束**。
 
-用户 2026-09-18 定的设计：
-  · 看全门（4 角/full）时用 PnP 测出**航向误差** psi（门法向 vs 光轴）；
-  · **不在转动中测量**：先停稳 → 测 → 按测得的量转（转的目标是**冻结**的）→ 停稳 → 再测；
-  · 迭代到 |psi| ≤ 阈值（cfg `gate.hdg.tol_deg`，用户定 8~10°）→ 锁定，之后不再调 yaw；
-  · 迭代用完仍不达标 → **带残余航向继续走**（不卡死，日志记下来）；
-  · 顺序上"先常规居中，居中后再正航向"，转完**回 GOLDEN 复核居中**（转向会改变方位角，
-    从而改变门在画面里的横向位置）。
+用户 2026-09-27 定的流程（一次到位，不要来回反馈）：
+  · 目标角来自 `gate_task` 的 full 帧 psi（`_hdg_deg` = 位姿法向 vs 光轴，EMA 平滑后）；
+  · 转动本身交给 `common/turn_deg.py::TurnCore`（遥测 yaw + PID 全闭环，极性定死在原语里）；
+  · 转完即结束——不再重测、不再迭代（旧版「测→转→停稳→再测」的迭代已删）。
 
-转动本身交给 `common/turn_deg.py::TurnCore`（同一套探向/增益/到位判据/硬停），
-所以"转多少度"是**精确**的：闭环量是下位机回传的绝对航向，而不是时间。
-
-**为什么 p3p 不能用**：3 点解 6-DoF 是欠定的（实测最优解重投影 RMS 恒 0.0px、深度偏 −28%、
-航向 std 64~69°；full 干净场景只有 5.4°）→ 只有 `mode == full` 的 psi 才喂进来。
+只认 `mode == full` 的 psi：p3p 的三点解 6-DoF 欠定（重投影残差恒 0、深度与航向都不可信），
+数字（−28% / std 64~69° vs 5.4°）见 `doc/注释历史.md`。
 
 本模块是**纯状态机**（不碰串口、不读相机）：每帧喂 `step()`，返回本帧该发的 yaw，
 由 `gate_task` 负责实际下发与相位流转 —— 这样离线可单测（tests/tasks/test_motion.py）。
 """
 from __future__ import annotations
 
-import statistics as st
-
 from common.cfgnode import flag, num
-from common.turn_deg import TurnCore, wrap180
+from common.turn_deg import TurnCore
 
 # 状态
 IDLE = "idle"          # 未启用 / 本门已结束
-SETTLE = "settle"      # 静止窗（转向后停稳；也是测量前的等待）
-MEASURE = "measure"    # 攒够 k 帧 full 的 psi
 TURN = "turn"          # 正在按冻结的目标角转
-DONE = "done"          # 已与光轴平行（锁定）
-GIVEUP = "giveup"      # 迭代用完/测不到 → 带残余航向继续走
+DONE = "done"          # 已与光轴平行（到位）
+GIVEUP = "giveup"      # 没得转（没测到 psi / 转向超时）→ 带残余航向继续走
 ABORTED = "aborted"    # 外部中止（如转向中整门丢失）
 
 _TERMINAL = (DONE, GIVEUP, ABORTED)
 
-_D_HDG = dict(enable=True, tol_deg=8.0, measure_frames=5, max_iters=5,
-              # ---- 2026-09-26 新增（用户定：「无法测量 psi 就用历史上的最后一个」）----
-              # hist_ms：历史 psi 保鲜期(ms)。**0 = 不限年龄**；**<0 = 关闭回退**。
-              hist_ms=0.0,          # 0 = 不限年龄（本门内）；<0 = 关闭回退
-              # entry_psi_first：**航向优先** —— 居中还没达标也能起转（解死锁：航向歪 ⇒
-              #   门偏一侧 ⇒ 居中确认不了 ⇒ 按老规则不许转 yaw）。false = 旧顺序。
-              entry_psi_first=False,   # 2026-09-26 晚：用户定必须先居中
+_D_HDG = dict(enable=True, tol_deg=8.0,
+              # max_step_deg：单次转角的上限（**0 = 不设限**，就是按测到的 psi 转）。
+              # 它只是防"垃圾 psi 把船甩出去"的安全钳位，不是收敛手段（本设计只转一次）。
+              max_step_deg=0.0,
+              timeout_ms=30000.0, turn_timeout_s=8.0,
+              # post_sway：转完补偿（用户 2026-09-27 定）——刚转过的那一下画面被整体甩走（转 40°
+              #   就超出 32° 半视场），门又看不见时视觉没法纠 ⇒ 在**丢门的帧**上朝**转向的反方向**
+              #   平移一小段，把门拉回视野。post_sway 必须 > 执行器死区 0.138；窗口 = post_sway_ms。
+              post_sway_ms=600.0, post_sway=0.20,
+              # post_sway_far_ratio / post_sway_same_z_m：窗口内判"这算不算刚丢的那个门"的两道闸
+              #   （实现 `gate_task._post_sway_same_gate`）：z 优先（|Δz| ≤ same_z_m），
+              #   z 拿不到才退框占比（≥ far_ratio × 转走那一刻的占比）；两个都设 0 = 关掉判据。
+              post_sway_far_ratio=0.7, post_sway_same_z_m=0.5,
+              # stop_hard：转向收尾**硬停**（阻塞：连发中性帧走完 ramp + 遥测 yaw 验证）。
+              #   必须 true —— 下位机没有"无帧超时停车"，只发一帧中性时 yaw 轴还在 ramp 半路，
+              #   一断流/关串口船就锁在"还在转"的字节上。实测耗时 0.70/1.31/2.51s（见 base/uart.py）。
+              stop_hard=True,
+              # entry_psi_first：**航向优先** —— 居中还没达标也能起转（解"航向歪 ⇒ 门偏一侧 ⇒
+              #   居中确认不了 ⇒ 不许转 yaw"的死锁）。false = 先居中再转。
+              entry_psi_first=False,
               # 航向优先的距离门（满足任一）：新鲜 z ≤ psi_first_z_max 或 框占比 ≥ psi_first_ratio
-              psi_first_z_max=2.5, psi_first_ratio=0.30,
-              # 2026-09-26：max_step_deg 0(不限) → 15（逐步收敛）；max_iters 3 → 5
-              max_step_deg=10.0,
-              settle_ms=400, settle_tol_deg=2.0,
-              measure_timeout_ms=2000, timeout_ms=30000,
-              # 一直没有遥测 yaw 时的等待上限（超过就放弃正航向，别白等总超时）
-              wait_tel_ms=3000.0, turn_timeout_s=8.0, fresh_ms=800.0,
-              # ⚠️ 2026-09-23 `fresh_ms` 实测**是空转的**：mode==full 的帧当帧就把
-              #   `_hdg_ms` 刷成 now ⇒ age≡0；mode!=full 时 `_hdg_fresh` 在比 age 之前
-              #   就 return False。⇒ 这个数从来不影响结果，留着只为日志/向后兼容。
-              #   （现场日志实测：hdg_skip 从未出现过 stale(...) 原因。）
-              # 居中达标但"那一刻不是 full 帧"（thus 没有可用 psi）时，**原地等**多久再放弃正航向。
-              # 默认 0 = 旧行为（立刻进 APPROACH，带着残余航向）；
-              # 斜门/远距容易只在部分帧拿到 4 角，这时把它设成 1500~2000 更划算 ——
-              # 船本来就在 GOLDEN 停着（不下发 surge），等一帧新鲜 full 的代价只是时间。
-              wait_fresh_ms=0.0,
-              # ---- 2026-09-23 新增：把"能不能转"从遥测上解耦 ----
-              # entry_stale_ok：进 HDG 是否允许"本帧不是 full"。
-              #   **2026-09-23 用户定：默认 false** —— 顺序必须是「先居中、居中确认达标
-              #   之后再调 yaw」，而且触发的那一帧必须是 full（p3p 的 psi std 64~69°）。
-              #   true 会让"居中那一刻恰好是 p3p/coarse"也能起转（少等一帧），但会让
-              #   HDG 在没真正看清门的时候就开始转 ⇒ 现场表现"一上来就调 yaw"。要试可以开。
-              entry_stale_ok=True,   # 2026-09-26：默认 true（本帧非 full 也能用历史 psi 起转）
-              # blind_enable：遥测缺失时**允许开环盲转**（角度÷`motion.turn_pid.blind_rate_dps`
-              #   换算时长），转完回 SETTLE 再测 psi 迭代 ⇒ 无遥测也能收敛（精度受假设速率限制）。
-              #   false = 旧行为：`wait_tel_ms` 内没遥测就 giveup（且此后本门不再转）。
-              blind_enable=True)
+              psi_first_z_max=2.5, psi_first_ratio=0.30)
 
-# 开关键：其余键都是数值，只有这几个是布尔 → 用 flag() 解析（别用 bool()）
-_BOOL_KEYS = ("enable", "entry_stale_ok", "blind_enable", "entry_psi_first")
+# 开关键：其余键都是数值，只有这两个是布尔 → 用 flag() 解析（别用 bool()）
+_BOOL_KEYS = ("enable", "entry_psi_first", "stop_hard")
 
 
 def hdg_cfg(node=None):
@@ -96,15 +73,15 @@ def hdg_cfg(node=None):
 
 
 class HeadingAligner(object):
-    """离散正航向状态机（每帧推进一次，不阻塞主循环）。
+    """一次到位的正航向状态机（每帧推进一次，不阻塞主循环）。
 
-    "收敛后锁定 yaw" 的实现方式 = **终态（DONE/GIVEUP/ABORTED）直到 `reset()`**：
-    reset 只在"新的一门"（`_start_search`）时调用，所以本门内一旦有结论就不会再动 yaw。
+    终态（DONE/GIVEUP/ABORTED）一直保持到 `reset()`，而 reset 只在"新的一门"时调用
+    （`gate_task._start_search`）⇒ 本门内不会重复转。
     """
 
     def __init__(self, cfg=None, imag_sign=None, log=None, turn_kwargs=None):
         self.cfg = hdg_cfg(cfg)
-        self.imag_sign = imag_sign          # 遥测 yaw 正方向（None=首次转向时探向）
+        self.imag_sign = imag_sign          # 仅用例注入（生产 None：极性在 turn_deg 里定死）
         self.log = log or (lambda *a: None)
         self.turn_kwargs = dict(turn_kwargs or {})
         self.reset()
@@ -113,24 +90,12 @@ class HeadingAligner(object):
     def reset(self):
         self.state = IDLE
         self.iters = 0
-        self.psi_meas = None
+        self.psi_meas = None           # 冻结的目标角（起转那一刻的 psi）
         self.last_dir = ""
+        self.last_d = 0.0              # 本次转向的方向（+1 右 / -1 左；0=没转）→ 转完的反向补偿要用
         self.last_target_deg = 0.0
-        self.last_err_deg = None
-        self.aborts = 0
-        self._t_stage = None
-        self._t_settle = None
-        self._yaw_ref = None
-        self._samples = []
-        self._t_meas = None
         self._core = None
-        self._no_tel_logged = False
-        self._tel_seen = False        # 本门内是否**收到过**遥测 yaw（决定能不能闭环转）
-        self._blind_logged = False
-        self._psi_prev = None         # 上一次测得的 psi（转向前）→ 用于**转向方向自检**
-        self.last_probe_deg = None    # 探向实测转角(°)（写进日志：判断开环段是否超调）
-        self.last_rate_dps = None     # 探向实测角速率(°/s)（用来回填 blind_rate_dps）
-        self.dir_suspect = 0          # 「转完 |psi| 没变小」的次数（方向疑似反向）
+        self._t_stage = None
 
     @property
     def enabled(self):
@@ -142,249 +107,106 @@ class HeadingAligner(object):
 
     @property
     def turning(self):
-        """是否正在执行一次转向（含探向/等遥测）。
+        """是否正在执行转向。
 
-        用途：`gate_task._step` 在这个状态下**绕开整条视觉链路**（用户定：
-        先居中再转向，转的时候不要被画面干扰，信任测算的航向角）——
-        否则档位一退化（width/coarse）或位姿被拒，转向就被打断了。
+        用途：`gate_task._step` 在这个状态下**绕开整条视觉链路**（用户定：先居中再转向，
+        转的时候不要被画面干扰，信任测算的航向角）—— 否则档位一退化（width/coarse）
+        或位姿被拒，转向就被打断了。
         """
         return self.state == TURN
 
     def summary(self):
-        return ("hdg=%s iters=%d psi=%s last=%s%g°" % (
-            self.state, self.iters,
-            "n/a" if self.psi_meas is None else "%.1f" % self.psi_meas,
-            self.last_dir, self.last_target_deg))
+        return "hdg=%s psi=%s last=%s%g°" % (
+            self.state, "n/a" if self.psi_meas is None else "%.1f" % self.psi_meas,
+            self.last_dir, self.last_target_deg)
 
     # ------------------------------------------------------------------
-    def start(self, now_ms):
-        """进入正航向（由 gate_task 在"常规居中已达标"后调用一次）。"""
+    def start(self, now_ms, psi=None):
+        """进正航向（`gate_task` 在"居中达标"或"航向优先"时调用一次）。
+
+        Args:
+            psi: 目标航向误差（度）。**psi>0 ⇒ 左转、psi<0 ⇒ 右转**（现场定，见下）。None = 没测到。
+        """
         if not self.enabled or self.state in _TERMINAL:
             return self.state
-        self.state = SETTLE
         self._t_stage = now_ms
-        self._t_settle = now_ms
-        self._yaw_ref = None
-        self._samples = []
+        if psi is None:
+            return self._giveup("没有可用的 PnP 航向测量（本门 full 帧一次都没测到）")
+        psi = float(psi)
+        self.psi_meas = psi
+        # ★ 2026-09-27 现场定：**ψ 的符号 → 转向方向取反**（psi>0 ⇒ 左转，psi<0 ⇒ 右转）。
+        #   依据（板端 `log/gate_one_20260927.jsonl`，新代码那一趟）：
+        #     f3/f12 psi=-43.7° 而门在画面**右侧**（dx=+0.12~0.23，船基本对着门）；
+        #     旧映射（psi<0 ⇒ 左转）照着 ψ 左转 44°（tyaw -61.4→-17.4，度数本身是对的），
+        #     结果门被甩到 ≈+51° 方位 —— 水平半视场只有 32° ⇒ **门彻底出画**（ψ 变 None → SEARCH）。
+        #     取反后同样 44° 转**右**：门落在 ≈-37°，仍在画面里，且朝向误差才真的在变小。
+        #   ⚠️ 旧的推导（相机系 n_z>0 ⇒ psi>0 表示机身左偏 ⇒ 右转）与水面实测不符，**已作废**。
+        #   别再按它改回来；真要论证请拿"转完后重测的 ψ"当证据。
+        left = bool(psi > 0)
+        self.last_d = -1.0 if left else 1.0        # +1=右转 / -1=左转（与 turn_deg 的 d 同义）
+        self.last_dir = "左转" if left else "右转"
+        deg = abs(psi)
+        if deg <= float(self.cfg["tol_deg"]):
+            self.state = DONE
+            self.log("[HDG] ✅ 已与光轴平行（|psi|=%.1f° ≤ %.1f°）→ 不转" % (deg, self.cfg["tol_deg"]))
+            return self.state
         cap = float(self.cfg.get("max_step_deg", 0.0) or 0.0)
-        self.log("[HDG] 开始正航向：阈值 %.1f° 最多 %d 次，单次%s"
-                 % (self.cfg["tol_deg"], self.cfg["max_iters"],
-                    ("不设限" if cap <= 0 else "≤%.0f°" % cap)))
+        if cap > 0 and deg > cap:
+            self.log("[HDG] 单次幅度限制：%.1f° → %.0f°（配置了 max_step_deg>0）" % (deg, cap))
+            deg = cap
+        self.last_target_deg = deg
+        kw = dict(self.turn_kwargs)
+        if self.imag_sign not in (None, 0):
+            kw.setdefault("imag_sign", float(self.imag_sign))
+        kw.setdefault("timeout", float(self.cfg.get("turn_timeout_s", 8.0)))
+        self._core = TurnCore(deg=deg, left=left, log=self.log, **kw)
+        self._core.start(now_ms)
+        self.state = TURN
+        self.log("[HDG] 起转：%s %.1f°（冻结的 PnP 目标角；转完即结束，不重测）"
+                 % (self.last_dir, deg))
         return self.state
 
     def abort(self, why="外部中止"):
-        """外部要求中止 → 立刻停转并给结论。
-
-        只用于**整门丢失**（或总超时/缺遥测这类真正没得转的情况）：
-        档位退化（width/coarse）、位姿被拒、单帧角点闪烁**都不中止** —— 那是画面的事，
-        转向只信「已经测好的航向角 + 下位机回传的 yaw」（用户定）。
-        """
+        """外部要求中止 → 立刻停转并给结论。只用于**整门丢失**/进冲刺这类真该停的情况。"""
         if self._core is not None:
-            self._core.abort()
+            self._core.abort("external")
             self._core = None
         if self.state not in _TERMINAL:
-            self.aborts += 1
             self.state = ABORTED
             self.log("[HDG] ⛔ %s → 中止正航向（本门不再尝试，带当前航向继续）" % why)
         return self.state
 
-    # ------------------------------------------------------------------
-    def step(self, now_ms, psi_deg=None, psi_fresh=False, yaw_telemetry=None,
-             gate_lost=False, psi_stale=None):
-        """推进一帧。
-
-        Args:
-            psi_deg:     本帧从 **full** 帧测到的航向误差（度；None=本帧没有）
-            psi_fresh:   该测量是否新鲜（gate_task 用时间戳判；旧值不算）
-            yaw_telemetry: 下位机回传的绝对航向（度；None=没有遥测）
-            gate_lost:   本帧整门丢失
-            psi_stale:   **历史最后一个 psi**（最近一次 full 帧的 EMA；None=没有/已过期）。
-                         只在「攒不够 full 样本」时兜底用一次（见 MEASURE 分支）—— 2026-09-26 用户定：
-                         「居中成功后如果无法测量 psi，就用历史上的最后一个 psi」。
-                         ⚠️ 它**不进**样本列表当重复样本（那会把中位数拉偏、按旧偏差多转一次）。
-        Returns:
-            (state, yaw_cmd)
-        """
+    def step(self, now_ms, yaw_telemetry=None, gate_lost=False):
+        """推进一帧，返回 (state, yaw_cmd)。"""
         if not self.enabled or self.state in _TERMINAL:
             return self.state, 0.0
-        if self.state == IDLE:
-            self.start(now_ms)
-        if yaw_telemetry is not None:
-            self._tel_seen = True        # 本门内是否出现过遥测（决定转的时候闭环还是盲转）
-
         if gate_lost:
             return self.abort("整门丢失"), 0.0
-        # 注意：不能用 `or` 兜底 —— 时间戳可能正好是 0（虚拟时钟/开机第一帧），
-        #       那样会被当成「未设置」，总超时永远不触发。
+        if self.state == IDLE:
+            return self._giveup("没拿到目标角就进了正航向"), 0.0
         t_stage = self._t_stage if self._t_stage is not None else now_ms
         if now_ms - t_stage > self.cfg["timeout_ms"]:
             return self._giveup("正航向总超时 %.0fs" % (self.cfg["timeout_ms"] / 1000.0))
+        if self._core is None:
+            return self._giveup("转向没建立起来"), 0.0
 
-        # ---------------- 静止窗：等到"船真的不转了"再测 ----------------
-        if self.state == SETTLE:
-            if yaw_telemetry is None:
-                if not self._no_tel_logged:
-                    self._no_tel_logged = True
-                    self.log("[HDG] ⚠️ 没有遥测 yaw：无法确认停稳、也无法闭环转向")
-                # 2026-09-23：**遥测缺失不再直接放弃**（现场实证：唯一的 HDG 尝试在
-                # settle 停了 2.98s ≈ wait_tel_ms 就 giveup，此后本门 hdg_skip=done 再没转过）。
-                # blind_enable=true → 按 settle_ms 计时当作"已停稳"（无遥测本就无法验证），
-                # 去测 psi，转向交给 TurnCore 盲转（角度 ÷ blind_rate_dps），转完再回来测 psi
-                # 复核 ⇒ 无遥测也能迭代收敛，代价是单次转角精度取决于假设速率。
-                if not flag(self.cfg, "blind_enable", True):
-                    wait_ms = float(self.cfg.get("wait_tel_ms", 3000.0))
-                    if now_ms - (self._t_settle if self._t_settle is not None
-                                 else now_ms) > wait_ms:
-                        return self._giveup("%.0fs 内一直没有遥测 yaw（blind_enable=false）"
-                                            % (wait_ms / 1000.0))
-                    return SETTLE, 0.0
-                settle = float(self.cfg.get("settle_ms", 400.0))
-                if self._t_settle is None:
-                    self._t_settle = now_ms
-                if not self._blind_logged:
-                    self._blind_logged = True
-                    self.log("[HDG] ➡️ 盲转模式：无遥测时按 %.0fms 视为停稳 → 测 psi → 开环转"
-                             % settle)
-                if now_ms - self._t_settle >= settle:
-                    self.state = MEASURE
-                    self._samples = []
-                    self._t_meas = now_ms
-                    return MEASURE, 0.0
-                return SETTLE, 0.0
-            if self._yaw_ref is None:
-                self._yaw_ref = yaw_telemetry
-                self._t_settle = now_ms
-                return SETTLE, 0.0
-            if abs(wrap180(yaw_telemetry - self._yaw_ref)) > self.cfg["settle_tol_deg"]:
-                # 还在转 → 窗口重开
-                self._yaw_ref = yaw_telemetry
-                self._t_settle = now_ms
-                return SETTLE, 0.0
-            if now_ms - self._t_settle >= self.cfg["settle_ms"]:
-                self.state = MEASURE
-                self._samples = []
-                self._t_meas = now_ms
-                return MEASURE, 0.0
-            return SETTLE, 0.0
-
-        # ---------------- 测量：攒 k 帧 full 的 psi，取中位数 ----------------
-        if self.state == MEASURE:
-            if psi_deg is not None and psi_fresh:
-                self._samples.append(float(psi_deg))
-            need = max(1, int(self.cfg["measure_frames"]))
-            if len(self._samples) < need:
-                t_meas = self._t_meas if self._t_meas is not None else now_ms
-                if now_ms - t_meas <= self.cfg["measure_timeout_ms"]:
-                    return MEASURE, 0.0
-                if psi_stale is None:
-                    return self._giveup("%.1fs 内没攒够 %d 帧 full 测量（且没有可用的历史 psi）"
-                                        % (self.cfg["measure_timeout_ms"] / 1000.0, need))
-                # ★ 2026-09-26 用户定：「无法测量 psi，就用历史上的最后一个 psi」——
-                #   把它当**本次**测量值（塞一份列表走同一条决策路径），
-                #   于是不会因为"模型这会儿看不到角点"就把整门正航向废掉。
-                self._samples = [float(psi_stale)] * need
-                self.log("[HDG] ⏳ %.1fs 没攒够 %d 帧 full 测量 → 用**历史最后一个 psi**"
-                         "=%+.1f° 兜底（不放弃）"
-                         % (self.cfg["measure_timeout_ms"] / 1000.0, need, float(psi_stale)))
-            if len(self._samples) >= need:
-                self.psi_meas = float(st.median(self._samples))
-                self.log("[HDG] 测量 %d 帧 → psi=%+.1f°（中位数）" % (len(self._samples), self.psi_meas))
-                # ---- 转向方向自检（2026-09-23）----
-                # 转完重测时 |psi| **必须变小**。若没变小 ⇒ "命令符号→物理转向"与
-                # "物理转向→遥测符号"的关系把船转反了：探向只能测到二者之积（g·s），
-                # 闭环在 g·s=-1 时照样"收敛"（收敛在遥测上），但物理方向是镜像的
-                # ——现场现象就是"左转之后机身反而不平行"。只报警、不改行为。
-                if self._psi_prev is not None and self.iters >= 1:
-                    eps = float(self.cfg.get("dir_check_eps_deg", 1.0))
-                    if abs(self.psi_meas) >= abs(self._psi_prev) - eps:
-                        self.dir_suspect += 1
-                        self.log("[HDG] ⚠️ 转向后 |psi| 没变小（%.1f° → %.1f°）→ "
-                                 "**转向方向疑似反向**：核对遥测 yaw 符号"
-                                 "（comm.telemetry.yaw_sign，或下位机混控/推进器接线）"
-                                 % (self._psi_prev, self.psi_meas))
-                self._psi_prev = self.psi_meas
-                if abs(self.psi_meas) <= self.cfg["tol_deg"]:
-                    self.state = DONE
-                    self.log("[HDG] ✅ 已与光轴平行（|psi|=%.1f° ≤ %.1f°）→ 锁定 yaw"
-                             % (abs(self.psi_meas), self.cfg["tol_deg"]))
-                    return DONE, 0.0
-                if self.iters >= int(self.cfg["max_iters"]):
-                    return self._giveup("迭代已用满 %d 次（残余 psi=%+.1f°）"
-                                        % (self.iters, self.psi_meas))
-                return self._start_turn(now_ms)
-            return MEASURE, 0.0
-
-        # ---------------- 转（目标冻结；不在转动中重测）----------------
-        if self.state == TURN and self._core is not None:
-            st_, out = self._core.step(now_ms, yaw_telemetry)
-            if self._core.imag_sign is not None:
-                self.imag_sign = self._core.imag_sign        # 探向结果复用给后续迭代
-            if getattr(self._core, "probe_dy", None) is not None:
-                self.last_probe_deg = self._core.probe_dy
-                self.last_rate_dps = self._core.rate_probe
-            if st_ == TurnCore.DONE:
-                self.iters += 1
-                self.log("[HDG] 第 %d 次转向完成（目标 %.1f°）→ 回静止窗重测"
-                         % (self.iters, self.last_target_deg))
-                return self._to_settle(now_ms)
-            if st_ == TurnCore.TIMEOUT:
-                self.iters += 1
-                self.last_err_deg = self._core.done_deg
-                self.log("[HDG] ⚠️ 第 %d 次转向超时（实测转了 %.1f°）→ 回静止窗重测"
-                         % (self.iters, self._core.done_deg))
-                return self._to_settle(now_ms)
-            if st_ == TurnCore.ABORTED:
-                return self.abort("转向中止（缺遥测）"), 0.0
-            return TURN, out
-        return self.state, 0.0
+        st, out = self._core.step(now_ms, yaw_telemetry)
+        if st == TurnCore.DONE:
+            self.iters += 1
+            self.state = DONE
+            self._core = None
+            self.log("[HDG] ✅ 转向完成（%s %.1f°）→ 正航向结束" % (self.last_dir, self.last_target_deg))
+            return self.state, 0.0
+        if st == TurnCore.TIMEOUT:
+            self.iters += 1
+            return self._giveup("转向超时（目标 %.1f°）" % self.last_target_deg)
+        if st == TurnCore.ABORTED:
+            return self.abort("转向中止（%s）" % (self._core.why or "?")), 0.0
+        return TURN, out
 
     # ------------------------------------------------------------------
-    def _to_settle(self, now_ms):
-        self._core = None
-        self._samples = []
-        self._yaw_ref = None
-        self._t_settle = now_ms
-        self.state = SETTLE
-        return SETTLE, 0.0
-
-    def _start_turn(self, now_ms):
-        deg = abs(self.psi_meas)
-        cap = float(self.cfg.get("max_step_deg", 0.0) or 0.0)
-        # 用户 2026-09-18 定：**单次转角不设限**（0/负 = 不限制）→ 测多少就一次转多少。
-        #   理由：测的是纯姿态量，且转之前已经居中；转动本身在遥测 yaw 闭环下精确执行。
-        #   分多次转只会多出几轮「停稳-重测」的等待。安全阀仍保留：设成 >0 就恢复限幅。
-        if cap > 0 and deg > cap:
-            self.log("[HDG] 单次幅度限制：%.1f° → %.0f°（配置了 max_step_deg>0）"
-                     % (deg, cap))
-            deg = cap
-        # psi>0 = 门法向偏画面右 = 机身相对门左偏 → 需要**右转**（+yaw）；反之左转
-        left = bool(self.psi_meas < 0)
-        self.last_dir = "左转" if left else "右转"
-        self.last_target_deg = deg
-        # ⚠️ 2026-09-23 用户定：**转向下传形式必须与 `task1_2/run_ball_reverse.sh` 完全同形**
-        #   —— 那边就是 `common/turn_deg.py --deg N --dir left|right [--timeout] [--blind]`，
-        #   **不注入任何"记住的/配置的"符号**，符号由转角原语自己（探向）搞定。
-        #   历史教训：这里曾 `kw.setdefault("imag_sign", self.imag_sign)` 把上层记住的符号
-        #   灌进原语 ⇒ 一但那次记忆/配置反了，闭环变正反馈，船一路顶到限幅转 100°+ 还丢门。
-        #   视觉侧职责只有一条：**把 ψ 变成 (deg, left/right) 交下去**，其余不干预。
-        kw = dict(self.turn_kwargs)
-        # 单次转向的超时（默认 8s：25° 在 10~20°/s 下只需 1.2~2.5s，8s 很宽裕）。
-        # 预算关系：max_iters × (turn_timeout + settle + measure) 应 < timeout_ms，
-        # 否则总超时会先触发（那时 iterations 用不满 —— 也是安全的，只是日志会显示放弃）。
-        kw.setdefault("timeout", float(self.cfg.get("turn_timeout_s", 8.0)))
-        # `--blind` 与 .sh 的 AUV_TURN_BLIND 同义：**只在显式开启且确实没有遥测时**才带
-        if flag(self.cfg, "blind_enable", False) and not self._tel_seen:
-            kw["blind"] = True
-            self.log("[HDG] 本门内没有遥测 yaw → 本次转向带 --blind（角度 ÷ blind_rate_dps）")
-        self._core = TurnCore(deg=deg, left=left, log=self.log, **kw)
-        self._core.start(now_ms)
-        self.log("[HDG] 第 %d 次转向：%s %.1f°（按冻结的测量值；转完停稳再重测）"
-                 % (self.iters + 1, self.last_dir, deg))
-        self.state = TURN
-        return TURN, 0.0
-
     def _giveup(self, why):
         self.state = GIVEUP
         self._core = None
-        self.log("[HDG] ❌ %s → **带残余航向继续走**（不卡死；转完仍会回 GOLDEN 复核居中）" % why)
+        self.log("[HDG] ❌ %s → **带残余航向继续走**（不卡死）" % why)
         return GIVEUP, 0.0

@@ -1,6 +1,6 @@
 # AUV 视觉导航项目（RDK X5 / Ubuntu 22.04 / Python）
 
-> **当前状态（20260926）** —— 当天全部改动/未验证/回退见 **`doc/2026-09-26-改动记录-review.md`**
+> **当前状态（20260926）** —— 当天全部改动/未验证/回退见 **`doc/记录/2026-09-26-改动记录-review.md`**
 > - **门 pose 权重再次换代 → 阶段一 `g240_i16` 版**：
 >   `models/gate_kpt_stage1_g240_i16_bayese_640x640_nv12.bin`（md5 **`ef52c18b…`**，3,938,787 B）；
 >   上一代在 `bak/bakup_auv5/`（`9ac61773…`，09-24 采用版）。**契约与后处理规则见
@@ -44,7 +44,7 @@
 > - **过门的两条横向/转向约定（2026-09-20 用户定）**：
 >   **① 居中只有 sway 平移**（`align_yaw.{enable,in_px,in_pose}` 与其 PID **已整体删除**）；
 >   **② SEARCH 是左右平移扫视，不旋转**（原旋转脉冲已删除，`gate.search.{sweep_s,pause_s,sway}`）。
->   gate 里**唯一的 yaw 来源**是 ALIGN.HDG 离散正航向（`gate/heading_align.py` +
+>   gate 里**唯一的 yaw 来源**是 ALIGN.HDG 正航向（`gate/heading_align.py` +
 >   `common/turn_deg.py`，增益 `comm.motion.turn_pid`）。
 > - **限深保护（默认开启）**：下位机回传 14B 遥测帧（`0xAA55`+深度/姿态+校验和，
 >   `base/telemetry.py`）→ 深度 ≤ `comm.depth_guard.min_depth_m`（**现场定死 0.55 m，不准改**）时
@@ -66,8 +66,8 @@ RoboCup AUV 赛事视觉代码。平台：**RDK X5（3.5.0）**，前视 USB + �
 识别：YOLO 蓝/红球 + gate（**keypoint 四角 + PnP** 新前端）；串口 11B 帧向 STM32 下发 DOF，
 STM32 回传 14B 遥测帧（深度/姿态 → 限深保护）。
 
-> 先读：`README.md`（用法）→ `doc/算法说明.md`（总体）→ `gate/过门-状态机与参数.md`（**状态/运动/参数/逻辑树速查；§9 是现场实测记录汇总**）→ `doc/gate_pose_decode_spec.md`（**门 pose 模型的解码契约 + 后处理规则，换 bin 必读**）→ `doc/算法说明-gate-PnP移植方案.md`（gate 设计与移植）→ `doc/算法说明-gate-角点逐点融合滤波.md`（角点逐点数据处理）→ `doc/实验待测-runbook.md`（**下水前后的实测阶梯与判据**）→ `doc/2026-09-2X-改动记录-review.md`（**逐日全记录：改了什么 / 未验证 / 怎么回退**）。
-> 参数怎么改：`cfg/*.yaml` 注释只写"是什么 + 当前值 + 调它的后果"；**数值是怎么来的、现场发生过什么，都在 `gate/过门-状态机与参数.md` §9**。
+> 先读：`README.md`（用法）→ `doc/算法说明.md`（总体）→ `doc/记录/过门-状态机与参数.md`（**状态/运动/参数/逻辑树速查；§9 是现场实测记录汇总**）→ `doc/gate_pose_decode_spec.md`（**门 pose 模型的解码契约 + 后处理规则，换 bin 必读**）→ `doc/算法说明-gate-PnP移植方案.md`（gate 设计与移植）→ `doc/算法说明-gate-角点逐点融合滤波.md`（角点逐点数据处理）→ `doc/实验待测-runbook.md`（**下水前后的实测阶梯与判据**）→ `doc/记录/2026-09-2X-改动记录-review.md`（**逐日全记录：改了什么 / 未验证 / 怎么回退**）。
+> 参数怎么改：`cfg/*.yaml` 注释只写"是什么 + 当前值 + 调它的后果"；**数值是怎么来的、现场发生过什么，都在 `doc/记录/过门-状态机与参数.md` §9**。
 
 ## 目录分区（英文分区命名）
 
@@ -94,13 +94,11 @@ auv_vision/
 │   ├── gate_frontend.py #   keypoints_to_img_pts / mode 判定（前端适配层）
 │   ├── geometry.py      #   CameraModel / object_points / gate_pose / 平面·反投影
 │   ├── kpt_memory.py    #   角点逐点软融合（**可选，2026-09-18 起默认关闭**；开启用 enable=true / AUV_GATE_KPT_MEM=1）
-│   ├── heading_align.py #   ALIGN.HDG 离散正航向（测→转→停稳→再测；用 common/turn_deg.py 转）
+│   ├── heading_align.py #   ALIGN.HDG 正航向（PnP 目标角 → common/turn_deg.py 转一次 → 结束）
 │   ├── gate_postproc.py #   解码后处理（规范 §4）：可信角点 / 四角几何合法 / 重复框去重 / 选门键
 │   │                    #   （调用点 gate_decode.detect；配置 vision.gate.{det,postproc,select}）
-│   ├── mock.py          #   MockGateBackend 仿真后端
-│   └── 过门-状态机与参数.md  #   **逐状态导读**：作用/运动/参数调整/完整逻辑树（改 gate 前先看）
-│                        #   细则/参数/待测项见 doc/算法说明-gate-PnP移植方案.md（§5）
-│                        #   直冲出口只有三条（z.cross / 近距丢门 / 门口超时兜底 loiter.*）
+│   └── mock.py          #   MockGateBackend 仿真后端
+│                        #   （gate 的**逐状态导读**已归位到 doc/记录/过门-状态机与参数.md；改 gate 前先看）
 ├── bak/                 # 归档（gitignored，不上板）：gate v1.2 原版树 + 两份 v1.2 cfg 快照（见 bak/README.md）
 ├── tools/               # 工具（**按用途分三类**；除注明外都是本机驱动、不传板端，见 tools/README.md）
 │   ├── deploy/          #   部署与一致性：deploy_to_board.sh(烧录) · check_board_parity.sh + board_parity.md5(清单对齐)
@@ -121,7 +119,10 @@ auv_vision/
 │                        #   任务段只放各自特有的旋钮；共用值不在两处各写一份
 ├── doc/                 # 算法说明.md · 算法说明-gate-PnP移植方案.md（移植总体方案）
 │                        # 算法说明-gate-角点逐点融合滤波.md（kpt_memory 的数据处理）
-│                        # **2026-09-2X-改动记录-review.md（当天改动的全记录：改了什么/分叉/未验证/回退）**
+│                        # **注释历史.md（按文件/按键的历史索引：实测数字 / 试错 / 参数沿革）**
+│                        # 记录/  2026-09-2X-改动记录-review.md（当天改动的全记录：改了什么/分叉/未验证/回退）
+│                        #        过门-状态机与参数.md（**逐状态导读**：作用/运动/参数调整/完整逻辑树；
+│                        #                            §9 = 现场实测记录汇总；归位来源见 记录/README.md）
 │                        # 实验待测-runbook.md（**PnP 位姿/深度标定实验**：步骤/判据/记录表/报告模板）
 │                        # **待研究-缺角位姿先验（三维信息复用）.md**（缺角时用存下来的三维补信息，**未实现**）
 │                        # 前视USB相机低延迟推流方案.md（推流/手动模式）
@@ -170,8 +171,8 @@ AUV_SIM_MODE=1 ./run_ball_reverse.sh     # 台架：只打印不发串口（**�
   （开环、不依赖视觉；`AUV_REV_S`/`AUV_REV_SURGE` 调时长与速度）；
 - **倒车后的三步**（2026-09-19 加）：前进 `AUV_POST_FWD_S`(2s) → **按角度左转**
   `AUV_TURN_DEG`(90°，`common/turn_deg.py` 用下位机遥测 yaw **闭环**执行，转完必硬停)
-  → `main.py --task gate`。转角可用 `AUV_TURN_LEFT/AUV_TURN_KP/AUV_TURN_BLIND` 覆盖；
-  **没有遥测时 turn_deg 直接拒转（退出码 5）**，要开环盲转必须显式 `AUV_TURN_BLIND=1`；
+  → `main.py --task gate`。转角可用 `AUV_TURN_LEFT/AUV_TURN_KP/AUV_TURN_KD` 覆盖；
+  **没有遥测时 turn_deg 直接拒转（退出码 5）** —— 转向只有遥测 yaw 闭环，没有开环/盲转备案；
 - 单独试转向：`python3 common/turn_deg.py --deg 90 --dir left`（`--help` 看全部旋钮）。
 - 下视相机 `cfg/vision.yaml camera.down` 与 `base/camera.py`（sim/mipi）**保留**，仅策略不再使用。
 
@@ -280,11 +281,11 @@ cd ../pc
 - 🔴 **新权重上板（当前第一优先）**：阶段一 `g240_i16` 只在本地生效，板端还是旧代次 ⇒
   **代码 + `cfg/vision.yaml` + bin 一起推**（cfg 用外科补丁，别整份覆盖），然后回填
   **帧率/延迟**（R4 把 4 个节点提到 int16，算力会涨）、**`mode` 分布**、**角点误差** ⇒ 写回
-  `doc/2026-09-26-改动记录-review.md` §4 与 `doc/gate_pose_decode_spec.md` §8「未验证」；
+  `doc/记录/2026-09-26-改动记录-review.md` §4 与 `doc/gate_pose_decode_spec.md` §8「未验证」；
 - 🔴 **真实水域"有位姿可用率"**：上一代权重下最新一趟板端日志 `mode == full` 出现 **0 次**（ALIGN 95 帧里有
   17 帧拿到 4 个 ≥0.7 的角点，却一帧都没解出位姿；口径 = 当时板端 `conf_thr`，22:03 快照为 0.7）⇒ psi 测不到 ⇒ HDG 整趟没被触发。
   已实测排除 `pnp.reproj_px=20`（板端 20 帧里 13/14 通过）⇒ 先给逐帧日志补"位姿拒因 + 四点 conf + 重投影 RMS"
-  字段，再带录像跑一趟（判据与命令见 `doc/2026-09-23-改动记录-review.md` §5）。**换权重后要重测**；
+  字段，再带录像跑一趟（判据与命令见 `doc/记录/2026-09-23-改动记录-review.md` §5）。**换权重后要重测**；
 - 🔴 **新阈值/后处理参数要用实测复核**：`det.conf 0.6`、`keypoint.{conf_thr 0.8, vis_thr 0.5}`、
   `postproc.{edge_tol 0.10, min_edges 2}`、`select.mode near` —— 全部来自规范 §4/§6 的 PC 侧工作点，
   **板端/水里一次都没标定过**。手段：`preview_detect.py --gate-kpt`（不建串口、船不动）看

@@ -120,14 +120,37 @@ def test_dedup_config_can_disable_by_edges():
 # ④ apply()：几何 + 去重一起，保序、不改动传入对象
 # --------------------------------------------------------------------------
 def test_apply_drops_illegal_quad_and_preserves_order():
+    """规范 §4②：**先 L/R 归一**（左右标反 → 交换后保留），归一救不回来的才丢；保序。
+
+    只有"上下也反/自交"这种真的非法才丢；左右反不算非法（模型约一半实例会标反，
+    旧行为会把近门整条丢掉，沿革见 doc/_注释历史_fragments/base_tests.md）。
+    """
     good = _det(score=0.9, x=100, y=100, w=200, h=150)
-    bad = _det(score=0.8, x=400, y=200, w=200, h=150,
-               kpts=[(600, 200), (400, 200), (400, 350), (600, 350)])  # 顺序非法
+    lr_swapped = _det(score=0.8, x=400, y=200, w=200, h=150,
+                      kpts=[(600, 200), (400, 200), (400, 350), (600, 350)])  # 左右反 → 归一
+    bad = _det(score=0.7, x=800, y=200, w=200, h=150,
+               kpts=[(800, 350), (1000, 350), (1000, 200), (800, 200)])      # 上下反 → 救不回
     other = Det("gate", 0.5, 10, 10, 20, 20)                  # 无角点信息
-    out = pp.apply([good, bad, other], conf_thr=0.8)
-    assert out == [good, other]
+    out = pp.apply([good, lr_swapped, bad, other], conf_thr=0.8)
+    assert out == [good, lr_swapped, other]
+    # L/R 归一真的交换了（TL 与 TR、BL 与 BR），且 kpt_conf 跟着换
+    assert lr_swapped.kpts[0][0] == 400 and lr_swapped.kpts[1][0] == 600
+    assert lr_swapped.kpts[2][0] == 600 and lr_swapped.kpts[3][0] == 400
     # 传入列表未被就地改写
-    assert len([good, bad, other]) == 3
+    assert len([good, lr_swapped, bad, other]) == 4
+
+
+def test_lr_normalize_skips_placeholder_and_single_side():
+    """归一的两个护栏：`(0,0)` 占位不算可见；只看到一侧时判不出左右 → 不动。"""
+    ph = _det(kpts=[(0, 0), (400, 200), (400, 350), (600, 350)],
+              confs=(0.9, 0.9, 0.9, 0.9))     # TL 是 (0,0) 占位（模型没找到时会这样）
+    assert pp.visible_mask(ph)[0] == False, "(0,0) 占位不算可见"
+    # 占位**不参与**求均值：真左列只剩 BL(600)，右列 400/400 ⇒ 确实标反 ⇒ 必须交换。
+    # 若把占位的 x=0 算进去，均值变成 300 ≤ 400 ⇒ 会被误判成"没标反"而漏掉这次归一。
+    assert pp.lr_normalize(ph) is True
+    one = _det(kpts=[(600, 200), (0, 0), (0, 0), (600, 350)],
+               confs=(0.9, 0.0, 0.0, 0.9))     # 只有左列可见
+    assert pp.lr_normalize(one) is False
 
 
 def test_apply_geom_check_can_be_disabled():
@@ -199,8 +222,8 @@ def test_gate_backend_wires_det_conf_and_postproc(monkeypatch):
     b = GateKeypointBackend(path="models/nonexistent.bin", labels=["gate"],
                             kpt_order=["TL", "TR", "BR", "BL"], camera=cam)
     # 候选阈值走 gate 专用的 det.conf（**不是**共用的 model.score_threshold）
-    # ⚠️ 别写成"两者必须不相等"——它们现在**恰好都是 0.6**（ball 那个值被人从 0.5 调成 0.6），
-    #    那种断言会在配置巧合时假红。这里改成**显式改两个值、看谁生效**：
+    # ⚠️ 别写成"两者必须不相等"：两者取值可以巧合相同，那种断言会假红。
+    #    这里改成**显式改两个值、看谁生效**：
     assert b._det_conf == float(S.vision.gate.det.conf)
     monkeypatch.setitem(S.vision.gate.det, "conf", 0.71)
     monkeypatch.setattr(S.vision.model, "score_threshold", 0.42, raising=False)

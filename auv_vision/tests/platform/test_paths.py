@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """tests/platform/test_paths.py — 路径依赖：cfg 相对路径 + 解析器 + 自检工具。
 
-守的是 2026-09-22 板端踩过的两类坑：
-  1. **cfg 里写绝对路径** ⇒ 把配置钉死在某一份拷贝上（板端有 `/home/sunrise/AUV` 与
-     `~/Desktop/AUV_New` 两份），指错一份就静默用另一个文件、那份被删就直接崩；
-     ⇒ 规则：cfg 一律写**仓库内相对路径**，运行时由 `base.settings.resolve_path()` 解析。
+守的是两类坑：
+  1. **cfg 里写绝对路径** ⇒ 把配置钉死在某一份拷贝上，指错一份就静默用另一个文件、
+     那份被删就直接崩；⇒ 规则：cfg 一律写**仓库内相对路径**，运行时由
+     `base.settings.resolve_path()` 解析。（2026-09-22 板端踩过，证据见
+     doc/_注释历史_fragments/base_tests.md）
   2. **标定 yaml 的文件头**：板端 cv2 4.11 要求第一个字节是 `%YAML:1.0`。
 """
 from __future__ import annotations
@@ -105,7 +106,7 @@ def test_check_paths_tool_passes_on_this_repo(capsys):
 def test_deploy_scripts_default_to_the_live_copy():
     """部署/核对脚本的默认目录必须是**现场在用的工作副本** AUV_New。
 
-    2026-09-22 之前默认是旧副本 `/home/sunrise/AUV` —— 照默认跑就会把文件推/比到错的拷贝上。
+    照默认跑就会把文件推到/比到错的拷贝上（沿革见 doc/_注释历史_fragments/base_tests.md）。
     """
     import glob
     import re

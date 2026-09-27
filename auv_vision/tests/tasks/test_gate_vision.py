@@ -103,7 +103,7 @@ def test_kpt_memory_switch_precedence_and_smoothing(monkeypatch):
     monkeypatch.setenv(ENV_ENABLE, "0")                     # force 压过 env
     assert isinstance(build_kpt_memory({"enable": False}, force=True), KptMemory)
 
-    # 工程真实配置：**2026-09-18 用户定 kpt_mem 真关掉**（enable=false）→ 返回 None
+    # 工程真实配置：**kpt_mem 默认真关掉**（enable=false，2026-09-18 用户定）→ 返回 None
     monkeypatch.delenv(ENV_ENABLE, raising=False)
     assert build_kpt_memory(S.vision.gate.kpt_mem) is None, \
         "cfg/vision.yaml 里 kpt_mem.enable 应该是 false（用户现场决定）"
