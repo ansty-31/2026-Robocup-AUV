@@ -23,7 +23,9 @@
 | `backup/front_camera_AUV1_water_fx782.yaml` | 归档 | 旧的水下标定（fx=782.5，来自 `../data/calib/AUV_1_board`）。**已不参与任何链路**，仅留档 |
 | `backup/front_camera_board_A_fx782_20260923.yaml` | 归档（2026-09-23 换版前另存） | **与上一份是同一套内参**：`camera_matrix` 与 `distortion_coefficients` 逐项数值相同（fx=782.54、dist[0:2]=[-0.4914, 0.3784]），只是多了 `FILE-HEAD RULE` 等注释（32 行 vs 18 行）。换到 AUV_5 新标定（fx≈1207.6）前留的存底，**不参与任何链路** |
 | `yolo11n_config.yaml` | 本仓库（PC 侧） | detect 模型 PTQ 量化配置（onnx 路径 / Softmax node_info / 输出前缀） |
-| `gate_kpt_stage1_config.yaml` | 本仓库（PC 侧） | **阶段一 gate pose 量化配置（2026-09-26 新增）**：`onnx_model` → `weights/new/yolo11n-pose.stage1.onnx`，前缀 `gate_kpt_stage1_g240_i16_bayese_640x640_nv12`，校准集 `calibration_data_gate240_stage1_rgb/`，`node_info` 含 Softmax + head 末端 4 卷积 int16。四轮实验见 `_archive/quant_rounds_stage1_20260926/` |
+| ~~`gate_kpt_stage1_config.yaml`~~ → **已归档** `_archive/auv6/superseded_by_v3_20260928/`（R4/g240_i16；板端仓库自带该 bin） | 已归档 | 由 `gate_kpt_stage1_v3_config.yaml` 接替 |
+| ~~`gate_kpt_stage1_v2_config.yaml`~~（已随 v2 归档至 `_archive/auv6/superseded_by_v3_20260928/`） | 已归档 | 随 v2 一并归档（v3 用 `configs/gate_kpt_stage1_v3_config.yaml`） |
+| `gate_kpt_stage1_clear_only_config.yaml` | 本仓库（PC 侧） | **Plan B（2026-09-28）**：阶段一权重热启动、只用 `AUV_6_clear` 单训；onnx → `weights/new/yolo11n-pose.stage1_clear_only.onnx`，校准集同 v2，前缀 `gate_kpt_stage1_clear_only_bayese_640x640_nv12` |
 | `gate_kpt_config.yaml` | 本仓库（PC 侧） | pose（gate 4 角点）模型 PTQ 量化配置 |
 
 ## 与板端同步（只读）

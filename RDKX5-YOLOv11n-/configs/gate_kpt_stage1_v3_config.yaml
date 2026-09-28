@@ -1,0 +1,33 @@
+# 阶段一 v3 · Plan D（2026-09-28）PTQ 量化配置：合并数据 + **恢复多门/部分可见过采样**
+# 权重 weights/new/yolo11n-pose.stage1_v3.pt：阶段一权重热启动，数据 data/datasets/AUV_6_stage1d（3642 链接，s_multi=2/g_part2=2/g_part3=2/g_tube=2.5/w_mid=1.5/w_turbid=1.5），200 轮
+# 校准集 calibration_data_gate240_auv6_rgb（AUV_6_clear train 240 张，域匹配）
+model_parameters:
+  onnx_model: '/data/weights/new/yolo11n-pose.stage1_v3.onnx'
+  march: 'bayes-e'
+  working_dir: '/data/output'
+  output_model_file_prefix: 'gate_kpt_stage1_v3_bayese_640x640_nv12'
+  # Softmax 必须留 BPU（int16），否则 C2PSA 会切出 CPU 子图；head 末端 4 个卷积 int16
+  # 是 R4 实测最有效的保真手段（kpt 张量保真最好）。代价是这些节点算力上升，上板要复测帧率。
+  node_info: {
+    "/model.10/m/m.0/attn/Softmax": { 'ON': 'BPU', 'InputType': 'int16', 'OutputType': 'int16' },
+    "/model.23/cv2.1/cv2.1.2/Conv": { 'ON': 'BPU', 'InputType': 'int16', 'OutputType': 'int16' },
+    "/model.23/cv2.2/cv2.2.2/Conv": { 'ON': 'BPU', 'InputType': 'int16', 'OutputType': 'int16' },
+    "/model.23/cv4.1/cv4.1.2/Conv": { 'ON': 'BPU', 'InputType': 'int16', 'OutputType': 'int16' },
+    "/model.23/cv4.2/cv4.2.2/Conv": { 'ON': 'BPU', 'InputType': 'int16', 'OutputType': 'int16' }
+  }
+
+input_parameters:
+  input_type_rt: 'nv12'
+  input_type_train: 'rgb'
+  input_layout_train: 'NCHW'
+  norm_type: 'data_scale'
+  scale_value: 0.003921568627451
+
+calibration_parameters:
+  cal_data_dir: '/data/calibration_data_gate240_auv6_rgb'
+  cal_data_type: 'float32'
+  calibration_type: 'default'
+
+compiler_parameters:
+  compile_mode: 'latency'
+  optimize_level: 'O3'

@@ -169,7 +169,7 @@ python scripts/2_train/train_yolo11n.py --task pose --data <data.yaml> \
 > **2026-09-24：本目录已按 git 回退到 09-15（`54e09b4`）的状态，就是上面这 4 个脚本。**
 > 09-19/09-23 加的 `test_decode_parity.py`、`check_quant.sh`、`check_quant_cos.py` 与
 > 当天新增的解码级校验脚本**已删除**（它们不在"一周前的一般量化流程"里）。
-> **思路与实测数字留档**在 [`../_archive/quant_ideas_void_20260924/QUANT_TUNING_20260924.md`](../../_archive/quant_ideas_void_20260924/QUANT_TUNING_20260924.md)
+> **思路与实测数字留档**在 [`../_archive/quant/ideas_void_20260924/QUANT_TUNING_20260924.md`](../../_archive/quant/ideas_void_20260924/QUANT_TUNING_20260924.md)
 > （含校验标准、三轮结果、根因、以及"怎么把这三个校验工具重建出来"的要点）。需要时一条命令取回：
 >
 > ```bash
@@ -194,7 +194,7 @@ python scripts/2_train/train_yolo11n.py --task pose --data <data.yaml> \
 > pose 校准集的口径（2026-09-23 起）：**用与训练/部署同链路的 640 图**（当前 = D + LUT 白平衡、无 CLAHE），
 > 从 `../data/derived/AUV_5_selected_3000_Dwb/` 抽（跨水质、清水偏多），**不要**再用旧的 `PNP.kpt4` 原图
 > （那是 A-old 链路，分布对不上）。张数 300、`calibration_type: default`（2026-09-24 起固定用 default：
-> 同日试过的 `max` / `mix` 都更差，记录见 `../../_archive/quant_ideas_void_20260924/QUANT_TUNING_20260924.md`）。
+> 同日试过的 `max` / `mix` 都更差，记录见 `../../_archive/quant/ideas_void_20260924/QUANT_TUNING_20260924.md`）。
 >
 > 校准数据建议取**训练集图片**（与推理同分布）：`3_export/prepare_calibration.py --coco-path <数据集>/train/images --output-dir <对应目录>`。
 > 注意它对非方形图会 letterbox 补灰边，而板端推理是直接 squish 到 640×640；

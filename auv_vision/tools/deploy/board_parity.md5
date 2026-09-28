@@ -2,6 +2,9 @@
 [ 5cd1d8b7a7777a4dd23414ed50790c53  base/__init__.py ]
 9b7d5829f957f23ae9ccd81fbb339478  base/settings.py
 [ b9a4cfe740f2be2d8c23deda7d31e787  base/telemetry.py ]
+# base/turn_log.py：转向调用日志，2026-09-27 从 common/ 挪来（无方括号 = 仅本地记录，
+#   待下一次板端可达时由 `check_board_parity.sh --board --write` 刷成实测值）
+f2a54c4927236fd79e380b3aae283857  base/turn_log.py
 [ 258117d369467908829b850400733d7d  base/uart.py ]
 [ 21a25280e51063f305f08a21191b4bf6  cfg/backup/front_camera_AUV1_water_fx782.yaml ]
 [ 2cbfeb89e22d62470e5f730ee3f8f89b  cfg/comm.yaml ]
@@ -14,7 +17,6 @@
 [ b2983b6a93e934849e78f4f8e7374f24  common/PID.py ]
 [ 13b611907a90ff8cd587038aeb0617a6  common/preprocess.py ]
 [ d4c39fb21fd7682915968da206123912  common/turn_deg.py ]
-[ 00539660b66a0b04c028a01ba9be1d07  common/turn_log.py ]
 [ 7b0930eb418222aa5fd1d7ff783de154  doc/待研究-缺角位姿先验（三维信息复用）.md ]
 [ 00ec5c4e383b31cd928c92783624d3f3  doc/记录/2026-09-22-改动记录-review.md ]
 [ 808cb8145473a4a2c8dd86ba56553704  doc/记录/2026-09-23-改动记录-review.md ]

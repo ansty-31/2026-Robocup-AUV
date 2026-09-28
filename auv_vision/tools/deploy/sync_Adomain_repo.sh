@@ -122,6 +122,8 @@ rm -f /tmp/Adomain_settings.py
   echo "cd '$A_DIR'"
   echo "mkdir -p 'bak/Adomain_ref_$STAMP'"
   echo "[ -f models/gate_kpt_stage1_g240_i16_bayese_640x640_nv12.bin ] && { cp -p models/gate_kpt_stage1_g240_i16_bayese_640x640_nv12.bin 'bak/Adomain_ref_$STAMP/'; rm -f models/gate_kpt_stage1_g240_i16_bayese_640x640_nv12.bin; echo '  [removed] 阶段一权重（属 D 域，旧仓库不用）'; }"
+  # 转向调用日志 `turn_log` 已从 common/ 挪到 base/（用户 2026-09-27 定）→ 旧位置删掉，先备份
+  echo "[ -f common/turn_log.py ] && { cp -p common/turn_log.py 'bak/Adomain_ref_$STAMP/turn_log.py.old'; rm -f common/turn_log.py; echo '  [moved] common/turn_log.py → base/turn_log.py（旧位置已删，备份在 bak/Adomain_ref_$STAMP/）'; }"
   echo "find . -name __pycache__ -type d -not -path './bak/*' -prune -exec rm -rf {} + 2>/dev/null; echo CLEAN-OK"
 } > /tmp/Adomain_clean.sh
 timeout 120 "$STREAM" "bash -s" < /tmp/Adomain_clean.sh 2>/dev/null | grep -vE "^\s*$" | sed 's/^/        /'

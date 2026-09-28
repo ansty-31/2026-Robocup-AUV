@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from common.PID import PID                                          # noqa: E402
 from common.cfgnode import nums                                     # noqa: E402
-from common.turn_log import turn_log                                # noqa: E402 转弯调用日志
+from base.turn_log import turn_log                                  # noqa: E402 转弯调用日志
 
 # 固件约定：**船右转时原始 yaw 减小** ⇒ 该常量 = -1（一次实测确定，换固件/IMU 才要复核）。
 _FW_RIGHT_YAW_SIGN = -1.0

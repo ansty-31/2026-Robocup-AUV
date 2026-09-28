@@ -1,0 +1,16 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+kpt_shape: [4, 3]
+flip_idx: [0, 1, 2, 3]
+
+nc: 1
+names: ['gate']
+
+roboflow:
+  workspace: visual-kfdo0
+  project: gate-pose-y6qoj
+  version: dataset
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/visual-kfdo0/gate-pose-y6qoj/dataset/dataset

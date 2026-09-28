@@ -79,6 +79,7 @@ auv_vision/
 ├── manual/              # 手动模式三件套：udp_server.py(遥控桥) · recorder.py(录像) · stream.py(推流/接收库)
 ├── base/                # 基础部件：settings.py(配置) · camera.py(前视/下视/mipi)
 │                        #           uart.py(11B 下发帧) · telemetry.py(0xAA55 遥测上行：深度)
+│                        #   turn_log.py(转向调用日志：只写字、不参与控制；2026-09-27 从 common/ 挪来)
 ├── common/              # 通用功能：PID.py · preprocess.py(图像链路) · detector.py(检测)
 │                        #           cfgnode.py(cfg 节点读取 + **ball/gate 共用参数的唯一入口**)
 │                        #           turn_deg.py(按角度原地转：遥测 yaw 闭环 + 硬停；gate/脚本共用)

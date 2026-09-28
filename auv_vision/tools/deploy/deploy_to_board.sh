@@ -43,6 +43,9 @@ DELETED=(
   tests/test_ball_forward.py
   # 按角度原地转的实现在 common/turn_deg.py（脚本与 gate 正航向共用），
   # 板端旧的 task1_2/turn_deg.py 必须删掉，否则"两个同名脚本、行为不同"必然踩坑。
+  # 转向调用日志 `turn_log` 已从 common/ 挪到 base/（用户 2026-09-27 定：它是排查工具，
+  # 不属 common/ 的共用运动/检测逻辑）→ 板端旧位置必须删掉，否则"两份同名模块"必然踩坑。
+  common/turn_log.py
   task1_2/turn_deg.py
   # 工程根旧副本：这些工具已迁到 tools/ 或已删除，板端根目录的同名旧文件要删
   check_pipeline_identity.py

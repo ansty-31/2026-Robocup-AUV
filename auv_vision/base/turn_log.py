@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""turn_log.py — **转向调用日志**（只写字，不参与任何控制）。
+"""base/turn_log.py — **转向调用日志**（只写字，不参与任何控制）。
+
+位置说明（用户 2026-09-27 定）：它是**排查工具**、不属于 `common/` 的共用运动/检测逻辑，所以从
+`common/` 挪出来；**不放 `tools/`**（`tools/` 是本机工具、默认不随部署上板，而它是**运行期依赖**），
+落在本就随部署上板的基础层 `base/`。调用方：`gate/gate_task.py`、`common/turn_deg.py`。
 
 为什么要单独一个件：现场问题（"看到门就不停地转、手动插不进来"、"转了一点点就停"、
 "到底进没进那个循环"）在逐帧任务日志里**看不到"进入/离开 turn 循环"这个粒度**。
@@ -14,7 +18,7 @@
       显式设成空串 = 关掉。**任何异常都吞掉** —— 日志绝不许影响控制链路。
 
 用法：
-    from common.turn_log import turn_log
+    from base.turn_log import turn_log
     turn_log("enter", src="gate", deg=25.0, left=True, sig=-1.0, timeout=8.0)
 """
 from __future__ import annotations

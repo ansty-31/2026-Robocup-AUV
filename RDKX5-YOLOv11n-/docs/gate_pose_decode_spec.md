@@ -10,7 +10,7 @@
 > | 权重 | `weights/new/yolo11n-pose.stage1_full.pt`（md5 `c890968f…`；与 `…stage1.pt` md5 `8b2325a6…` **预测逐值相同**，已实测 6 张） |
 > | ONNX | `weights/new/yolo11n-pose.stage1.onnx`（10,699,134 B，md5 `e6efe4197f90…`，**9 输出**，opset 11，输入 `images 1×3×640×640`） |
 > | 量化 bin | `output/weights/gate_kpt_stage1_g240_i16_bayese_640x640_nv12.bin`（3,938,787 B，md5 `ef52c18b9fa0…`，**R4**，采用；见 §8） |
-> | 量化配置 | `configs/gate_kpt_stage1_config.yaml（R4；R1~R3 见 `_archive/quant_rounds_stage1_20260926/`）`（`march: bayes-e`，NV12 输入，O3） |
+> | 量化配置 | `configs/gate_kpt_stage1_config.yaml（R4；R1~R3 见 `_archive/quant/rounds_stage1_20260926/`）`（`march: bayes-e`，NV12 输入，O3） |
 > | 校准集 | `calibration_data_gate240_stage1_rgb/`（240 张：阶段一训练集有门帧 160 + 中水 80） |
 >
 > ⚠️ 旧版（auv5/auv4）bin 的 `output/gate_kpt_*` 不在本文件范围内；**换 bin 必须同时确认本节指纹**。
@@ -116,16 +116,17 @@ v    = sigmoid(k[i, 2])                   # v 是 raw logit，必须自行 sigmo
 | 选门 | **近距离优先**；测距失败时选**置信度高**或**画面大**的 | — | 用户 2026-09-26 给定；本仓没有板端选门代码，板端请按此实现 |
 | 语义 | 只有在四角都 `v ≥ V_MIN` 时才**当作完整门**去解 PnP | — | 角点在画面外时模型给低 v 是**正确行为**（标注约定 `Delete → v=0`），不是错 |
 
-### 4.1 `v` 必须先 sigmoid 再比阈值（**已知不一致，需修**）
+### 4.1 `v` 的两条链路不要搞混（2026-09-28 实测更正）
 
-模型输出的第 3 个通道是 **raw logit**，板端 `gate_decode.py` 是 `sigmoid(v) ≥ V_MIN` 才可信。
-但本仓库 PC 侧 `scripts/2_train/eval_benchmark.py::instance_quality` 直接拿 **raw logit 和 0.8 比** ——
-raw 0.8 ⟺ sigmoid **0.69**，**PC 口径比板端松一档**。AUV5 上 raw 普遍 ≥5（两者都过，看不出差别），
-AUV6 上就致命：同一批 400 张，PC 口径"四角齐"102 帧，**板端口径 0 帧**（角点 sigmoid 上限只有 0.73）。
+| 来源 | v 是什么 | 怎么用 |
+|---|---|---|
+| **9 输出 ONNX / .bin（板端）** | **raw logit**（实测一帧 stride32 最高分 cell：6.96 / 5.27 / 5.62 / 6.93） | **板端先 `sigmoid` 再比 `V_MIN`** → 0.999 / 0.995 / 0.996 / 0.999 ✅ |
+| `.pt`（ultralytics 原版 head） | **已经是概率**（`kpts_decode` 里 `y[:, 2::3].sigmoid()`） | **直接比阈值，不要再 sigmoid**（再套一次会把它压成 0.5~0.73，看起来像"置信度上不去"） |
 
-→ 上位机/板端一律按 `sigmoid(v) ≥ V_MIN` 实现；PC 侧如需对齐，应在读模型输出后先 sigmoid。
-
----
+**踩过的坑（2026-09-28）**：PC 侧预览工具对 `.pt` 的 v 又套了一次 sigmoid，
+得出"AUV6 角点置信度上限 0.731、四角 ≥0.8 的帧为 0"的假结论，
+据此差点误判"模型在 AUV6 上不达标"。实际 `.pt` 上四角普遍 0.9~1.0，**板端 V_MIN 完全满足**。
+凡是看到 v 齐刷刷落在 0.5~0.73 的，先查有没有双重 sigmoid。
 
 ## 5. 类别顺序（别和 detect 混）
 
@@ -174,12 +175,14 @@ CORNER    = ("TL", "TR", "BR", "BL")
 | R2 | 同 R1 | `per_channel: True` | 0.9074（**逐位同 R1**） | 0.9458 / 1 | 同 R1 | 该选项对本模型**无效果**（损失来自激活量化） |
 | R3 | `calibration_data_gate240_stage1_rgb/`（240：有门帧，**照 auv4 那代做法**） | 换校准集 | 0.9056 | 0.9519 / **0** | 0.9879 / 0.9705 | 逐节点达标 |
 | **R4（采用）** | 同 R3 | 再把 head 末端 4 个卷积（bbox×2 + kpt×2）指 **int16** | **0.9058** | **0.9625 / 0** | **0.9985 / 0.9738** | **kpt 保真最好 → 采用** |
+| **v2（2026-09-28，清水适配）** | `calibration_data_gate240_auv6_rgb`（AUV_6_clear train 240 张，域匹配）+ 同款 int16 配置 | 新模型 `yolo11n-pose.stage1_v2.pt` | 0.8570（仍卡在 bbox DFL raw logits） | **0.9729 / 0**（276 节点，本仓最好） | — | bin → `output/weights/gate_kpt_stage1_v2_bayese_640x640_nv12.bin`（2026-09-28 删除后重出，数字一致）；解码级 float↔量化偏差**仍未验证**（容器内 hb 浮点模型与导出 ONNX 不同构，做不了） |
+| **★ v3（2026-09-28，Plan D）— 采用版** | 同款域匹配校准集 + 同款 int16 配置 | `yolo11n-pose.stage1_v3.pt`（合并数据 + 恢复多门/部分可见过采样，200 轮） | **0.9142** | **0.9716 / 0** | — | 难例 n_fail 111（全场最好）；bin → `output/weights/gate_kpt_stage1_v3_bayese_640x640_nv12.bin` |
 
 - 卡住"输出层最小余弦"的永远是 **bbox 的 DFL 原始 logits**（0.90~0.95）；那 64 通道是回归原始值，
   真正决定框位置的是**softmax 后的期望**（§3.1）——**该指标对本模型的框精度不敏感**，别用它一票否决。
 - 参照：**上一代上线的 bin 同法测得 0.7862 / 0.9194（13 个节点 <0.95）** ⇒ 本次量化**明显更好**。
 - **已作废**：2026-09-24 那轮"用 `max`/`mix` 校正方式优化"的尝试全部失败，
-  记录已归档到 `_archive/quant_ideas_void_20260924/`，**禁止再试**（用户 2026-09-26 裁定）。
+  记录已归档到 `_archive/quant/ideas_void_20260924/`，**禁止再试**（用户 2026-09-26 裁定）。
   从今以后：**只换校准集**迭代，`calibration_type` 固定 `default`。
 - **已做过的核验**：① 解码公式 vs ultralytics 原版（框 0.40 px / 角点 0.009 px）✅；
   ② 量化保真（上面 4 轮的余弦，用 `scripts/3_export/check_quant_cos.py`）✅。
@@ -188,6 +191,8 @@ CORNER    = ("TL", "TR", "BR", "BL")
   * **板端精度**：板端解码后的角点误差/PnP 稳定性，本仓没有板子，**一次都没实测过**；
   * **解码级 float↔量化 偏差**：本想用 hb_mapper 的 float/calibrated 两个 onnx 在容器里直接对拍，
     但实测**两者在同一输入下并不数值等价**（张量最大差 ~30），容器内这条路走不通 → 留待板上用真图对拍。
+
+> ⚠️ **bin 的 md5 不是内容指纹**：同一 ONNX + 同一校准集重跑，hb_mapper 产出的 bin **字节不同**（实测 2026-09-28：`bf5944be…` → `a5b866dd…`），但逐节点/输出层余弦完全一致。比对版本请用 `quant_info.json` 与余弦数字，别用 md5。
 
 ## 9. 上位机接入自检清单
 

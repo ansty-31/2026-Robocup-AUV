@@ -30,7 +30,7 @@ import numpy as np
 
 import base.settings as S
 from common.PID import PID
-from common.turn_log import turn_log            # 转向调用日志（只写字，不参与控制）
+from base.turn_log import turn_log              # 转向调用日志（只写字，不参与控制）
 from common.cfgnode import (flag, merge, motion_node, motion_num, num, pid_kw,
                             sub)
 from gate.gate_detector import board_camera

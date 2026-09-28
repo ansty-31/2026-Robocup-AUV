@@ -6,9 +6,9 @@
 > 命名规则：**当前版本占“规范名”**（`yolo11n-pose.pt` / `yolo11n-pose.onnx`），
 > **历史版本加 `.<代次>` 后缀**（`.auv3` / `.auv4` …）。换代不删旧文件，见文末「新模型上线三步」。
 
-> ⚠️ 已过时（2026-09-26）：正文「本目录存放**所有**模型文件」不完全成立 —— 仓库根还有一个
-> `yolov8n.pt`（md5 `95a24496…`，与 `_archive/root/yolov8n.pt` **逐字节相同**），既不在 `weights/`
-> 也不在本 README 的任何一行里（无来源/用途记录，**待你确认是否归档或删除**）。
+> ✅ **2026-09-28 已处理**：仓库根与归档区那份 `yolov8n.pt`（md5 `95a24496…`，ultralytics 自动下载物、
+> 代码零引用）经用户确认**已删除**，记录见 `_archive/_records/DELETED_2026-09-28.tsv`。
+> 因此正文「本目录存放**所有**模型文件」现在成立。
 > 本 README 覆盖 `weights/` 目录本身；`.bin` 交付物在 `output/`（见下文专节）。
 
 ## 模型文件
@@ -21,13 +21,17 @@
 | **`weights/yolo11n-pose.pt`** | **pose 模型（当前 = 2026-09-24 从 coco 重训版）**，md5 `2f36303a…` | 在 `data/datasets/AUV_5_gate-pose.yolov8`（**844 张** = train 675 / valid 85 / test 84，干净重划分；`nc=1` names `['gate']`、`kpt_shape [4,3]`）上**从官方 `weights/yolo11n-pose.coco.pt` 从零重训**，300/300 ep 无早停。val Pose mAP50-95 **0.9632** / test **0.9508**；面积比（预测/GT）中位 **0.9783**（auv5 是 0.960，内缩从 ~4% 降到 ~2%）。详见 [`runs/auv5/REPORT_auv5_pose.md`](../runs/auv5/REPORT_auv5_pose.md) §14 | 导出 pose ONNX（`--task pose`）、板端门 4 角点 |
 | **`weights/yolo11n-pose.onnx`** | **pose ONNX（当前）**，md5 `f986b24f…`；已核对：**9 输出**、NHWC、kpt 通道 12、cls 通道 1、输入 `images 1×3×640×640`、opset 11 | `scripts/3_export/export_onnx.py --task pose`（需先 `scripts/3_export/modify_ultralytics.py --task pose` 打补丁） | `scripts/3_export/quantize.sh configs/gate_kpt_config.yaml`（PTQ 输入） |
 | `weights/yolo11n-pose.coco.pt` | 官方 COCO pose 预训练（17 点），md5 `475cd7f6…` | 官方 asset（与官方 `yolo11n-pose.pt` release 同一文件） | **推荐的 pose 起点**：`--task pose --weights weights/yolo11n-pose.coco.pt` |
-| `weights/yolo11n-pose.auv4.pt` | 上一版 pose（AUV_4 版，09-17 在 `data/datasets/AUV_4_PNP.kpt4.yolov8` 上微调，206 ep 早停 best=ep106，val mAP50-95 **0.952** / test **0.911**），md5 `3a5e87fa…`；同源训练记录 `_archive/runs/pose/auv4/` | 换代时按代次改名保留 | **回退用** |
+| `weights/yolo11n-pose.auv4.pt` | 上一版 pose（AUV_4 版，09-17 在 `data/datasets/AUV_4_PNP.kpt4.yolov8` 上微调，206 ep 早停 best=ep106，val mAP50-95 **0.952** / test **0.911**），md5 `3a5e87fa…`；同源训练记录 `_archive/legacy_2026-09-23_sweep/pose_runs_auv3_auv4_smoke/auv4/` | 换代时按代次改名保留 | **回退用** |
 | `weights/yolo11n-pose.auv4.onnx` | 上一版 pose ONNX（已核对 **9 输出** / kpt 通道 12 / opset 11），md5 `1e7785ca…` | 同上 | **回退用** |
-| `weights/yolo11n-pose.auv3.pt` | 更早一版 pose（AUV_3 版），md5 `db2ceb28…`；同源训练记录 `_archive/runs/pose/PNP_v1/` | 手动备份 | **回退用** |
+| `weights/yolo11n-pose.auv3.pt` | 更早一版 pose（AUV_3 版），md5 `db2ceb28…`；同源训练记录 `_archive/legacy_2026-09-23_sweep/pose_runs_auv3_auv4_smoke/PNP_v1/` | 手动备份 | **回退用** |
 | `weights/yolo11n.onnx` | 检测 ONNX（**6 输出** = 3×(bbox 64 + cls 3)，输入 `images 1×3×640×640`、opset 11），md5 `0a2d394f…` | `scripts/3_export/export_onnx.py` | `scripts/3_export/quantize.sh`（PTQ 输入） |
-| `weights/yolo11n-pose.stage1.pt` | 阶段一（线 C 分期重训）best.pt 快照，早停 240 ep / best=ep140 / `patience:100`，md5 `8b2325a6…`；与 `runs/auv5/train/stage1/weights/best.pt` **逐字节相同** | `data/datasets/AUV_5_stage1`（train 2352 / valid 233，`nc=1` gates，`kpt_shape [4,3]`）上从 `weights/yolo11n-pose.coco.pt` 起步训 300 ep 上限 | **未采用**：`output/preview/auv5_pose/tools/` 内三个脚本的默认 `--weights` |
-| `weights/new/yolo11n-pose.stage1.onnx` | 阶段一 pose 的**9 输出** ONNX（opset 11，输入 `images 1×3×640×640`），10.7 MB；导出前需 `modify_ultralytics.py --task pose` | `scripts/3_export/export_onnx.py --task pose --model weights/new/yolo11n-pose.stage1_full.pt` | `configs/gate_kpt_stage1_config.yaml` → 量化 bin |
-| `weights/yolo11n-pose.stage1_full.pt` | 阶段一 300 ep 全程版（`patience:0`，best 仍是 ep140），md5 `c890968f…`；**与 `stage1.pt` 在 ep140 那一整行（22 列 = epoch + 训练/val 损失 + 精度指标 + lr）逐位相同**（多跑的 60 ep 没改变 best），只有文件 md5 与尾部轮次不同 | `runs/auv5/train/stage1_full/weights/best.pt`（逐字节相同） | **未采用为产线**；`output/preview/auv5_pose/` 的当前基线（线 C） |
+| ~~`weights/yolo11n-pose.stage1.pt`~~ → **已归档** `_archive/auv6/superseded_by_v3_20260928/weights/` | 阶段一早期快照 | — | 被 v3 取代 |
+| **★ `weights/new/yolo11n-pose.stage1_v3.pt`（2026-09-28 **采用版**）** | **阶段一 v3 · Plan D**：阶段一权重热启动 + `AUV_6_stage1d`（合并数据，**恢复多门/部分可见过采样** s_multi=2/g_part2=2/g_part3=2/g_tube=2.5），200 轮 / best@81 / 早停于 182；自 val pose mAP50 0.9886 / mAP50-95 0.9835。**难例集 n_fail 111（全场最好）** | `runs/auv6/train/stage1_v3` | `configs/gate_kpt_stage1_v3_config.yaml` → `output/weights/gate_kpt_stage1_v3_bayese_640x640_nv12.bin` |
+| `weights/new/yolo11n-pose.stage1_v3.onnx` | v3 的 9 输出 ONNX（已核对：80/40/20 × bbox64/cls1/kpt12） | `scripts/3_export/export_onnx.py --task pose --model weights/new/yolo11n-pose.stage1_v3.pt` | 量化输入 |
+| ~~`weights/new/yolo11n-pose.stage1_v2.pt`~~ → 已归档 `_archive/auv6/superseded_by_v3_20260928/weights/` | **阶段一 v2·清水适配（2026-09-28）**：阶段一权重热启动 + 阶段数据集 `AUV_6_stage1`（合并 AUV_5_gate-pose 与新标 AUV_6_clear，水质加权过采样），150 轮 / best@78；自 val pose mAP50 0.986 / mAP50-95 0.985 | `runs/auv6/train/stage1_v2` | `configs/gate_kpt_stage1_v2_config.yaml`→ `output/weights/gate_kpt_stage1_v2_bayese_640x640_nv12.bin`（2026-09-28 按要求删除后已重出） |
+| ~~`weights/new/yolo11n-pose.stage1_v2.onnx`~~ → 已归档 `_archive/auv6/superseded_by_v3_20260928/weights/` | 上述权重的 9 输出 ONNX（9 张量已核对，NHWC，网格 80/40/20） | `scripts/3_export/export_onnx.py --task pose --model weights/new/yolo11n-pose.stage1_v2.pt` | 量化输入 |
+| ~~`weights/new/yolo11n-pose.stage1.onnx`~~ → **已归档** `_archive/auv6/superseded_by_v3_20260928/weights/` | 阶段一 9 输出 ONNX | — | 被 v3 取代 |
+| ~~`weights/yolo11n-pose.stage1_full.pt`~~ → **已归档** `_archive/auv6/superseded_by_v3_20260928/weights/` | 阶段一 300ep 全程版（g240_i16 bin 的来源） | — | 被 v3 取代（需要时可从归档取回） |
 
 > ⚠️ **注（2026-09-26 补，路径/指纹已 `ls`+`md5sum` 核过）**：
 > ① `weights/yolo11n.pt` 的 **`gate` 类实际无输出**（AUV_1 valid 152 张上零检出），门检测请用 pose 权重，
@@ -50,8 +54,9 @@
 **① `yolo11n.pt` 的版本命名对不上（待你确认，我没有改动任何权重）**。按 md5 核对：
 
 - `weights/yolo11n.pt` = `91069d76dbed46ca8639aead1f0f4cee`（mtime 09-12 14:06）
-  ＝ `_archive/runs/detect/auv_v4/weights/best.pt`（**逐字节相同**）
-- `_archive/runs/detect/auv_v3/weights/best.pt` = `d30de5dc6c3b038f415338733c9b1d40`（mtime 09-08）
+  ＝ `_archive/legacy_2026-09-23_sweep/detect_runs_v3_v4/auv_v4/weights/best.pt`（**逐字节相同**）
+  —— ⚠️ 归档那份已于 **2026-09-28 删除**（与正本 md5 相同，属冗余），`weights/yolo11n.pt` 本身即是正本
+- `_archive/legacy_2026-09-23_sweep/detect_runs_v3_v4/auv_v3/weights/best.pt` = `d30de5dc6c3b038f415338733c9b1d40`（mtime 09-08）
   —— **是另一个模型**，且是它的**唯一本地副本**
 
 即文档里说的 "AUV v3" 与实盘 md5 对不上（`weights/yolo11n.pt` 与名为 `auv_v4` 的训练目录同源）。
@@ -110,7 +115,7 @@ ultralytics 包内同目录 `head.py.backup`（`/home/ansty/anaconda3/envs/yolov
 | `output/yolo11n_detect_bayese_640x640_nv12.bin`（md5 `a28156ba…`） | `configs/yolo11n_config.yaml` | 球/门检测（`model.path`） |
 | **`output/gate_kpt_bayese_640x640_nv12.bin`** = **pose 当前采用**（09-24），md5 `9ac61773…` | `configs/gate_kpt_config.yaml` | 门 4 角点（`model.task_models.gate.path`） |
 | `output/gate_kpt_auv4_bayese_640x640_nv12.bin` = AUV_4 版，md5 `d38b803e…` | `configs/gate_kpt_auv4_config.yaml` ⚠️ 见下方注 | **回退用**（改名前就是 `gate_kpt_bayese_640x640_nv12.bin`） |
-| `_archive/output/backup_auv3/`（原 `output/backup_auv3/`，已在 09-23 归档） | 更早一版（AUV_3）pose 的 `*.bin` + `*_quant_info.json` | **不部署**，仅作回退与量化指标基线对比 |
+| `_archive/legacy_2026-09-23_sweep/output_backup_auv3/`（原 `output/backup_auv3/`，已在 09-23 归档） | 更早一版（AUV_3）pose 的 `*.bin` + `*_quant_info.json` | **不部署**，仅作回退与量化指标基线对比 |
 
 > ⚠️ **`configs/gate_kpt_auv4_config.yaml` 已不在工作树**（2026-09-24 起「pose 量化只保留一份
 > `configs/gate_kpt_config.yaml`」，见 `output/README.md`；`configs/backup/` 里也没有它）。
@@ -119,7 +124,7 @@ ultralytics 包内同目录 `head.py.backup`（`/home/ansty/anaconda3/envs/yolov
 > （该配置 `onnx_model: /data/weights/yolo11n-pose.auv4.onnx`、前缀 `gate_kpt_auv4_...`，
 > 与 `output/gate_kpt_auv4_bayese_640x640_nv12_quant_info.json` 对应）。**这不是路径写错，是文件被有意删除**。
 
-> ⚠️ 已过时（2026-09-26）：`output/backup_auv3/` 的原文写法（「→ 现 `_archive/output/backup_auv3/`」）保留了
+> ⚠️ 已过时（2026-09-26）：`output/backup_auv3/` 的原文写法（「→ 现 `_archive/legacy_2026-09-23_sweep/output_backup_auv3/`」）保留了
 > 迁移痕迹，上表已改成**当前真实路径**；该目录下今天有 `gate_kpt_bayese_640x640_nv12.bin` +
 > `..._quant_info.json` 两个文件（2026-09-12 产出）。
 
@@ -186,7 +191,7 @@ python scripts/3_export/prepare_calibration.py --coco-path <代表性图片目�
   掉到 8–16 s/张（2 小时量级），先查占用再怀疑工具链。更早文档写的「单轮约 55 分钟」是
   被抢占时的旧数。
 - **量化校验标准与脚本现状**：判据（输出层余弦 ≥ 0.995 / 逐节点 ≥ 0.999）与做法见
-  [根 README「量化校验标准」](../README.md) 与 [`../_archive/quant_ideas_void_20260924/QUANT_TUNING_20260924.md`](../../_archive/quant_ideas_void_20260924/QUANT_TUNING_20260924.md)。
+  [根 README「量化校验标准」](../README.md) 与 [`../_archive/quant/ideas_void_20260924/QUANT_TUNING_20260924.md`](../../_archive/quant/ideas_void_20260924/QUANT_TUNING_20260924.md)。
   `scripts/3_export/` 已于 2026-09-24 **回退到 09-15（`54e09b4`）**，工作树只留 4 个脚本
   （`export_onnx.py` / `modify_ultralytics.py` / `prepare_calibration.py` / `quantize.sh`）；
   当天新增的校验脚本已从工作树删除（思路留档），**但仍在 git HEAD 里**。要跑校验先取回 09-23 版

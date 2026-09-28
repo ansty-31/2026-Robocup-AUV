@@ -85,7 +85,7 @@ RDKX5-YOLOv11n-/
 │   │                            （D 节支持 --boardview-log / --boardview-list / --boardview-subset，严格+宽松双口径）
 │   └── 3_export/              modify_ultralytics · export_onnx · prepare_calibration · quantize.sh
 │                              （2026-09-24 已按 git 回退到 09-15 的这 4 个脚本，
-│                                校验脚本与调优记录见 _archive/quant_ideas_void_20260924/QUANT_TUNING_20260924.md）
+│                                校验脚本与调优记录见 _archive/quant/ideas_void_20260924/QUANT_TUNING_20260924.md）
 ├── experiment/                ★ 实验专区（脚本+对照数据+结果，不在常规流水线上）
 │   ├── README.md              分类索引：里面每个目录装什么、怎么重建
 │   ├── scripts/               exp_distortion/（域对比主目录）· exp_aug/（增强消融）
@@ -157,24 +157,20 @@ RDKX5-YOLOv11n-/
 │       └── pool_other_water/  其余水质池（0.3 M，其 148 M 渲染图已于 09-26 归档）
 │                              **同形归类**：`tables/` · `logs/` · `filelists/`
 ├── calibration_data_gate240/  ⚠️ **磁盘上已不存在**（2026-09-26 核实；详见目录树后的 ⚠️ 说明）
-├── yolov8n.pt                 ✅ 仓库根的散落权重：**ultralytics 每次训练自动下载的**（非本项目产物，2026-09-26 用户确认），保留原位
-└── _archive/                  归档区：暂时不用但保留（不进库）—— **09-26 起“归档”有两个位置，见 _archive/README.md §8**
-    ├── README.md              逐项说明「是什么 / 为什么在这 / 怎么恢复」＋两个归档位置的分工
-    ├── MOVES.tsv              2026-09-23 搬移清单（含内容指纹，可据此校验恢复）
-    ├── DELETED_2026-09-24_dupes.tsv        去重删除记录（逐项 md5 + 保留副本）
-    ├── DELETED_2026-09-24_intermediates.tsv 量化中间产物删除记录
-    ├── empty_shells_20260925/ ★ 2026-09-25 重组后留下的**空壳目录**（0 字节，只移动未删除；
-    │                          `data_原结构/` · `output_原结构/` · `runs_原结构/`）
-    ├── unneeded_20260926/     ★ **2026-09-26「明确不需要」归置区**（**16 项 / 约 850 M**，只移动未删除）：错域池子 `AUV_4_selected_3000`、已消化的 `stage1_needlabel`、被取代的 `stage1_fix111`、3 个旧渲染目录、作废 worklist 与 pycache —— 逐项见其 `README.md` 与 `cleanup_record/MOVES_archive_20260926.tsv`
-    ├── unneeded_20260925/     ★ **2026-09-25「明确不需要」归置区**（19 项 / 178 M，**只移动未删除**；
-    │                          确认后整目录可删 —— 逐项理由见其 README.md + MOVES.tsv）
-    ├── root/ · output/ · runs/ · ide/        按原位置镜像存放
-    ├── data/                  `AUV_5_gate-pose.yolov8_backup_20260924_132624/`（★ 另一次划分状态，真实回退点）
-    │                          · `auv_history/`（全树零引用的最早一批数据集）
-    ├── hb_scratch_20260923/   `.hb_check/` + 两个 hb 工具日志（从仓库根移入；其中 5 个文件曾误入 git）
-    ├── hb_scratch_20260924/   `hb_model_info.log`（09-24 的量化工具体检日志）
-    ├── manifest_before_realign_20260924/  清单反向对齐前的 manifest（2690 行版）
-    └── orphan_pyc/            ⚠️ 源文件已消失、仅存字节码的三个脚本（唯一副本，勿删）
+└── _archive/                  归档区：暂时不用但保留（不进库）—— **2026-09-28 按「项目/代次」重排为 5 组**
+    │                          总索引见 [_archive/README.md](_archive/README.md)（逐项「是什么 / 为什么在这 / 怎么恢复」）
+    ├── README.md              总索引（唯一顶层文件）
+    ├── _records/              所有记录与旧文档统一收集：`MOVES.tsv` · `DELETED_2026-09-2{4,8}*.tsv` · `old_readme/`
+    ├── legacy_2026-09-23_sweep/  第一次清扫（AUV_1..4 时代，原按位置分）：
+    │                          `detect_runs_v3_v4/` · `pose_runs_auv3_auv4_smoke/` · `extract_logs/`
+    │                          · `datasets_auv_history/` · `output_backup_auv3/` · `orphan_pyc/`
+    ├── quant/                 所有量化相关收一处：`hb_scratch_20260923/`（含 4 个 `*_model.onnx` 唯一副本）
+    │                          · `ideas_void_20260924/`（三轮调优，用户裁定**禁止再试**）· `rounds_stage1_20260926/`（R1–R3 配置）
+    ├── auv5/                  AUV_5 线：`datasets_AUV_5_gate-pose_backup_20260924/`（★ 另一次划分状态，真实回退点）
+    │                          · `manifest_before_realign_20260924/` · `unneeded_20260925/` · `unneeded_20260926/`
+    │                          · `judgment_dupes_20260926/`（判定分桶副本，内容与 master 逐字节相同）
+    └── auv6/                  AUV_6 线：`planBC_void_20260928/`（Plan B/C 作废）· `superseded_by_v3_20260928/`（被 v3 取代）
+                               · `ab_v2_prebasenamefix_20260928/`（⚠️ 去留**待定**，见该组 README）
 ```
 
 > ⚠️ **已过时（2026-09-26）：仓库根的 `calibration_data*` 一个都不在了。** 目录树里那一行原文是
@@ -200,7 +196,7 @@ RDKX5-YOLOv11n-/
 |---|---|---|
 | `scripts/` `configs/` `weights/` `docs/` | **在用** | 随版本迭代，纳入 git |
 | `cleanup_record/` | **在用** | 整理记录（`CLEANUP_2026-09-24/25` · `RESTRUCTURE_2026-09-25` · **`MOVES_2026-09-26.md`**）；逐项可回退 |
-| `data/`（`raw/ frames/ datasets/ derived/ calib/`） | **在用** | 2026-09-25 起按种类分五区；旧的 `data/AUV_1..5/` 那层已**空壳化并归档**（`_archive/empty_shells_20260925/data_原结构/`，0 文件）—— 本行原写作 `data/AUV_1..5`，路径已不存在，按现状改写 |
+| `data/`（`raw/ frames/ datasets/ derived/ calib/`） | **在用** | 2026-09-25 起按种类分五区；旧的 `data/AUV_1..5/` 那层已**空壳化并归档**（该空壳归档已于 **2026-09-28 删除**，0 文件）—— 本行原写作 `data/AUV_1..5`，路径已不存在，按现状改写 |
 | `raw-data/`（仓库根） | ~~已空~~ | 原抢救区；**2026-09-24 01:05 被外部清空**（非本次整理），现为 0 文件空目录 |
 | `experiment/` | **留档** | 去畸变/增强实验的脚本、结果与结论；可整体删除而不影响流水线 |
 | `runs/prov` `runs/auv5/eval` `runs/auv5/calib` | **在跑** | 流水线依赖的溯源表、回归评估集、标定记录 |
@@ -212,13 +208,13 @@ RDKX5-YOLOv11n-/
 | `output/yolo11n_detect_*.bin` | **在用** | 当前球/门检测产物（09-12） |
 | `output/preview/auv5_pose/` | **在跑** | ★「线 C」人眼判定 / 分期重训工作区（**359 M**，09-26 归档后；此前 537 M）实测）；**入口是它自己的 `INDEX.md`** |
 | `output/preview/auv5_pose/judgment/archive/` | **留档·勿引用** | ★ **09-26 新增的第二个归档位置**：作废的判定日志（102 行）+ 分桶图副本（102 张）+ README；**结论不看这里**（以 `judgment/boardview_stage1_log.csv` 339 行为准）—— 见 `_archive/README.md` §8 |
-| `output/preview/pool_other_water/` | **部分归档** | 只留统计小文件（0.3 M，被脚本读取）；`annotated/`+`grids/` 148 M 已入 `_archive/unneeded_20260926/` |
+| `output/preview/pool_other_water/` | **部分归档** | 只留统计小文件（0.3 M，被脚本读取）；`annotated/`+`grids/` 148 M 已入 `_archive/auv5/unneeded_20260926/` |
 | `data/derived/AUV_5_upload_roboflow/` | **在跑** | 待送 Roboflow 打标两批（`stage2_mid` 800 / `stage2_turbid` 429）；`stage1_needlabel` 577 **已完成并归档**（→ `datasets/gate-w_clear/`）＋ **09-26 纠正批 `stage1_fix_wy` 30**（`stage1_fix111` 111 张范围已被取代） |
-| `_archive/data/AUV_5_gate-pose.yolov8_backup_20260924_132624/` | **留档·勿删** | 另一次划分状态（与现行差 1358 文件），是**真实回退点**，不是冗余（**原表误记为 `data/datasets/…`；2026-09-26 核实实际在 `_archive/data/` 下**） |
+| `_archive/auv5/datasets_AUV_5_gate-pose_backup_20260924/` | **留档·勿删** | 另一次划分状态（与现行差 1358 文件），是**真实回退点**，不是冗余（**原表误记为 `data/datasets/…`；2026-09-28 归档重排后位于 `_archive/auv5/` 下**） |
 | `configs/backup/` | **留档** | 历史标定，只读 |
 | `_archive/` | **留档** | 暂时不用但保留；含唯一副本，删除前先读其 README。**09-26 起“归档”有两个位置**（本目录 + `output/preview/auv5_pose/judgment/archive/`），分工见 `_archive/README.md` §8 |
-| `_archive/unneeded_20260926/` | **已归档（本轮）** | **16 项 / 约 850 M**（错域池子 438 M、已消化上传批次 67 M、被取代的 fix111 13 M、3 个旧渲染目录 168 M、作废 worklist 与 pycache）—— **只移动未删除**，原相对路径完整保留，恢复一条 `mv` 即可；依据与逐项见 `_archive/unneeded_20260926/README.md` |
-| `_archive/unneeded_20260925/` | **待你确认后删** | 「明确不需要」归置区（19 项 / 178 M，只移动未删除）—— 核完可整目录 `rm -rf` |
+| `_archive/auv5/unneeded_20260926/` | **已归档（本轮）** | **16 项 / 约 850 M**（错域池子 438 M、已消化上传批次 67 M、被取代的 fix111 13 M、3 个旧渲染目录 168 M、作废 worklist 与 pycache）—— **只移动未删除**，原相对路径完整保留，恢复一条 `mv` 即可；依据与逐项见 `_archive/auv5/unneeded_20260926/README.md` |
+| `_archive/auv5/unneeded_20260925/` | **待你确认后删** | 「明确不需要」归置区（19 项 / 178 M，只移动未删除）—— 核完可整目录 `rm -rf` |
 
 ### 2026-09-24 去重：同一份裸流只留一个副本
 
@@ -236,7 +232,7 @@ RDKX5-YOLOv11n-/
 | `recover_all/rec_492981881267_4631f_2.mjpeg` | 0.90 G | 同目录 `rec_492981881267_4631f.mjpeg` |
 | `recover_all/*_2.mjpeg` ×3（**0 字节残件**） | 0 | — |
 
-逐项记录（含 md5 与保留副本）见 [`_archive/DELETED_2026-09-24_dupes.tsv`](_archive/DELETED_2026-09-24_dupes.tsv)。
+逐项记录（含 md5 与保留副本）见 [`_archive/_records/DELETED_2026-09-24_dupes.tsv`](_archive/_records/DELETED_2026-09-24_dupes.tsv)。
 > 注意：`data/**/labels/*.txt` 里的 **0 字节文件是 YOLO 的「无目标」负样本**，是正常训练数据，**不要删**。
 
 ### 上一轮派生图：**保留在原位，不清理**（2026-09-23 决定）
