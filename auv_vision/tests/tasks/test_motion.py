@@ -17,7 +17,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import base.settings as S                                          # noqa: E402
-from common.turn_deg import turn, turn_cfg, wrap180, yaw_sign             # noqa: E402
+from common.turn_deg import TurnCore, turn, turn_cfg, wrap180, yaw_sign             # noqa: E402
 from gate.heading_align import (ABORTED, DONE, GIVEUP, TURN,             # noqa: E402
                                 HeadingAligner, hdg_cfg)
 
@@ -216,7 +216,8 @@ def test_divergence_guard_stops_the_turn():
 # 正航向（gate/heading_align.py）：PnP 目标角 → 转一次 → 结束
 # ======================================================================
 class _World(object):
-    """假船 + 假门：h=机身转角(正=右)，psi=psi0+h（现场约定：右转使 psi 变大），遥测 yaw=h×imag_sign。"""
+    """假船 + 假门：h=机身转角(正=右)，**psi=psi0−h**（2026-09-28 实船改正：右转使 psi **变小**），
+    遥测 yaw=h×imag_sign。"""
 
     def __init__(self, psi0=20.0, imag_sign=BOARD_SIGN, gain=60.0, dt=0.05, stuck=False):
         self.psi0 = float(psi0)
@@ -229,7 +230,7 @@ class _World(object):
 
     @property
     def psi(self):
-        return self.psi0 + self.h
+        return self.psi0 - self.h
 
     @property
     def yaw_tel(self):
@@ -264,30 +265,30 @@ def _run_hd(aligner, world, frames=1200, lost_after=None, telemetry=True, cfg_ov
     return states, logs, now
 
 def test_converges_with_one_turn():
-    """psi=+20° → **左转 20°** → 结束（现场定；见 heading_align.start 的注释）。
+    """psi=+20° → **右转 20°** → 结束（2026-09-28 实船改正；见 heading_align.start 的注释）。
 
     一次到位：目标角在起转那一刻冻结，转完就是 DONE，**只转一次**。
     """
     w = _World(psi0=20.0)
-    al = HeadingAligner(log=lambda *a: None)
+    al = HeadingAligner(cfg=dict(hdg_cfg(), max_step_deg=0.0, turn_scale=1.0), log=lambda *a: None)
     _run_hd(al, w)
     assert al.state == DONE, "应收敛，实际 %s（%s）" % (al.state, al.summary())
     assert al.iters == 1, "只该转一次（实际 %d 次）" % al.iters
-    assert al.last_dir == "左转", "psi>0 应左转（现场定），实际 %s" % al.last_dir
+    assert al.last_dir == "右转", "psi>0 应**右转**（2026-09-28 实船改正），实际 %s" % al.last_dir
     assert al.last_target_deg == pytest.approx(20.0), "目标角就是测到的 psi（%s）" % al.summary()
     assert abs(w.psi) <= float(hdg_cfg()["tol_deg"]) + 1e-6, "转完残余 psi=%.1f°" % w.psi
     nz = [c for c in w.cmds if abs(c) > 1e-9]
-    assert nz and all(c < 0 for c in nz), "左转不该出现正舵：%s" % set(nz)
+    assert nz and all(c > 0 for c in nz), "右转不该出现负舵：%s" % set(nz)
     assert max(abs(c) for c in nz) <= turn_cfg()[0]["out_max"] + 1e-9
 
-def test_right_turn_when_psi_is_negative():
-    """psi=-25° → **右转 25°**，舵全为正。"""
+def test_left_turn_when_psi_is_negative():
+    """psi=-25° → **左转 25°**，舵全为负（2026-09-28 实船改正）。"""
     w = _World(psi0=-25.0)
-    al = HeadingAligner(log=lambda *a: None)
+    al = HeadingAligner(cfg=dict(hdg_cfg(), max_step_deg=0.0, turn_scale=1.0), log=lambda *a: None)
     _run_hd(al, w)
-    assert al.state == DONE and al.last_dir == "右转", al.summary()
+    assert al.state == DONE and al.last_dir == "左转", al.summary()
     nz = [c for c in w.cmds if abs(c) > 1e-9]
-    assert nz and all(c > 0 for c in nz), "右转不该出现负舵：%s" % set(nz)
+    assert nz and all(c < 0 for c in nz), "左转不该出现正舵：%s" % set(nz)
     assert abs(w.psi) <= float(hdg_cfg()["tol_deg"]) + 1e-6
 
 def test_target_angle_is_frozen_while_turning():
@@ -301,7 +302,7 @@ def test_target_angle_is_frozen_while_turning():
     for dead in ("psi_deg", "psi_fresh", "psi_stale"):
         assert dead not in params, "转向中不该再接收 %s（一次到位的结构性保证）：%s" % (dead, params)
     w = _World(psi0=20.0)
-    al = HeadingAligner(log=lambda *a: None)
+    al = HeadingAligner(cfg=dict(hdg_cfg(), max_step_deg=0.0, turn_scale=1.0), log=lambda *a: None)
     seen = {"turn": 0}
 
     def on_frame(i):
@@ -324,14 +325,17 @@ def test_stuck_turn_times_out_then_gives_up():
     assert any("带残余航向继续走" in s for s in logs)
 
 def test_step_cap_clamps_single_turn_and_zero_means_unlimited():
-    """`max_step_deg` 只是安全钳位：0（出厂）= 按测到的 psi 转；>0 才限幅。"""
+    """`max_step_deg` 只是安全钳位：**0 = 不设限**（按测到的 psi 转）；>0 才限幅。
+
+    ⚠️ 出厂默认 2026-09-28 起是 **10.0°**（不是 0）⇒ "不设限"要显式配（见 `test_turn_scale_and_max_step_shape_the_issued_angle`）。
+    """
     w = _World(psi0=60.0, stuck=True)
-    al0 = HeadingAligner(log=lambda *a: None)
+    al0 = HeadingAligner(cfg=dict(hdg_cfg(), max_step_deg=0.0, turn_scale=1.0), log=lambda *a: None)
     _run_hd(al0, w, frames=4)
     assert al0.last_target_deg == pytest.approx(60.0), \
         "max_step_deg=0 应不设限（实际 %.1f°）" % al0.last_target_deg
     w2 = _World(psi0=60.0, stuck=True)
-    al2 = HeadingAligner(cfg=dict(hdg_cfg(), max_step_deg=25.0), log=lambda *a: None)
+    al2 = HeadingAligner(cfg=dict(hdg_cfg(), max_step_deg=25.0, turn_scale=1.0), log=lambda *a: None)
     _run_hd(al2, w2, frames=4)
     assert al2.last_target_deg == pytest.approx(25.0), \
         "配了 max_step_deg=25 应限幅到 25°（实际 %.1f°）" % al2.last_target_deg
@@ -433,3 +437,43 @@ def test_p3p_frames_do_not_feed_the_filter():
         task.process(frame, 1200 + 100 * k)                # 全是 p3p
     assert task._hdg_deg == kept and task._hdg_ms == kept_ms, \
         "p3p 帧污染了航向测量（%.1f → %.1f）" % (kept, task._hdg_deg)
+
+
+def test_overshoot_tolerance_is_measured_against_the_issued_deg():
+    """**超转容差 = 10°**（用户 2026-09-28 定："可以超转，但超转不得超过 10 度"）。
+
+    `0 ≤ done_deg − 下发的 deg ≤ overshoot_tol_deg` 即算这一小步到位，且在这窗里**不再触发满舵保护**：
+      · 关掉容差 ⇒ 超转后 |err| 与"朝下发角推进"都不再改善 ⇒ 2s 后被掐（现场"被限死"那种）；
+      · 超转 ≤ 10° ⇒ 认到位、正常 DONE；**超过 10° 不认**（由下一个新鲜 ψ 带回来）。
+    """
+    def run(tol, cap=45.0):
+        c = TurnCore(deg=20.0, left=True, timeout=30.0, log=lambda *a: None,
+                     # out_max 调小只为让"满舵"这条判据在合成航迹上真的生效
+                     #   （默认 0.30 需要 |err| ≥ 20.25° 才饱和，测起来不直观）
+                     cfg=dict(overshoot_tol_deg=tol, sat_max_s=2.0, sat_progress_deg=5.0,
+                              out_max=0.10))
+        t, i = 0, 0
+        while not c.finished() and t < 15000:
+            i += 1
+            # 0 → 45°：**每帧 8° 冲过去**（快得跳过 3 帧死区确认），冲到 45° 停住 ⇒ 下发 20°、超转 25°。
+            #   必须"跳过死区"才复现现场那种"转过头 ⇒ 回不来 ⇒ 被满舵保护掐死"。
+            c.step(t, min(cap, i * 8.0))
+            t += 100
+        return c, t
+
+    a, _ = run(0.0)                       # 关掉容差：超转后不再改善 ⇒ 被满舵保护掐死
+    assert a.state == TurnCore.ABORTED and a.why == "sat", (a.state, a.why)
+    b, _ = run(10.0, cap=28.0)             # 冲到 28°（下发 20° ⇒ 超转 8° ≤ 10°）⇒ 认到位
+    assert b.state == TurnCore.DONE and 0.0 <= b.overshoot_deg() <= 10.0 + 1e-9, \
+        (b.state, b.overshoot_deg())
+    c_big, _ = run(10.0, cap=80.0)         # 冲到 80°（超转 60° ≫ 10°）⇒ **不许**判到位
+    assert c_big.state != TurnCore.DONE, (c_big.state, c_big.overshoot_deg())
+
+    # 反面：容差**不许**把"只转了一点点"判成到位（只放宽超转一侧）
+    c = TurnCore(deg=20.0, left=True, timeout=2.0, log=lambda *a: None,
+                 cfg=dict(overshoot_tol_deg=10.0, sat_max_s=0.0, deadzone_deg=6.0))
+    t = 0
+    while not c.finished() and t < 3000:
+        c.step(t, 5.0)                           # 只转了 5°（下发 20°，差 15° > 死区）
+        t += 50
+    assert c.state != TurnCore.DONE, "未转够 15° 不该判到位（容差只管超转）：%s" % c.state

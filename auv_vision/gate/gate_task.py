@@ -110,9 +110,11 @@ _D_THROUGH = dict(confirm_frames=8, confirm_ms=2500, require_align_deg=8.0)
 # SEARCH = **左右平移扫视**（不允许旋转搜索）。
 # ⚠️ 波形**必须对称**（正反等时长）：遥测没有横向位置反馈，单向扫会一路漂到池壁。
 # sweep_s 是第一轮时长；之后每轮 ×2 封顶 sweep_max_s（固定时长只会原地横跳）。
-_D_SEARCH = dict(sweep_s=2.0, sweep_max_s=32.0, pause_s=1.0, sway=0.45)
+_D_SEARCH = dict(sweep_s=2.0, sweep_max_s=32.0, pause_s=1.0, sway=0.6)
 # ⚠️ 2026-09-26：兜底值由 0.3 对齐到 cfg 的 **0.45**（cfg 注释一直是"0.45 ≈ 25% 推力"，
 #    是代码兜底表漂了 —— 用例 test_gate_defaults_match_cfg 挡的就是这种事）。
+# ★ 2026-09-28：sway 0.45 → **0.6**（用户：现场反馈 SEARCH 平移力度偏小）。
+#    **必须与 `cfg/comm.yaml → comm.gate.search.sway` 同值**（同一条守卫用例）。
 # ⚠️ reproj_px 曾写 8.0：8px 门槛会拒掉 ~88% 候选位姿，现场实测放宽到 20。
 _D_PNP = dict(reproj_px=20.0, z_min=0.2, z_max=15.0, refine=True,
               max_z_jump_m=0.8)
@@ -207,9 +209,13 @@ class GateTask(object):
         self._hdg_f = None                # EMA 状态（只吃 full 帧，避免 p3p 垃圾污染）
         self._hdg_deg = None              # 最近一次 full 帧测到的航向误差（度）
         self._hdg_ms = None               # 上面那个值的时刻
+        self._hdg_turns = 0               # 本门已转向次数（**无上限**；逐小步逼近，仅用于日志）
+        self._hdg_turns_last_ms = None    # 上一次转向**结束**的时刻（判"有没有新的 ψ"用）
         self._hdg_skip_logged = False     # 本门是否已报过"跳过正航向"的原因（每门一次）
         self._post_sway_until_ms = None   # 「转完反向平移」状态：非 None = 激活（到期时刻）
-        self._post_sway = 0.0             # 该状态里下发的 sway（= 转向的反方向）
+        self._post_sway = 0.0
+        self._post_sway_back = 0.0        # 补偿里的**缓慢后退**分量（负=后退）
+        self._post_sway_back = 0.0        # 转完补偿里的**缓慢后退**分量（负=后退）             # 该状态里下发的 sway（= 转向的反方向）
         self._post_sway_z_ref = None      # 转走那一刻的 z（**主判据**）
         self._post_sway_ratio_ref = None  # 转走那一刻的框占比（z 拿不到时的退路）
         self._now_ms = None               # 本帧时基（process 每帧写入）
@@ -246,8 +252,12 @@ class GateTask(object):
         self._hdg.reset()
         self._hdg_done = not flag(self._hdg_cfg, "enable", True)
         self._hdg_skip_logged = False
+        self._hdg_turns = 0
+        self._hdg_turns_last_ms = None
         self._post_sway_until_ms = None
         self._post_sway = 0.0
+        self._post_sway_back = 0.0        # 补偿里的**缓慢后退**分量（负=后退）
+        self._post_sway_back = 0.0        # 转完补偿里的**缓慢后退**分量（负=后退）
         self._post_sway_z_ref = None
         self._post_sway_ratio_ref = None
         self._loiter_start_ms = None     # 「已在门口」的起始时刻（超时兜底）
@@ -285,13 +295,34 @@ class GateTask(object):
         """
         return _dof_clip(self._pid_sway_px.update(dxn, now_ms))
 
+    def _hdg_new_psi_since_turn(self):
+        """这次起转能不能用**当前这个 ψ**：必须是"上一次转向结束之后"测到的。
+
+        ★ 逐小步逼近（用户 2026-09-28 定）**唯一**的结构性约束，也是"删掉每门只转一次的限制"
+        之后防自转的闸门：没有它，转向一结束就会拿"起转前那个旧 ψ"立刻再转一次，无限循环。
+        够不够正不在这里判（`|ψ| ≤ tol` 时 `HeadingAligner.start()` 自己给 DONE、不转）。
+
+        ⚠️ 别和**已删除的「psi 保鲜/超时判废」**那套判据（2026-09-27 用户要求删掉）搞混：
+        那套是"ψ 超过 N ms 就判废 ⇒ HDG 永远起不来"；这里是"**转向之后**有没有来新测量"，
+        基准是 `_hdg_turns_last_ms`（本门上一次转向结束时刻），与"多久没测量"无关。
+        """
+        if self._hdg_deg is None or self._hdg_ms is None:
+            return False
+        if self._hdg_turns_last_ms is None:
+            return True                      # 本门还没转过 ⇒ 任何 ψ 都算"新"
+        return self._hdg_ms > self._hdg_turns_last_ms
+
     def _hdg_skip_reason(self, mode, now_ms):
         """居中达标却没进正航向的**原因**（水里复盘看 `hdg_skip` 这个字段）。"""
         if not flag(self._hdg_cfg, "enable", True) or not self._hdg.enabled:
             return "off(未启用)"
         if self._hdg_done:
-            return "done(本门已做过正航向)"
-        return "no_psi(还没测到过 full 帧的 psi)"
+            return "done(本门正航向已收口：够正/中止/未启用)"
+        if self._hdg_deg is None or self._hdg_ms is None:
+            return "no_psi(还没测到过 full 帧的 psi)"
+        if not self._hdg_new_psi_since_turn():
+            return "wait_psi(等转向之后的新 ψ 测量)"
+        return "psi_ok(其实可以起转 —— 若出现说明是居中没达标)"
 
     def _note_hdg_skip(self, why):
         """居中达标却跳过正航向 → 写进日志字段 + 终端报一次（每门一次）。"""
@@ -320,7 +351,7 @@ class GateTask(object):
         """★ **唯一的阻塞路径**（`turn` 专用）：**输入目标角度，输出"阶段结束"标志**。
 
         约定（用户 2026-09-27 定）：
-          · **输入**：`target_deg`（带符号的目标角 ψ，正=左转）＋可选 `left`。传了就**现场起转**；
+          · **输入**：`target_deg`（带符号的目标角 ψ，**正=右转**，2026-09-28 实船改正）＋可选 `left`。传了就**现场起转**；
             不传（每帧续跑）就沿用 aligner 里已冻结的目标角。
           · **输出**：`True = 这次转向阶段已结束`（本门不会再转，调用方可继续往下走）；
             `False = 尚未结束`（本帧先回主循环，下一帧从同一个冻结目标角续跑）。
@@ -349,8 +380,13 @@ class GateTask(object):
                  ms=(_time.monotonic() - _t0) * 1000.0)
         # ④ 收尾（只做一次）
         if ended and self.substate == SUB_HDG:
-            self._hdg_done = True
+            # ★ 逐小步逼近（用户 2026-09-28 定，**无次数上限**）：每次转完照常收尾（硬停 + 平移窗口），
+            #   然后等"转向之后的新 ψ 测量"；若残余仍 > tol 就自动再走一小步（见 `_hdg_ready`）。
+            #   ⚠️ 这里**不置** `_hdg_done`：它只表示"本门正航向彻底收口"（够正/中止/未启用）。
+            self._hdg_turns += 1
             self.substate = SUB_GOLDEN
+            print("[GATE] 本门第 %d 次转向结束（等新的 ψ 测量决定要不要下一小步）"
+                  % self._hdg_turns)
             self._center_cnt = 0          # 转向会动到门在画面里的位置 → 之后复核居中
             # ★ 转向收尾**硬停**（用户 2026-09-27 定：必须做到）：连发中性帧走完 ramp + 遥测验证。
             #   为什么必须：下位机**没有"无帧超时停车"**，只发一帧中性时 yaw 轴字节还在 ramp 半路
@@ -370,6 +406,7 @@ class GateTask(object):
             #     "硬停阻塞"，只折算一半就会红。）
             _now_true = int(now_ms + (_time.monotonic() - _t0) * 1000.0)
             self._now_ms = _now_true      # 本帧后续（`_set_info` 的窗口判据 / z 新鲜度）都用真实时刻
+            self._hdg_turns_last_ms = _now_true   # 判"有没有新的 ψ"的基准（必须晚于它）
             self._start_post_sway(_now_true)
         self.last_info["hdg_i"] = self._hdg.iters
         self.last_info["turn_end"] = ended        # ★ 阶段结束标志（消费方/日志都看得到）
@@ -440,7 +477,9 @@ class GateTask(object):
         mag = float(self._hdg_cfg.get("post_sway", 0.20) or 0.0)
         if win <= 0 or mag <= 0:
             return
-        self._post_sway = _dof_clip(-self._hdg.last_d * mag)     # 反向
+        back = float(self._hdg_cfg.get("post_sway_back", 0.0) or 0.0)
+        self._post_sway = _dof_clip(-self._hdg.last_d * mag)     # 反向平移
+        self._post_sway_back = _dof_clip(-abs(back))             # ★ 同时**缓慢后退**（2026-09-28 定）
         self._post_sway_until_ms = now_ms + win
         # 参照量：判"这帧的门是不是刚转走的那个"（见 _post_sway_same_gate）。
         # ⚠️ 参照量**不做新鲜度过滤**：它就是"转向之前那一次测量"，而转向本身要跑 1~2 s
@@ -554,7 +593,9 @@ class GateTask(object):
         """
         if self._hdg_done or not self._hdg.enabled:
             return False
-        return self._hdg_deg is not None
+        # 逐小步逼近（用户 2026-09-28 定，**没有**每门次数上限）：只要"新 ψ"到手就能再起转；
+        # 每步幅度由 max_step_deg/turn_scale 限；够正时 start() 自己给 DONE（不转）。
+        return self._hdg_new_psi_since_turn()
 
     def _hdg_psi_first(self, now_ms):
         """★ **航向优先**入口（2026-09-26 用户定）：居中还没达标就先转正。
@@ -574,6 +615,8 @@ class GateTask(object):
         """
         if self._hdg_done or not self._hdg.enabled:
             return False
+        if not self._hdg_new_psi_since_turn():
+            return False                      # 还没等到"转向之后的新 ψ" ⇒ 不抢
         if self.substate == SUB_HDG and not self._hdg.finished():
             return False                      # 已经在跑 → 交给常规路径
         if not flag(self._hdg_cfg, "entry_psi_first", True):
@@ -597,7 +640,10 @@ class GateTask(object):
         self.last_info["hdg_skip"] = None
         self.last_info["hdg_entry"] = reason   # golden=居中达标 | psi_first=航向优先
         turn_log("gate_start", src="gate", frame=self.frames, t_ms=now_ms, reason=reason,
-                 psi=self._hdg_deg, psi_ms=self._hdg_ms)
+                 psi=self._hdg_deg, psi_ms=self._hdg_ms, n_turn=self._hdg_turns + 1)
+        if self._hdg.finished():
+            # 逐小步逼近的下一小步：aligner 还在终态 ⇒ 先退回 IDLE 才能再 start 一次
+            self._hdg.rearm()
         self._hdg.start(now_ms, psi=self._hdg_deg)
         turn_log("gate_start_done", src="gate", frame=self.frames,
                  state=self._hdg.state, dir=self._hdg.last_dir,
@@ -634,8 +680,19 @@ class GateTask(object):
         # 只覆盖"本帧发什么"：检测/PnP/ψ/居中判据在调用本函数之前**已经跑完**（ψ 因此是新鲜的）。
         if self._post_sway_until_ms is not None:
             _now = self._now_ms if self._now_ms is not None else 0
+            # 「画面里至少出现 N 个原始角点」就退出（N 可设；0 = 关掉这条判据）
+            _kmin = int(num(sub(self._G, "hdg"), "post_sway_kpt_min",
+                            _D_HDG["post_sway_kpt_min"]) or 0)
+            # ⚠️ 角点数必须**当场从本帧的检出里数**：`_dbg_kpt_raw` 之类是诊断量、门被甩出画面后
+            #   会停在旧值（≥2）⇒ 一转完就误判"门回来了"而立刻收手（2026-09-28 踩过）。
+            #   本帧没有检出（门还在画外）= 0 个角点 ⇒ 继续平移 + 后退。
+            _kraw = 0
+            if self._det_now is not None and getattr(self._det_now, "kpt_conf", None) is not None:
+                _kthr = num(sub(self._V, "keypoint"), "conf_thr", _D_KPT["conf_thr"])
+                _kraw = int((np.asarray(self._det_now.kpt_conf) >= _kthr).sum())
             if _now >= self._post_sway_until_ms:
                 self._post_sway_until_ms = None         # 到期 ⇒ 退出状态（绝不永久停摆）
+                self.last_info["sway_exit"] = "expire"
             elif action == "through" or self._hdg.turning:
                 # ★ 冲刺 / 转向进行中 ⇒ **立刻作废平移**，这一帧的 yaw/surge 是它们的，不许抢。
                 #   为什么必须（2026-09-27 用户问「平移窗口和硬停交叉会不会把旋转卡死」时查出来）：
@@ -645,10 +702,18 @@ class GateTask(object):
                 #      只要窗口还活着就会把 yaw 清零 ⇒ 转向**推不动**（不是永久死锁，但白等/触发满舵保护）。
                 #   现在：**平移永远让位于转向与冲刺**（平移只是"把门拉回视野"的补偿，优先级最低）。
                 self._post_sway_until_ms = None
+                self.last_info["sway_exit"] = "yield(%s)" % ("through" if action == "through" else "turning")
+            elif _kmin > 0 and _kraw >= _kmin:
+                # ★ 「画面里至少出现 N 个角点」就交回视觉（用户 2026-09-28 定）—— 补偿目的达成。
+                #   用**原始**角点数（检测器当帧给的），不是记忆后/几何过滤后的个数。
+                self._post_sway_until_ms = None
+                self.last_info["sway_exit"] = "kpt>=%d" % _kmin
             elif self._post_sway_same_gate(self._det_now, self._fresh_z(_now)):
                 self._post_sway_until_ms = None         # 刚丢的那个门回来了 ⇒ 退出，交回视觉
+                self.last_info["sway_exit"] = "same_gate"
             else:
-                action, sway, heave, surge, yaw = ("sway_back", self._post_sway, 0.0, 0.0, 0.0)
+                action, sway, heave, surge, yaw = ("sway_back", self._post_sway, 0.0,
+                                                   self._post_sway_back, 0.0)
                 substate = SUB_SWAY_BACK
         self.last_info.update({
             "phase": self.phase, "substate": substate or self.substate,
@@ -723,6 +788,8 @@ class GateTask(object):
         self._hdg_f = None
         self._hdg_deg = None
         self._hdg_ms = None
+        self._hdg_turns = 0               # 新门 ⇒ 逐小步逼近的次数重新计
+        self._hdg_turns_last_ms = None
         self._hdg.reset()
         self._hdg_done = not flag(self._hdg_cfg, "enable", True)
         self._hdg_skip_logged = False

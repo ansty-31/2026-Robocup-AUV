@@ -66,7 +66,7 @@ model:
   # 权重② gate keypoint：ball 走 model.path、gate 走 task_models.gate，互不影响。
   # 解码契约与后处理约束见 doc/gate_pose_decode_spec.md；上一代权重在 bak/ 里。
   task_models:
-    gate: {path: models/gate_kpt_stage1_g240_i16_bayese_640x640_nv12.bin,
+    gate: {path: models/gate_kpt_stage1_v3_bayese_640x640_nv12.bin,
            kind: keypoint, labels: [gate],
            kpt_order: [TL, TR, BR, BL]}   # 门 keypoint 权重(4角点)
 
@@ -89,13 +89,13 @@ debug:                     # 运行监测（仅本工程调试用）
   show_video: true          # 弹窗显示带识别框的相机画面（无 DISPLAY/cv2 时自动跳过）
   overlay_text: true        # 画面叠加 状态/任务信息
 gate:                         # 过门（几何 / keypoint / PnP / 后处理参数）
-  geometry: {frame_w: 0.77, frame_h: 0.56, bar_width: 0.05,
+  geometry: {frame_w: 0.70, frame_h: 0.50, bar_width: 0.05,
              sym_bars: true, body_center_offset: 0.0}
              # frame_w/frame_h：门框**外轮廓**尺寸(m)，PnP 深度的**唯一标尺**。
              #   ⚠️ 与 comm.gate.z.cross 是同一个物理距离的两种写法，改一个必须改另一个。
              # body_center_offset：相机—机身安装偏置(m)，**只读入、不参与运算**（未标定）。
              # bar_width/sym_bars：未参与运算（keypoint 只标外轮廓四角，留作记录）。
-  det: {conf: 0.6}
+  det: {conf: 0.5}
       # 候选框 score 阈值，**只作用于 gate**；`preview_detect.py --conf` 会覆盖这里。
       #   ⚠️ 刻意不复用 model.score_threshold（那是 ball/gate 共用的）。
   postproc: {edge_tol: 0.10, min_edges: 2, geom_check: true, lr_norm: true}

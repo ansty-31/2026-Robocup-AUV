@@ -34,9 +34,16 @@ estop:
   repeat_ms: 30            # 急停连发中性帧间隔(ms)
 watchdog:                  # ★ **轴饱和看门狗**（base/uart.py::_AxisWatchdog；用户 2026-09-27 定）
   enable: true             #   独立线程（不经过任何任务控制流）：任务卡死时只有它能拦。
-  max_same_dir_s: 5.0      #   同一轴、**同一方向**连续发轴超过这么多秒 ⇒ estop 硬停 + 强制退出(9)
-                           #   （用户定 5.0s：4.0s 会把合法的大角度慢转向也掐掉 —— 转向满舵
-                           #    out_max=0.30 = 偏离中位 38 字节，连续满舵时长 ≈ 转角/实际角速度。）
+  axes: [yaw]              #   ★**只盯哪些轴**（轴名，取 dof_map 的键；空列表 = 不盯任何轴）。
+                           #   用户 2026-09-27 定：**只管 yaw，剩下的不能管** ——
+                           #     · yaw 是闭环收敛量：正常转向越转误差越小，同向连续满舵只可能是
+                           #       反馈卡住/舵效不对/在自转 ⇒ 该掐；
+                           #     · surge/sway/heave 可以合法长同向（冲刺几秒直行、扫视/横向对中持续平移、
+                           #       保深持续垂向）⇒ 拿它们当"卡死"会**误杀正常动作**（长直行被掐 = 直接失败）。
+  max_same_dir_s: 10.0     #   同一轴、**同一方向**连续发轴超过这么多秒 ⇒ estop 硬停 + 强制退出(9)
+                           #   （**2026-09-28 用户定 10.0s**：5.0s 会把"逐小步逼近"里的合法转向也掐掉 ——
+                           #    每小步都可能长时间同向满舵（out_max=0.30 = 偏离中位 38 字节，
+                           #    连续满舵时长 ≈ 本步转角/实际角速度）；小角度逐步逼近尤其容易踩到 5s。）
   min_off_b: 13            #   偏离中位超过这么多**字节**才算"在发轴"（≈0.10 DOF，接近执行器死区）
   poll_ms: 50              #   巡检周期(ms)
                            #   ⚠️ 用 `AUV_WATCHDOG=0` 可临时关；SIM 模式默认不开（免得打断 pytest）。
@@ -80,6 +87,14 @@ motion:                    # **ball / gate 共用的底层运动参数**（同�
              #   实测：健康转向的饱和段通常 < 0.5s；板端 --deg 30 卡死时 2.0s 即触发。
              #   0 = 关掉这条保护（超时保护仍在，但它要求每帧都被 step 到，现场卡死时不可靠）。
              sat_max_s: 2.0, sat_progress_deg: 5.0,
+             # overshoot_tol_deg：**超转容差 = 10.0°**（用户 2026-09-28 定："逐步收敛，可以超转但超转不得超过
+             #   10 度"）——基准是**下发的 deg**，不是 ψ；**只放宽超转那一侧**：
+             #   `0 ≤ done_deg − deg ≤ 10°` 即算这一小步到位，且在这窗里**不再触发满舵保护**；
+             #   **超过 10° 不认**，交给下一个新鲜 ψ 带回来（典型轨迹：目标 32° ⇒ 10→20→30→38→32）。
+             #   为什么：满舵保护原来只看"|err| 有没有变小"，而超转会让 |err| 变大 ⇒ 正常的轻微超转
+             #   会被误判成"没进展/转反了"把转向掐死（用户："超了一点很正常，不应该这么被限死"）。
+             #   0 = 关掉这条（回到只看 err）。与 max_step_deg/turn_scale 配合：窗口按"下发的那一下"算。
+             overshoot_tol_deg: 10.0,
              # period：转向闭环推进周期(s)，必须与 .sh 路径 `turn(period=0.05)` 一致
              #   （gate 的转向由 gate_task._turn_inner_loop 按它阻塞推进）。
              period: 0.05}
@@ -168,10 +183,13 @@ gate:                      # 过门（相位机 SEARCH→ALIGN→APPROACH→THRO
        # ⚠️ 代码兜底 `gate_task._D_ALIGN` 必须与这里同值（有用例 `test_gate_defaults_match_cfg` 守）。
        # confirm_frames：连续对准帧数（防抖；**别拿降帧数当"放宽"**）。
   # 居中**只有 sway 平移、没有 yaw**（2026-09-20 用户定）：姿态修正由下面的 hdg.* 负责，那是 gate 唯一的 yaw 通道。
-  hdg: {enable: true, tol_deg: 8.0, max_step_deg: 0.0, timeout_ms: 30000,
+  hdg: {enable: true, tol_deg: 8.0, max_step_deg: 15.0, turn_scale: 0.8, timeout_ms: 30000,
         turn_timeout_s: 8.0, entry_psi_first: false, psi_first_z_max: 2.5, psi_first_ratio: 0.30,
         # 「转完反向平移」（gate_task 的 SWAY_BACK 状态）—— 以下 5 个键现场可调：
         post_sway_ms: 600.0, post_sway: 0.20,
+        # ★ 转完（硬停完成后）**边反向平移边缓慢后退**，直到「画面里至少出现 post_sway_kpt_min 个角点」：
+        #   post_sway_back = 后退幅度（正值，代码取负；0 = 不后退）；post_sway_kpt_min = 角点门限（可设）。
+        post_sway_back: 0.15, post_sway_kpt_min: 2,
         post_sway_far_ratio: 0.7, post_sway_same_z_m: 0.5, stop_hard: true}
        # 「正航向」（ALIGN 的子状态 HDG；实现 `gate/heading_align.py`）：让机身与门法向平行。
        # ★ 2026-09-27 起是**一次到位**：起转那一刻把 full 帧的 psi（`_hdg_deg`，EMA）**冻结**成目标角
@@ -179,7 +197,13 @@ gate:                      # 过门（相位机 SEARCH→ALIGN→APPROACH→THRO
        #   旧的「测→转→停稳→再测→迭代」、**开环盲转**（blind_enable/blind_rate_dps）、
        #   **开环探向**（probe_*）全部删除：转向只允许闭环；只有 full 帧的 psi 可用（p3p 欠定）。
        # tol_deg：|psi| ≤ 它 ⇒ 不转（已经够正）。
-       # max_step_deg：单次转角上限，**0 = 不设限**（测到多少转多少）；只用于防"垃圾 psi 把船甩出去"。
+       # max_step_deg：单次转角上限（**2026-09-28 定 15.0°**；0 = 不设限）。只防"垃圾 psi 把船甩出去"。
+       # ⚠️ **没有「每门只转一次」的限制**（用户 2026-09-28 定：那条限制不合理）——改为**逐小步逼近**：
+       #   一次最多转 max_step_deg(15°)，转完**重新测 ψ**；只要来了**新的 ψ 测量**且残余仍 > tol_deg，
+       #   就再转一小步，直到够正。每小步之间必须有新 ψ（否则会照旧值连转、又转过头）；
+       #   兜底由 阶段超时(hdg.timeout_ms) + 方向自证(div_deg) + 满舵保护(sat_*) 负责。
+       # turn_scale：**下发角缩放**（2026-09-28 定 0.8）——实测转过 40.9° 而目标是 36.6°（偏大）⇒
+       #   先按 0.8 缩一档试。顺序：|ψ| × turn_scale，再用 max_step_deg 钳位。1.0 = 不缩。
        # timeout_ms：正航向总时限；turn_timeout_s：单次转向的闭环超时（超时=带残余航向继续走，不卡死）。
        # entry_psi_first：**航向优先**（居中还没达标也起转）——解「航向歪 ⇒ 门偏一侧 ⇒ 居中确认不了
        #   ⇒ 不许转 yaw」的死锁。默认 **false**（必须先居中）。
@@ -202,7 +226,7 @@ gate:                      # 过门（相位机 SEARCH→ALIGN→APPROACH→THRO
        # 「在门口超时兜底」= 直冲出口③：**不看档位**，只要 ①框占比 ≥ z.near_lost_ratio
        #   ②在安全带内（|dx|≤dx_max、|dy|≤dy_max）③连续持续 ≥ timeout_ms → 自己拍板：判过门 + 直冲。
        # 调参：等太久 → 减小 timeout_ms；误判太多（没对准就冲）→ 收紧 dx_max/dy_max。不要 → enable: false。
-  z: {align_max: 4.0, fast_max: 3.0, slow_max: 1.3, cross: 0.7,
+  z: {align_max: 4.0, fast_max: 3.0, slow_max: 1.3, cross: 0.9,   # 2026-09-28：0.7→0.9（**早点触发冲刺**）
       # ★A 域：本仓库取老值 cross=0.7 —— 下面那组 09-26 说明（0.65 / 0.6 / 0.75）是 **D 域**的收紧；
       #   本仓库的老阈值与老内参（fx 782.5）是**配套**的同一套尺度。
       cross_confirm_frames: 2,   # 连续 z≤cross 帧数才判过门(防单帧 PnP 错解冲出去)。**别降到 1**
@@ -242,13 +266,17 @@ gate:                      # 过门（相位机 SEARCH→ALIGN→APPROACH→THRO
                               # **冲刺时长**(ms) → 判过门（**按时间**，帧数语义下时长随 fps 漂）。
                               #   confirm_ms<=0 → 退回旧的帧数语义（用 confirm_frames=8）。
                               #   ⚠️ **下次下水按实测航速回填**：confirm_ms ≈ 1000·(起步距离+机身长)/v × 1.3。
-  search: {sweep_s: 2.0, pause_s: 1.0, sway: 0.45}
+  search: {sweep_s: 2.0, pause_s: 1.0, sway: 0.6}
          # SEARCH = **左右平移扫视**（过门过程中不允许旋转搜索）。波形：向右 sweep_s → 停 pause_s → 向左同长 → 停。
          # ⚠️ **必须对称**（正反等时长）：遥测没有横向位置反馈 → 单向平移会一路漂到池壁；等时长 ⇒ 净位移≈0。
          #   ⚠️ 这是**开环**：抵消依赖左右推力对称，水流会带来缓慢漂移（**未验证**）；
          #   总时长由 `gate.timeout_ms` 兜底 —— 若现场发现一直往一侧跑，先降 `sway`。
          # sway：平移速度(|DOF|)，**不经过 PID**。`sweep_s<=0` → 只停不扫（原地待机）。
          #   **SEARCH 不前进**（保留"看不见就别动"的保守性）。
+         # ★ 2026-09-28：0.45 → **0.6**（用户：现场反馈平移力度偏小）。档位参考：
+         #   `motion.pid_sway.out_max = 0.45`（居中修正上限）、执行器死区 ≈0.138
+         #   ⇒ 0.6 明确越过死区、且比居中修正更有力；再往上逼近满舵，单侧漂移也累积更快。
+         #   改这一行**必须同步** `gate/gate_task.py::_D_SEARCH`（守卫用例 test_gate_defaults_match_cfg 挡的就是这种漂移）。
   pose_hold_frames: 10        # 帧间防抖：丢姿态时的保持帧数
 
 debug:                     # 通信调试

@@ -203,9 +203,10 @@ class UartController(object):
             return
         self._watchdog = _AxisWatchdog(
             self,
-            max_same_dir_s=float(S.get("comm.watchdog.max_same_dir_s", 5.0) or 0.0),
+            max_same_dir_s=float(S.get("comm.watchdog.max_same_dir_s", 10.0) or 0.0),
             min_off_b=int(S.get("comm.watchdog.min_off_b", 13) or 13),
-            poll_ms=int(S.get("comm.watchdog.poll_ms", 50) or 50)).start()
+            poll_ms=int(S.get("comm.watchdog.poll_ms", 50) or 50),
+            axes=S.get("comm.watchdog.axes", ["yaw"])).start()
 
     # ---------------- 帧/发送 ----------------
     def _current_frame(self):
@@ -580,8 +581,15 @@ class UartController(object):
 
 
 class _AxisWatchdog(object):
-    """**轴饱和看门狗**（用户 2026-09-27 定，阈值 5.0s）：同一轴、同一方向**连续**发轴 ≥ `max_same_dir_s` ⇒
-    **硬停 + 强制退出**。
+    """**轴饱和看门狗**（用户 2026-09-27 定，阈值 5.0s）：**只看 yaw 轴** —— 同一方向**连续**发 yaw ≥
+    `max_same_dir_s`（**缺省 10.0s**，2026-09-28 定）⇒ **硬停 + 强制退出**。
+
+    ⚠️ **为什么只管 yaw（用户 2026-09-27 明确：剩下的不能管）**：
+      · yaw 是**闭环收敛量** —— 正常的转向应当越转误差越小，同一个方向连续满舵 5s 只可能是
+        "反馈卡住/舵效不对/在自转"，这才需要掐死；
+      · surge/sway/heave 是**可以合法长同向**的：冲刺(through)本来就是几秒直行、扫视/横向对中是
+        持续平移、保深是持续垂向 —— 拿它们当"卡死"判据会**误杀正常动作**（长直行被掐 = 直接失败）。
+      · 想看哪些轴由 `comm.watchdog.axes`（轴名列表，缺省 `[yaw]`）决定；判据本身通用。
 
     为什么要独立线程、要放在 `base/uart.py`：
       · 任务可能**卡在某个循环里**（现场"一开始进 turn 就卡住"）——写在任务控制流里的保护
@@ -595,23 +603,55 @@ class _AxisWatchdog(object):
 
     AXES = ("yaw", "surge", "heave", "sway")
 
-    def __init__(self, uart, max_same_dir_s=5.0, min_off_b=13, poll_ms=50,
-                 on_trip=None, log=None):
+    @staticmethod
+    def _resolve_axes(axes):
+        """轴名/下标 → 字节下标元组（名字走 `comm.dof_map`，不硬编码）。空列表 ⇒ 看门狗不盯任何轴。"""
+        idx = {}
+        try:
+            for k, v in (S.comm.get("dof_map", None) or {}).items():
+                idx[str(k)] = int((v or {}).get("axis", -1))
+        except Exception:
+            idx = {}
+        out = []
+        for a in (axes or ()):
+            if isinstance(a, int):
+                out.append(a)
+            else:
+                i = idx.get(str(a), None)
+                if i is None:
+                    print("[UART] 看门狗：未知轴名 %r（可用 %s）→ 忽略" % (a, sorted(idx)))
+                    continue
+                out.append(i)
+        return tuple(sorted(set(i for i in out if 0 <= i < 4)))
+
+    def axis_names(self):
+        """实际盯的轴名（日志/用例用）。"""
+        return tuple(self.AXES[i] if i < len(self.AXES) else ("axis%d" % i) for i in self.axes)
+
+    def __init__(self, uart, max_same_dir_s=10.0, min_off_b=13, poll_ms=50,
+                 on_trip=None, log=None, axes=None):
         self.uart = uart
         self.max_same_dir_s = float(max_same_dir_s or 0.0)
         self.min_off_b = int(min_off_b or 0)
         self.poll_ms = max(10, int(poll_ms or 50))
+        # 只看哪些轴：轴名（`dof_map` 的键）或下标；缺省**只盯 yaw**（见类文档：其余轴可合法长同向）
+        self.axes = self._resolve_axes(axes if axes is not None else ("yaw",))
         self.on_trip = on_trip
         self.log = log or print
         self._stop = threading.Event()
+        self._warned_err = False
         self._thread = threading.Thread(target=self._run, name="axis-watchdog", daemon=True)
 
     def start(self):
         if self.max_same_dir_s <= 0:
             self.log("[UART] 轴看门狗：关闭（max_same_dir_s=0）")
             return self
-        self.log("[UART] 轴看门狗：同一方向连续发轴 ≥ %.1fs ⇒ 硬停 + 强制退出（巡检 %dms，"
-                 "判据 |偏离中位| ≥ %d 字节）" % (self.max_same_dir_s, self.poll_ms, self.min_off_b))
+        if not self.axes:
+            self.log("[UART] 轴看门狗：comm.watchdog.axes 为空 ⇒ 不盯任何轴（不启动）")
+            return self
+        self.log("[UART] 轴看门狗：**只盯 %s** ｜ 同一方向连续发轴 ≥ %.1fs ⇒ 硬停 + 强制退出"
+                 "（巡检 %dms，判据 |偏离中位| ≥ %d 字节）"
+                 % ("/".join(self.axis_names()), self.max_same_dir_s, self.poll_ms, self.min_off_b))
         self._thread.start()
         return self
 
@@ -623,29 +663,43 @@ class _AxisWatchdog(object):
             mid = int(S.comm.frame.axis_mid)
         except Exception:
             mid = 128
-        dirs = [0, 0, 0, 0]
-        t0 = [None, None, None, None]
+        dirs = {}          # 字节下标 → 当前方向（只记盯的轴）
+        t0 = {}            # 字节下标 → 该方向起始时刻
         while not self._stop.wait(self.poll_ms / 1000.0):
             try:
-                axes = list(self.uart._axes[:4])
+                ax = list(self.uart._axes)
             except Exception:
                 continue
-            now = time.monotonic()
-            for i, b in enumerate(axes):
-                try:
-                    off = int(b) - mid
-                except Exception:
-                    continue
-                if abs(off) < self.min_off_b:
-                    dirs[i], t0[i] = 0, None
-                    continue
-                d = 1 if off > 0 else -1
-                if dirs[i] != d:
-                    dirs[i], t0[i] = d, now
-                    continue
-                if t0[i] is not None and (now - t0[i]) >= self.max_same_dir_s:
-                    self._trip(i, int(b), now - t0[i])
-                    return
+            # ★ 巡检体整体兜异常：任何意外都不许把线程弄死（线程静默退出 = 保护静默失效，
+            #   比没有看门狗更危险 —— 2026-09-27 用例就是靠这里抓出 KeyError 的）。
+            try:
+                self._poll_once(ax, mid, now=time.monotonic(), dirs=dirs, t0=t0)
+            except Exception as e:
+                if not self._warned_err:
+                    self._warned_err = True
+                    self.log("[UART] 看门狗巡检异常（继续跑）：%r" % (e,))
+            continue
+
+    def _poll_once(self, ax, mid, now, dirs, t0):
+        """单次巡检（抽出来便于整体兜异常 + 单测）。"""
+        for i in self.axes:                      # ★ 只看 comm.watchdog.axes（缺省 yaw）
+            if i >= len(ax):
+                continue
+            b = ax[i]
+            try:
+                off = int(b) - mid
+            except Exception:
+                continue
+            if abs(off) < self.min_off_b:
+                dirs[i], t0[i] = 0, None
+                continue
+            d = 1 if off > 0 else -1
+            if dirs.get(i) != d:
+                dirs[i], t0[i] = d, now
+                continue
+            if t0.get(i) is not None and (now - t0[i]) >= self.max_same_dir_s:
+                self._trip(i, int(b), now - t0[i])
+                return
 
     def _trip(self, i, byte, held_s):
         mid = int(S.comm.frame.axis_mid)

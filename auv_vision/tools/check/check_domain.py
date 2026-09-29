@@ -7,7 +7,7 @@
     | 域 | 链路（`vision.image.chain`） | 门权重 | clahe_clip |
     |---|---|---|---|
     | A（原方案） | remap@720p → resize640 → enhance | AUV_4 `d38b803e…` | 0.5 |
-    | D（新方案） | resize640 → enhance → remap@640 | 阶段一 `g240_i16` `ef52c18b…` | 0 |
+    | D（新方案） | resize640 → enhance → remap@640 | 阶段一 v3 `ca5ba84f…` | 0 |
 
 板端两个仓库的分工见 `tools/README.md` §6。本脚本回答三个问题：
 
@@ -52,7 +52,9 @@ if _ROOT not in sys.path:
 #: 代次指纹：域 ↔ 门权重 md5 前缀（改动权重文件时**必须**同步这里与 tools/README.md §6）
 DOMAIN_WEIGHTS = {
     "A": ("d38b803e", "AUV_4（原识别方案）"),
-    "D": ("ef52c18b", "阶段一 g240_i16（新识别方案）"),
+    # ★ 2026-09-28：D 域门权重换代 stage1_v3（ca5ba84f，3,938,806 B）。
+    #   上一代 `g240_i16`（ef52c18b）已退居 bak/，只在回退时才会再出现。
+    "D": ("ca5ba84f", "阶段一 v3（新识别方案）"),
 }
 #: 每个域的链路与配套参数（写入 cfg 的期望值）
 DOMAIN_EXPECT = {

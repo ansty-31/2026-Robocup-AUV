@@ -56,7 +56,15 @@ _D_TURN_PID = dict(
     #   **只满舵还不算**——必须同时"没进展"（这段时间误差改善 < `sat_progress_deg`）才停，
     #   否则慢船的正常长饱和会被误杀（用例 test_motion 实测过）。
     #   0 = 关掉这条保护。实测：健康转向的饱和段通常 < 0.5s。
-    sat_max_s=2.0, sat_progress_deg=5.0)
+    sat_max_s=2.0, sat_progress_deg=5.0,
+    # overshoot_tol_deg：**超转容差 = 10.0°**（用户 2026-09-28 定："逐步收敛，可以超转但超转不得超过 10 度"）
+    #   —— 判据的基准是**下发的 deg**，不是 ψ：实测**超转** `0 ≤ done_deg − deg ≤ 10°` 就算这一小步到位
+    #   （未转够仍按 err 死区判），且在这窗里**不再触发满舵保护**（`sat`）；**超过 10° 不认**，
+    #   由下一个新鲜 ψ 带回来（典型轨迹：目标 32° ⇒ 10→20→30→(超到)38→回到 32）。
+    #   为什么必须：满舵保护原来只看"|err| 有没有变小"，而**超转会让 |err| 变大** ⇒
+    #   一次正常的轻微超转会被误判成"没进展/转反了"而把转向掐死（用户："不应该这么被限死"）。
+    #   0 = 关掉这条（只看残余误差 err，退回到"超一点也可能被掐"）。
+    overshoot_tol_deg=10.0)
 
 # 方向自证要求的最小命令量（DOF·s；∫out·dt，只算朝目标方向的）：0.3 DOF·s ≈ 1s 满舵。
 _DIV_U = 0.3
@@ -161,8 +169,12 @@ class TurnCore(object):
         self.sat_max_s = float(c.get("sat_max_s", _D_TURN_PID["sat_max_s"]) or 0.0)
         self.sat_progress_deg = float(c.get("sat_progress_deg",
                                             _D_TURN_PID["sat_progress_deg"]) or 0.0)
+        # 超转容差：基准是**下发的 deg**（见 _D_TURN_PID 的注释）
+        self.over_tol = float(c.get("overshoot_tol_deg",
+                                    _D_TURN_PID["overshoot_tol_deg"]) or 0.0)
         self._sat_ms = 0.0            # 连续满舵累计时长(ms)
         self._sat_err0 = None         # 这段饱和开始时的 |误差|(°)（判有没有进展）
+        self._sat_remain0 = None      # 这段饱和开始时"距下发的 deg 还差多少"（°）
         self.div_deg = float(c.get("div_deg", 15.0) or 0.0)      # 0 = 关掉方向自证
         self.wait_tel_s = float(wait_tel_s)
         self.timeout = float(timeout)
@@ -203,6 +215,24 @@ class TurnCore(object):
                     self.cfg["kp"], self.cfg["kd"], self.cfg["ki"],
                     self.om, self.dz, self.nd))
         return self.state
+
+    def overshoot_deg(self):
+        """**超转量**（>0 = 已转过头发；基准 = 下发的 `deg`，用户 2026-09-28 定）。"""
+        try:
+            return float(self.done_deg) - float(self.deg)
+        except Exception:
+            return float("-inf")
+
+    def remain_done(self):
+        """**距"下发的 deg"还差多少度**（= 超转容差的基准，用户 2026-09-28 定）。
+
+        `done_deg` 是"朝目标方向实际转过的角度"（负 = 转反了）⇒ 未转够时为正、超转时为负；
+        这里取绝对值：越接近 0 = 越接近我们下发的那个角度（**允许超一点**）。
+        """
+        try:
+            return abs(float(self.deg) - float(self.done_deg))
+        except Exception:
+            return float("inf")
 
     def finished(self):
         return self.state in (self.DONE, self.TIMEOUT, self.ABORTED)
@@ -261,28 +291,44 @@ class TurnCore(object):
         self.out = self.pid.update(err / self.nd, int(now_ms))
         self.max_err = max(self.max_err, abs(err))
         self.done_deg = wrap180(self.imag_sign * self.d * wrap180(yaw - self.yaw0))
+        # "距下发的 deg 还差多少" + 是否已进超转容差窗 —— 满舵保护与到位判据都要用，先算。
+        _remain = self.remain_done()
+        # **超转**（转过头发）才吃这条容差：`0 ≤ done_deg − deg ≤ overshoot_tol_deg`。
+        #   未转够那一侧仍由 `deadzone_deg`（残余误差窗）管 ⇒ 容差调大不会把"只转了一点点"判成到位。
+        _over = float(self.done_deg) - float(self.deg)
+        _in_win = (self.over_tol > 0.0 and 0.0 <= _over <= self.over_tol)
 
         # ★ 满舵保护（用户 2026-09-27 定）：命令饱和到 ±out_max 持续 `sat_max_s` ⇒ **立刻停**。
         #   加在"算完 out"之后、"到位/超时"判断之前 ⇒ 它比超时更早生效（现场要的就是这个）。
         if self.sat_max_s > 0.0 and abs(self.out) >= 0.9 * self.om:
             if self._sat_ms <= 0.0:
                 self._sat_err0 = abs(err)          # 进入饱和段：记起点误差
+                self._sat_remain0 = _remain         # 以及"距下发的 deg 还差多少"
             self._sat_ms += dt * 1000.0
             if self._sat_ms >= self.sat_max_s * 1000.0:
-                prog = (self._sat_err0 or abs(err)) - abs(err)
-                if prog < self.sat_progress_deg:
+                # 进展有两种口径，取更好的那个（用户 2026-09-28 定：基线是**下发的 deg**）：
+                #   ① 残余误差 |err| 变小；② 朝下发的 deg 推进（|deg − done_deg| 变小）。
+                #   轻微超转时 ① 会变差，但 ② 仍在推进（或已进容差窗）⇒ **不许掐**。
+                prog_err = (self._sat_err0 or abs(err)) - abs(err)
+                prog_deg = ((self._sat_remain0 if self._sat_remain0 is not None else _remain)
+                            - _remain)
+                prog = max(prog_err, prog_deg)
+                if prog < self.sat_progress_deg and not _in_win:
                     _out_abs = abs(self.out)          # 先记下来（abort() 会把 out 清零）
                     self.abort("sat")
-                    self.log("[TURN] ⛔ 满舵 %.1fs 且**没进展**（误差只改善 %.1f° < %.1f°；"
-                             "|out|=%.2f，还差 %+.1f°）⇒ **立刻停转**（舵效/遥测/接线？）"
-                             % (self._sat_ms / 1000.0, prog, self.sat_progress_deg,
-                                _out_abs, err))
+                    self.log("[TURN] ⛔ 满舵 %.1fs 且**没进展**（|err| 改善 %.1f°、朝下发角推进 "
+                             "%.1f°，都 < %.1f°；|out|=%.2f，err=%+.1f°，已转 %.1f°/下发 %.1f°）"
+                             "⇒ **立刻停转**（舵效/遥测/接线？）"
+                             % (self._sat_ms / 1000.0, prog_err, prog_deg,
+                                self.sat_progress_deg, _out_abs, err, self.done_deg, self.deg))
                     return self.state, 0.0
-                self._sat_ms = 0.0                 # 有进展 ⇒ 重新计一段（慢船不被误杀）
+                self._sat_ms = 0.0                 # 有进展/已在容差窗 ⇒ 重新计一段（慢船不被误杀）
                 self._sat_err0 = abs(err)
+                self._sat_remain0 = _remain
         else:
             self._sat_ms = 0.0
             self._sat_err0 = None
+            self._sat_remain0 = None
 
         # ---- 方向自证（不是"测符号"：σ 已定死。只回答"船有没有按命令的方向转"）----
         self._u_d += max(0.0, self.out * self.d) * dt
@@ -295,14 +341,22 @@ class TurnCore(object):
                         self.imag_sign, self.sigma_src))
             return self.state, 0.0
 
-        if abs(err) <= self.dz:
+        # ★ 到位判据有两条，满足任一 + 连续 3 帧：
+        #   ① 残余误差 |err| ≤ deadzone_deg（原来的判据）；
+        #   ② **转到下发的 deg 的容差窗内**：|done_deg − deg| ≤ overshoot_tol_deg
+        #      —— 用户 2026-09-28 定："超转容差的目标是下发的 deg 才行"。基准是**我们下发的角**，
+        #      不是 ψ 的残差 ⇒ 轻微超转（done_deg 略大于 deg）也算到位，不会被满舵保护掐死。
+        if abs(err) <= self.dz or _in_win:
             self.on_target += 1
             if self.on_target >= 3:
                 self.state = self.DONE
                 turn_log("exit", src=self.tag, state="done", done_deg=self.done_deg,
-                         max_err=self.max_err, ms=now_ms - (self.t_run or now_ms))
-                self.log("[TURN] ✅ 到达：err=%+.1f°（目标 %+.1f°）｜实测已转 %+.1f°（最大偏差 %.1f°）"
-                         % (err, self.deg * self.d, self.done_deg, self.max_err))
+                         max_err=self.max_err, why=("err" if abs(err) <= self.dz else "deg_win"),
+                         ms=now_ms - (self.t_run or now_ms))
+                self.log("[TURN] ✅ 到达：err=%+.1f°（目标 %+.1f°）｜实测已转 %+.1f°（下发 %.1f°，"
+                         "容差 %.1f°；判据=%s）｜最大偏差 %.1f°"
+                         % (err, self.deg * self.d, self.done_deg, self.deg, self.over_tol,
+                            "deg 容差窗" if _in_win else "err 死区", self.max_err))
                 return self.DONE, 0.0
         else:
             self.on_target = 0

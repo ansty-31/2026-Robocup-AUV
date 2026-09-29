@@ -29,12 +29,23 @@ _TERMINAL = (DONE, GIVEUP, ABORTED)
 _D_HDG = dict(enable=True, tol_deg=8.0,
               # max_step_deg：单次转角的上限（**0 = 不设限**，就是按测到的 psi 转）。
               # 它只是防"垃圾 psi 把船甩出去"的安全钳位，不是收敛手段（本设计只转一次）。
-              max_step_deg=0.0,
+              # max_step_deg：**单次转角上限 = 15.0°**（用户 2026-09-28 定）。与 `turn_scale` 配合：
+              #   先按 turn_scale 缩小测到的 ψ，再用它钳位。被钳掉的残余**由下一小步补转**
+              #   （逐小步逼近，无次数上限）⇒ 它只是"每步别太猛"，不再等于"只转一次"。
+              max_step_deg=15.0,
+              # turn_scale：**下发角缩放**（用户 2026-09-28 定 0.8）。实测"转过 40.9° 而目标 36.6°"
+              #   偏大，先按 0.8 缩一档试；1.0 = 不缩。它只改"下发的 deg"，不改 ψ 的测量与判据。
+              turn_scale=0.8,
               timeout_ms=30000.0, turn_timeout_s=8.0,
               # post_sway：转完补偿（用户 2026-09-27 定）——刚转过的那一下画面被整体甩走（转 40°
               #   就超出 32° 半视场），门又看不见时视觉没法纠 ⇒ 在**丢门的帧**上朝**转向的反方向**
               #   平移一小段，把门拉回视野。post_sway 必须 > 执行器死区 0.138；窗口 = post_sway_ms。
               post_sway_ms=600.0, post_sway=0.20,
+              # 转完补偿（用户 2026-09-28 定）：**边反向平移边缓慢后退** ——
+              #   post_sway_back = 后退幅度（正值，代码取负；0 = 不后退）；
+              #   post_sway_kpt_min = 退出门限：画面里出现 ≥ 这么多**原始角点**就交回视觉
+              #   （0 = 不看角点数，只靠到期/同门判据）。
+              post_sway_back=0.15, post_sway_kpt_min=2,
               # post_sway_far_ratio / post_sway_same_z_m：窗口内判"这算不算刚丢的那个门"的两道闸
               #   （实现 `gate_task._post_sway_same_gate`）：z 优先（|Δz| ≤ same_z_m），
               #   z 拿不到才退框占比（≥ far_ratio × 转走那一刻的占比）；两个都设 0 = 关掉判据。
@@ -125,7 +136,7 @@ class HeadingAligner(object):
         """进正航向（`gate_task` 在"居中达标"或"航向优先"时调用一次）。
 
         Args:
-            psi: 目标航向误差（度）。**psi>0 ⇒ 左转、psi<0 ⇒ 右转**（现场定，见下）。None = 没测到。
+            psi: 目标航向误差（度）。**psi<0 ⇒ 左转、psi>0 ⇒ 右转**（2026-09-28 实船定性，见下）。None = 没测到。
         """
         if not self.enabled or self.state in _TERMINAL:
             return self.state
@@ -134,25 +145,33 @@ class HeadingAligner(object):
             return self._giveup("没有可用的 PnP 航向测量（本门 full 帧一次都没测到）")
         psi = float(psi)
         self.psi_meas = psi
-        # ★ 2026-09-27 现场定：**ψ 的符号 → 转向方向取反**（psi>0 ⇒ 左转，psi<0 ⇒ 右转）。
-        #   依据（板端 `log/gate_one_20260927.jsonl`，新代码那一趟）：
-        #     f3/f12 psi=-43.7° 而门在画面**右侧**（dx=+0.12~0.23，船基本对着门）；
-        #     旧映射（psi<0 ⇒ 左转）照着 ψ 左转 44°（tyaw -61.4→-17.4，度数本身是对的），
-        #     结果门被甩到 ≈+51° 方位 —— 水平半视场只有 32° ⇒ **门彻底出画**（ψ 变 None → SEARCH）。
-        #     取反后同样 44° 转**右**：门落在 ≈-37°，仍在画面里，且朝向误差才真的在变小。
-        #   ⚠️ 旧的推导（相机系 n_z>0 ⇒ psi>0 表示机身左偏 ⇒ 右转）与水面实测不符，**已作废**。
-        #   别再按它改回来；真要论证请拿"转完后重测的 ψ"当证据。
-        left = bool(psi > 0)
+        # ★ ψ 的符号 → 转向方向（**2026-09-28 实船改正，以用户本地这一版为准**）：
+        #     psi < 0 ⇒ 左转 ／ psi > 0 ⇒ 右转
+        #   依据（板端 `log/run_gate.jsonl`，2026-09-28 那一趟，目标角由 PnP 冻结给出）：
+        #     `gate_start{psi=+36.6}` → 按**旧映射**（psi>0⇒左转）执行左转，实船反馈**转反了**；
+        #     同一趟日志里遥测也可以对上：σ=-1 ⇒ ψ=−tyaw，tyaw 7.5→40.5 意味着 ψ 从 −7.5 变到 −40.5，
+        #     即机身朝"让 ψ 更负"的方向转，而 ψ>0 的偏差需要的是**减小 ψ** ⇒ 方向确实反了。
+        #   ⚠️ 历史：2026-09-27 曾按当时一趟日志把映射取反成（psi>0⇒左转）——那次结论**已被推翻**，
+        #     别再按它改回去；判据只能是"转完后重测的 ψ 是否变小"。
+        #   ⚠️ 连带：`post_sway` 的方向由 `last_d` 推导（见 `gate_task._start_post_sway`），
+        #     映射取反它自动跟着反，不需要单独改。
+        left = bool(psi < 0)
         self.last_d = -1.0 if left else 1.0        # +1=右转 / -1=左转（与 turn_deg 的 d 同义）
         self.last_dir = "左转" if left else "右转"
-        deg = abs(psi)
-        if deg <= float(self.cfg["tol_deg"]):
+        raw = abs(psi)
+        if raw <= float(self.cfg["tol_deg"]):
             self.state = DONE
-            self.log("[HDG] ✅ 已与光轴平行（|psi|=%.1f° ≤ %.1f°）→ 不转" % (deg, self.cfg["tol_deg"]))
+            self.log("[HDG] ✅ 已与光轴平行（|psi|=%.1f° ≤ %.1f°）→ 不转" % (raw, self.cfg["tol_deg"]))
             return self.state
+        # ★ 下发角 = |ψ| × turn_scale，再用 max_step_deg 钳位（用户 2026-09-28 定：0.8 / 10°）。
+        #   顺序要紧：先缩放再钳位（钳位是安全上限，不是收敛手段）。1.0 / 0 分别等于"不缩/不限"。
+        scale = float(self.cfg.get("turn_scale", 1.0) or 1.0)
+        deg = raw * scale
         cap = float(self.cfg.get("max_step_deg", 0.0) or 0.0)
+        if abs(deg - raw) > 1e-9 or (cap > 0 and deg > cap):
+            self.log("[HDG] 下发角：|psi|=%.1f° × turn_scale %.2f = %.1f°%s"
+                     % (raw, scale, deg, ("；max_step_deg 钳到 %.1f°" % cap) if (cap > 0 and deg > cap) else ""))
         if cap > 0 and deg > cap:
-            self.log("[HDG] 单次幅度限制：%.1f° → %.0f°（配置了 max_step_deg>0）" % (deg, cap))
             deg = cap
         self.last_target_deg = deg
         kw = dict(self.turn_kwargs)
@@ -164,6 +183,19 @@ class HeadingAligner(object):
         self.state = TURN
         self.log("[HDG] 起转：%s %.1f°（冻结的 PnP 目标角；转完即结束，不重测）"
                  % (self.last_dir, deg))
+        return self.state
+
+    def rearm(self):
+        """**允许本门再转一次**（逐小步逼近，用户 2026-09-28 定）。
+
+        把终态退回 IDLE，保留 `iters`（本门累计转了几次）与方向历史。
+        ⚠️ 调用方必须先确认"来了新的 ψ 测量且残余 > tol"，否则会照着旧值连转（见
+        `gate_task._hdg_rearm_ok`）。次数上限由 `gate_task` 用 `hdg.max_turns` 管。
+        """
+        if self.enabled and self.state in _TERMINAL:
+            self.state = IDLE
+            self._core = None
+            self._t_stage = None
         return self.state
 
     def abort(self, why="外部中止"):

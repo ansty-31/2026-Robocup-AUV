@@ -492,13 +492,13 @@ def test_axis_watchdog_trips_when_one_axis_is_held_same_direction():
     w = U._AxisWatchdog(u, max_same_dir_s=0.15, min_off_b=13, poll_ms=20,
                         on_trip=lambda *a: trips.append(a), log=lambda *a: None)
     w.start()
-    u._axes[3] = 128 + 25              # sway 一直朝 +（= 「转完反向平移」那种持续平移）
+    u._axes[0] = 128 + 38              # yaw 一直朝一个方向（0.30 DOF = 转向满舵）
     t0 = time.monotonic()
     while time.monotonic() - t0 < 2.0 and not trips:
         time.sleep(0.01)
     w.stop()
-    assert trips, "同一方向持续发轴必须触发看门狗"
-    assert trips[0][0] == "sway", trips[0]
+    assert trips, "同一方向持续发 yaw 必须触发看门狗"
+    assert trips[0][0] == "yaw", trips[0]
     assert u.estops == 1, "触发时必须**先硬停**（否则强制退出后船锁在最后那个非中位字节上）"
 
 
@@ -509,20 +509,64 @@ def test_axis_watchdog_ignores_reversals_deadzone_and_short_pulses():
     w = U._AxisWatchdog(u, max_same_dir_s=0.4, min_off_b=13, poll_ms=20,
                         on_trip=lambda *a: trips.append(a), log=lambda *a: None)
     w.start()
-    u._axes[3] = 128 + 12              # ① 幅度 ±12 字节 < min_off_b ⇒ 不算"在发轴"
+    u._axes[0] = 128 + 12              # ① 幅度 ±12 字节 < min_off_b ⇒ 不算"在发轴"
     time.sleep(0.5)
     t0 = time.monotonic()              # ② 同方向但每 100ms 反向一次 ⇒ 连续同向从未到 0.4s
     while time.monotonic() - t0 < 0.6:
-        u._axes[3] = 128 + (25 if int((time.monotonic() - t0) * 10) % 2 == 0 else -25)
+        u._axes[0] = 128 + (25 if int((time.monotonic() - t0) * 10) % 2 == 0 else -25)
         time.sleep(0.05)
-    u._axes[3] = 128                   # 清计时
+    u._axes[0] = 128                   # 清计时
     time.sleep(0.1)
-    u._axes[3] = 128 + 25              # ③ 同方向只持续 0.15s < 0.4s
+    u._axes[0] = 128 + 25              # ③ 同方向只持续 0.15s < 0.4s
     time.sleep(0.15)
-    u._axes[3] = 128
+    u._axes[0] = 128
     time.sleep(0.3)
     w.stop()
     assert not trips, "正常动作被误杀：%s" % trips
+
+
+def test_axis_watchdog_only_watches_yaw():
+    """★ **只盯 yaw**（用户 2026-09-27 明确："看门狗只管 yaw 轴的，剩下的不能管"）。
+
+    为什么：yaw 是闭环收敛量（正常转向越转误差越小，同向连续满舵 = 反馈卡住/在自转）；
+    而 surge/sway/heave **可以合法长同向**——冲刺几秒直行、扫视/横向对中持续平移、保深持续垂向。
+    拿它们当"卡死"判据会**误杀正常动作**（长直行被掐 = 直接失败）。
+    """
+    u = _FakeAxesUart()
+    trips = []
+    w = U._AxisWatchdog(u, max_same_dir_s=0.15, min_off_b=13, poll_ms=20,
+                        on_trip=lambda *a: trips.append(a), log=lambda *a: None)
+    assert w.axes == (0,) and w.axis_names() == ("yaw",), (w.axes, w.axis_names())
+    w.start()
+    # 三个非 yaw 轴全部长时间同向（远超阈值）——一个都不许触发
+    u._axes[1], u._axes[2], u._axes[3] = 128 + 38, 128 + 38, 128 + 38
+    time.sleep(0.6)
+    w.stop()
+    assert not trips, "非 yaw 轴被误杀（用户定：剩下的不能管）：%s" % trips
+    # 对照：同一时刻把 yaw 也顶到同向 ⇒ 立刻触发（证明看门狗本身在工作）
+    u2 = _FakeAxesUart(); trips2 = []
+    w2 = U._AxisWatchdog(u2, max_same_dir_s=0.15, min_off_b=13, poll_ms=20,
+                         on_trip=lambda *a: trips2.append(a), log=lambda *a: None)
+    w2.start()
+    u2._axes[1], u2._axes[2], u2._axes[3] = 128 + 38, 128 + 38, 128 + 38
+    u2._axes[0] = 128 - 38
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 1.5 and not trips2:
+        time.sleep(0.01)
+    w2.stop()
+    assert trips2 and trips2[0][0] == "yaw", trips2
+
+
+def test_axis_watchdog_axes_come_from_cfg():
+    """盯哪些轴由 `comm.watchdog.axes` 决定（缺省只 yaw；乱写轴名忽略并告警）。"""
+    # 现场 cfg 必须写 axes: [yaw]；测试 cfg 覆盖（AUV_CFG_DIR）可能没这一段 ⇒ 只要求"有就必须是 yaw"，
+    # 而**代码默认**永远只盯 yaw（这才是"配不上也不能变宽"的保证）。
+    _cfg_axes = S.get("comm.watchdog.axes", None)
+    assert _cfg_axes in (None, ["yaw"]), _cfg_axes
+    assert U._AxisWatchdog(_FakeAxesUart(), log=lambda *a: None).axis_names() == ("yaw",)
+    w = U._AxisWatchdog(_FakeAxesUart(), axes=["yaw", "sway"], log=lambda *a: None)
+    assert w.axis_names() == ("yaw", "sway"), w.axis_names()
+    assert U._AxisWatchdog(_FakeAxesUart(), axes=["pitch"], log=lambda *a: None).axes == ()
 
 
 def test_axis_watchdog_names_match_dof_map():
@@ -548,4 +592,5 @@ def test_axis_watchdog_auto_start_policy(monkeypatch):
     monkeypatch.setenv("AUV_WATCHDOG", "1")   # 环境变量优先级最高
     u._start_watchdog()
     assert isinstance(u._watchdog, U._AxisWatchdog)
+    assert u._watchdog.axis_names() == ("yaw",), u._watchdog.axis_names()
     u._watchdog.stop()
