@@ -1,56 +1,41 @@
 # -*- coding: utf-8 -*-
-"""tools/analyze/pnp_calib.py — 过门 PnP 位姿 / 深度估计的**离线标定与报告**工具。
-
+"""tools/analyze/calib/pnp_calib.py — 过门 PnP 位姿 / 深度估计的**离线标定与报告**工具。
 它回答一个具体问题：**我们解出来的 z（和位姿）到底准不准、该把哪个参数改成多少。**
-
 输入
 ----
 `preview_detect.py --gate-kpt --dump` 产出的逐帧 JSONL（含 4 角点 + 置信度 + bbox）。
 真值从**文件名**里读，不用手抄：
-
-    pnp_z150.jsonl          正对门，卷尺量到 z = 1.50 m
-    pnp_z150_lat+25.jsonl   同上，且相机光轴相对门中心横向偏 +25 cm（门在光轴右侧）
-    pnp_z150_up+10.jsonl    同上，且门中心在光轴**上方** 10 cm
-    pnp_z150_yaw+20.jsonl   同上，且船体相对门右转 20°
-    pnp_z075_yaw-30.jsonl   组合随便，段名可任意顺序
-
-    约定：lat/up/yaw 的**符号**都按"门相对相机"描述：
-      lat+ = 门在光轴右侧（相机系 t_x 应为正）
-      up+  = 门在光轴上方（相机系 t_y 应为**负**，因为图像 y 向下）
-      yaw+ = 船体右转（门法向相对光轴偏左 → psi = gate_normal_angles_deg 应为负）
-
-    文件名不带真值时，用 `--gt gt.csv`（表头：file,z_m,lat_m,up_m,yaw_deg）。
-
+pnp_z150.jsonl          正对门，卷尺量到 z = 1.50 m
+pnp_z150_lat+25.jsonl   同上，且相机光轴相对门中心横向偏 +25 cm（门在光轴右侧）
+pnp_z150_up+10.jsonl    同上，且门中心在光轴**上方** 10 cm
+pnp_z150_yaw+20.jsonl   同上，且船体相对门右转 20°
+pnp_z075_yaw-30.jsonl   组合随便，段名可任意顺序
+约定：lat/up/yaw 的**符号**都按"门相对相机"描述：
+lat+ = 门在光轴右侧（相机系 t_x 应为正）
+up+  = 门在光轴上方（相机系 t_y 应为**负**，因为图像 y 向下）
+yaw+ = 船体右转（门法向相对光轴偏左 → psi = gate_normal_angles_deg 应为负）
+文件名不带真值时，用 `--gt gt.csv`（表头：file,z_m,lat_m,up_m,yaw_deg）。
 输出
 ----
-1. 控制台：每档一行（z 真值 / z 实测 p50 / 相对误差 / 可用率 / mode 分布）；
 2. `--report out.md`：完整报告（含参数校正建议、可直接粘贴的 cfg 片段）；
 3. `--csv out.csv`：每档一行（喂 Excel / 贴进 runbook 记录表）；
 4. `--frames-csv out.csv`：每帧一行（tz/tx/ty/psi/rms/mode，做散点图用）。
-
 它做的四件事
 ------------
 ① **深度标尺反演**：正对门时 `z_meas = z_true · (W_cfg / W_true)`（4 角 PnP 的深度由
-   门框**尺寸标尺**决定）→ 用实测比值直接反解**真实门宽**，再 1D 扫 `frame_h/frame_w`
-   比值（正对时深度对宽高比只有弱依赖）拿最优 `frame_h`。
+比值（正对时深度对宽高比只有弱依赖）拿最优 `frame_h`。
 ② **横向/竖向**：`t_x`（米）与 lat 真值、`t_y` 与 up 真值对比（校核尺度与符号）。
 ③ **航向**：`psi`（`gate_normal_angles_deg` 的 yaw 分量）与 yaw 真值对比 →
-   安装角偏置（均值）与噪声（std）——这是 ALIGN.HDG 能不能收敛的直接依据。
 ④ **选参**：`conf_thr × reproj_px` 扫描（可用率 vs 深度误差 p90）、p3p vs full 对比、
-   可选 kpt_mem 开/关 A/B。全部**离线复算**，不碰相机、不碰串口。
-
+可选 kpt_mem 开/关 A/B。全部**离线复算**，不碰相机、不碰串口。
 用法
 ----
-    # 单档
-    python3 tools/analyze/pnp_calib.py log/pnp_z150.jsonl
-    # 整组（通配）+ 出报告
-    python3 tools/analyze/pnp_calib.py --report log/pnp_report.md --csv log/pnp_summary.csv \\
-        log/pnp_z*.jsonl
-    # 只看 p3p/full 对比与选参扫描
-    python3 tools/analyze/pnp_calib.py --sweep log/pnp_z*.jsonl
-
-⚠️ 本工具**只读**：不改 cfg、不发串口。它给出的建议值要人工确认后再写进 cfg。
-"""
+# 单档
+python3 tools/analyze/calib/pnp_calib.py log/pnp_z150.jsonl
+# 整组（通配）+ 出报告
+log/pnp_z*.jsonl
+# 只看 p3p/full 对比与选参扫描
+python3 tools/analyze/calib/pnp_calib.py --sweep log/pnp_z*.jsonl"""
 from __future__ import annotations
 
 import argparse
@@ -62,15 +47,18 @@ import re
 import statistics as st
 import sys
 
-# 工程根 = tools/<类>/x.py 往上**三**级（分类重整后本脚本深了一层）
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# 工程根 = 向上第一个含 `cfg/` 的目录（**别写死层级**：脚本搬过位置，写死会静默指错）
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+while _ROOT != os.path.dirname(_ROOT) and not os.path.isdir(os.path.join(_ROOT, "cfg")):
+    _ROOT = os.path.dirname(_ROOT)
+sys.path.insert(0, _ROOT)
 
 import numpy as np                                              # noqa: E402
 
-import base.settings as S                                       # noqa: E402
-from gate.geometry import (object_points, gate_pose, reproj_rms,   # noqa: E402
+import base.cfg.settings as S                                       # noqa: E402
+from gate.percept.geometry import (object_points, gate_pose, reproj_rms,   # noqa: E402
                            gate_normal_angles_deg, CameraModel)
-from gate.gate_frontend import parse_kpt_mode                   # noqa: E402
+from gate.percept.gate_frontend import parse_kpt_mode                   # noqa: E402
 
 MODE_FULL = "full"
 MODE_P3P = "p3p"
@@ -82,7 +70,6 @@ _RE_Z = re.compile(r"z(\d{2,4})(?![\d])")
 _RE_LAT = re.compile(r"lat([+-]?\d+)")
 _RE_UP = re.compile(r"up([+-]?\d+)")
 _RE_YAW = re.compile(r"yaw([+-]?\d+)")
-
 
 # ---------------------------------------------------------------- 真值
 class Gt(object):
@@ -104,7 +91,6 @@ class Gt(object):
         return "z=%.2f lat=%+.2f up=%+.2f yaw=%+.0f" % (
             self.z_m, self.lat_m, self.up_m, self.yaw_deg)
 
-
 def parse_gt_from_name(path):
     """从文件名解析真值；解析不到 z → None（调用方可用 --gt 补）。"""
     base = os.path.basename(path)
@@ -116,7 +102,6 @@ def parse_gt_from_name(path):
     up = float(_RE_UP.search(base).group(1)) / 100.0 if _RE_UP.search(base) else 0.0
     yaw = float(_RE_YAW.search(base).group(1)) if _RE_YAW.search(base) else 0.0
     return Gt(z_cm / 100.0, lat, up, yaw, src="name")
-
 
 def load_gt_csv(path):
     """CSV：file,z_m,lat_m,up_m,yaw_deg（相对路径按 CSV 所在目录解析）。"""
@@ -134,7 +119,6 @@ def load_gt_csv(path):
                 row.get("yaw_deg") or 0.0, src="csv")
     return out
 
-
 # ---------------------------------------------------------------- 取检测
 def _det_key(item, conf_thr):
     """与 `gate_task._pick_gate` 相同的选门规则：有效角点数 > 置信度和 > score。"""
@@ -143,7 +127,6 @@ def _det_key(item, conf_thr):
         return (-1, 0.0, float(item.get("score") or 0.0))
     kc = np.asarray(kc, np.float64)
     return (int((kc >= conf_thr).sum()), float(kc.sum()), float(item.get("score") or 0.0))
-
 
 def read_frames(path, conf_thr):
     """读一个 dump 文件 → [(t, kpts(4,2)|None, kconf(4,)|None, bbox, fps, mode, ids)]。"""
@@ -173,7 +156,6 @@ def read_frames(path, conf_thr):
                         rec.get("fps"), mode, [int(i) for i in ids]))
     return out
 
-
 # ---------------------------------------------------------------- 逐帧复算
 def pose_frames(frames, camera, W, H, conf_thr, reproj_px, refine=True,
                 use_kpt_mem=False, km_cfg=None):
@@ -184,7 +166,7 @@ def pose_frames(frames, camera, W, H, conf_thr, reproj_px, refine=True,
     obj_w = object_points(W, H)
     km = None
     if use_kpt_mem:
-        from gate.kpt_memory import build_kpt_memory
+        from gate.percept.kpt_memory import build_kpt_memory
         cfg = km_cfg if km_cfg is not None else (S.vision.gate.get("kpt_mem", None) or {})
         if not bool((cfg or {}).get("enable", False)):
             cfg = dict(cfg or {})
@@ -231,11 +213,9 @@ def pose_frames(frames, camera, W, H, conf_thr, reproj_px, refine=True,
         rows.append(row)
     return {"rows": rows, "n_det": n_det, "n_mode": n_mode, "n_frames": len(frames)}
 
-
 def _vals(rows, key, mode=None):
     return [r[key] for r in rows
             if r.get(key) is not None and (mode is None or r["mode"] == mode)]
-
 
 def _p(v, q):
     if not v:
@@ -243,7 +223,6 @@ def _p(v, q):
     v = sorted(v)
     i = min(len(v) - 1, max(0, int(round(q * (len(v) - 1)))))
     return v[i]
-
 
 def summarize(res, gt, mode=MODE_FULL):
     """一档的汇总（默认只统计 full 帧；p3p 单独看）。"""
@@ -274,7 +253,6 @@ def summarize(res, gt, mode=MODE_FULL):
                             if len(_vals(rows, "psi", mode)) > 1 else None))
     return out
 
-
 # ---------------------------------------------------------------- 标尺反演
 def fit_depth(z_true, z_meas):
     """最小二乘 `z_meas = a·z_true + b`；返回 (a, b, r2, n)。"""
@@ -291,19 +269,14 @@ def fit_depth(z_true, z_meas):
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 1e-12 else float("nan")
     return a, b, r2, len(z_true)
 
-
 def invert_scale(per_file, camera, conf_thr, reproj_px, W0, H0,
                  max_frames=300, refine=True, slope=None):
     """反演门框尺寸标尺。
-
     ① 用"正对档"的**线性拟合斜率** `a`（`z_meas = a·z_true + b`）反解真实门宽：
-       `W* = W0 / a`。用斜率而不是"比值的直接中位数"是关键 —— 中位数会把截距 `b`
-       （真值口径差、畸变残差）混进比例里，近距离档尤其容易被带偏（实测差 ~2%）。
-       拟合不可用时退回"比值中位数"。
+    `W* = W0 / a`。用斜率而不是"比值的直接中位数"是关键 —— 中位数会把截距 `b`
+    拟合不可用时退回"比值中位数"。
     ② 固定 `W*`，1D 扫宽高比 `frame_h/frame_w`（正对时深度对宽高比只有弱依赖，
-       但比例错会让残余变大 → 近距被拒）→ 取 |相对误差| 中位数最小者。
-    返回 dict（含扫描表，便于看平坦度）。
-    """
+    返回 dict（含扫描表，便于看平坦度）。"""
     fronto = [f for f in per_file if f["gt"].fronto and f.get("z_p50")]
     if not fronto:
         return None
@@ -329,7 +302,6 @@ def invert_scale(per_file, camera, conf_thr, reproj_px, W0, H0,
     return {"ratio": ratio_med, "slope": slope, "W_star": W_star, "H0": H0,
             "W_now": W0, "ar_table": table}
 
-
 def _fmt(v, nd=3, dash="—"):
     if v is None:
         return dash
@@ -337,14 +309,13 @@ def _fmt(v, nd=3, dash="—"):
         return ("%." + str(nd) + "f") % v
     return str(v)
 
-
 # ---------------------------------------------------------------- 报告
 def render_md(per_file, results, camera, W0, H0, inv, sweeps, group_name=""):
     L = []
     A = L.append
     A("# 过门 PnP 位姿 / 深度标定报告")
     A("")
-    A("> 由 `tools/analyze/pnp_calib.py` 自动生成。真值来自文件名（或 `--gt` CSV）；")
+    A("> 由 `tools/analyze/calib/pnp_calib.py` 自动生成。真值来自文件名（或 `--gt` CSV）；")
     A("> 位姿为**离线复算**（同一份 dump、同一套 cfg 参数），不涉及相机与推进器。")
     A("")
     A("## 0. 本次数据")
@@ -484,7 +455,7 @@ def render_md(per_file, results, camera, W0, H0, inv, sweeps, group_name=""):
           % (st.median(offs), st.median(stds) if stds else float("nan")))
         A("")
         A("> 用法：`comm.gate.hdg.tol_deg` 必须显著大于这个噪声（当前 8°，实测噪声若 >4° 就别再收紧）。")
-        A("> ⚠️ 这个偏置**不是** `gate.geometry.body_center_offset`（那是**位置**偏置，单位米），"
+        A("> ⚠️ 这个偏置**不是** `gate.percept.geometry.body_center_offset`（那是**位置**偏置，单位米），"
           "别拿它去抵角度偏置。")
         A("")
 
@@ -530,7 +501,6 @@ def render_md(per_file, results, camera, W0, H0, inv, sweeps, group_name=""):
     A("> 再用 `bash tools/deploy/check_board_parity.sh --board` 确认板端一致。")
     return "\n".join(L) + "\n"
 
-
 # ---------------------------------------------------------------- 扫描
 def sweep_grid(files_frames, camera, W, H, conf_thrs, reprojs, max_frames=200):
     """conf_thr × reproj_px 扫描（只看正对档的可用率与深度误差）。"""
@@ -552,7 +522,6 @@ def sweep_grid(files_frames, camera, W, H, conf_thrs, reprojs, max_frames=200):
                         max(errs) if errs else float("nan")))
     return out
 
-
 def p3p_compare(files_frames, camera, W, H, conf_thr, reproj_px, max_frames=400):
     """p3p vs full 的深度/航向对比。`files_frames` = [(frames, gt, 档名)]。"""
     rows = []
@@ -571,14 +540,13 @@ def p3p_compare(files_frames, camera, W, H, conf_thr, reproj_px, max_frames=400)
                          "n": len(z)})
     return rows
 
-
 # ---------------------------------------------------------------- 主流程
 def run(paths, camera=None, gt_csv=None, conf_thr=None, reproj_px=None,
         W=None, H=None, max_frames=400, sweep=False, do_invert=True,
         conf_thrs=(0.5, 0.6, 0.7, 0.8), reprojs=(8.0, 12.0, 16.0, 20.0, 25.0),
         use_kpt_mem=False, verbose=True):
     """主流程：返回 (per_file, results)。所有阈值默认取当前 cfg。"""
-    from gate.gate_detector import board_camera
+    from gate.percept.gate_detector import board_camera
     cam = camera if camera is not None else board_camera()
     V = S.vision.gate
     G = V.get("geometry", None) or {}
@@ -632,7 +600,6 @@ def run(paths, camera=None, gt_csv=None, conf_thr=None, reproj_px=None,
                       "reproj_px": reproj_px, "inv": inv, "sweeps": sweeps,
                       "fit": fit, "use_kpt_mem": use_kpt_mem}
 
-
 def write_summary_csv(path, per_file):
     with open(path, "w", encoding="utf-8", newline="") as fh:
         w = csv.writer(fh)
@@ -653,7 +620,6 @@ def write_summary_csv(path, per_file):
                         _fmt(f.get("ty_p50"), 4), _fmt(f.get("psi_p50"), 3),
                         _fmt(f.get("psi_std"), 3), gt.src])
 
-
 def write_frames_csv(path, per_file):
     with open(path, "w", encoding="utf-8", newline="") as fh:
         w = csv.writer(fh)
@@ -669,7 +635,6 @@ def write_frames_csv(path, per_file):
                             _fmt(r.get("ty"), 4), _fmt(r.get("psi"), 3),
                             _fmt(r.get("pitch"), 3), _fmt(r.get("rms"), 3),
                             _fmt(r.get("ratio"), 4), r.get("fps")])
-
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
@@ -716,7 +681,6 @@ def main(argv=None):
         open(a.report, "w", encoding="utf-8").write(md)
         print("报告 → %s" % a.report)
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

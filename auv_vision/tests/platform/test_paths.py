@@ -1,13 +1,5 @@
 # -*- coding: utf-8 -*-
-"""tests/platform/test_paths.py — 路径依赖：cfg 相对路径 + 解析器 + 自检工具。
-
-守的是两类坑：
-  1. **cfg 里写绝对路径** ⇒ 把配置钉死在某一份拷贝上，指错一份就静默用另一个文件、
-     那份被删就直接崩；⇒ 规则：cfg 一律写**仓库内相对路径**，运行时由
-     `base.settings.resolve_path()` 解析。（2026-09-22 板端踩过，证据见
-     doc/_注释历史_fragments/base_tests.md）
-  2. **标定 yaml 的文件头**：板端 cv2 4.11 要求第一个字节是 `%YAML:1.0`。
-"""
+"""tests/platform/test_paths.py — 路径依赖：cfg 相对路径 + 解析器 + 自检工具。"""
 from __future__ import annotations
 
 import os
@@ -19,8 +11,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-import base.settings as S                                            # noqa: E402
-from tools.check import check_paths as CP                            # noqa: E402
+import base.cfg.settings as S                                            # noqa: E402
+from tools.check.pipeline import check_paths as CP# noqa: E402
 
 
 # ------------------------------------------------------------------ 解析器
@@ -63,11 +55,11 @@ def test_path_keys_resolve_to_existing_files():
 
 
 def test_path_keys_list_matches_settings():
-    """新增路径类参数时要同时加到 `base.settings._PATH_KEYS` 与工具里的清单。"""
+    """新增路径类参数时要同时加到 `base.cfg.settings._PATH_KEYS` 与工具里的清单。"""
     for k in CP.PATH_KEYS:
         short = k[len("vision."):] if k.startswith("vision.") else k
         assert short in S._PATH_KEYS, \
-            "%s 不在 base.settings._PATH_KEYS 里 → 它的相对路径不会被解析" % short
+            "%s 不在 base.cfg.settings._PATH_KEYS 里 → 它的相对路径不会被解析" % short
 
 
 # ------------------------------------------------------------------ 标定文件头
@@ -104,10 +96,7 @@ def test_check_paths_tool_passes_on_this_repo(capsys):
 
 
 def test_deploy_scripts_default_to_the_live_copy():
-    """部署/核对脚本的默认目录必须是**现场在用的工作副本** AUV_New。
-
-    照默认跑就会把文件推到/比到错的拷贝上（沿革见 doc/_注释历史_fragments/base_tests.md）。
-    """
+    """部署/核对脚本的默认目录必须是**现场在用的工作副本** AUV_New。"""
     import glob
     import re
     for p in sorted(glob.glob(os.path.join(ROOT, "tools", "deploy", "*.sh"))):

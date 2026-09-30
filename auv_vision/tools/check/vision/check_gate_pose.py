@@ -1,26 +1,29 @@
 # -*- coding: utf-8 -*-
-"""tools/check/check_gate_pose.py — 查"为什么位姿被拒"（只读相机，不驱动推进器）。
+"""tools/check/vision/check_gate_pose.py — 查"为什么位姿被拒"（只读相机，不驱动推进器）。
 
 打印每帧：角点置信度 / mode / 候选解数量 / 最佳候选的 RMS 与 tz / gate_pose 最终结果。
-用法（板端）：python3 tools/check/check_gate_pose.py [秒数]
+用法（板端）：python3 tools/check/vision/check_gate_pose.py [秒数]
 """
 import os
 import sys
 import time
 
 # 工程根 = tools/check/x.py 往上**三**级；cwd 也留着（有些用法从工程根直接跑）
-_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 工程根 = 向上第一个含 `cfg/` 的目录（**别写死层级**：脚本搬过位置，写死会静默指错）
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+while _ROOT != os.path.dirname(_ROOT) and not os.path.isdir(os.path.join(_ROOT, "cfg")):
+    _ROOT = os.path.dirname(_ROOT)
 for _p in (_ROOT, os.getcwd()):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
 import numpy as np                                     # noqa: E402
-import base.settings as S                              # noqa: E402
-from base.camera import create_camera                  # noqa: E402
-from gate.gate_detector import build_gate_backend, board_camera   # noqa: E402
-from gate.gate_frontend import parse_kpt_mode          # noqa: E402
-from gate.geometry import object_points, _iter_candidates, reproj_rms, gate_pose   # noqa: E402
-from gate.kpt_memory import build_kpt_memory           # noqa: E402
+import base.cfg.settings as S                              # noqa: E402
+from base.hw.camera import create_camera                  # noqa: E402
+from gate.percept.gate_detector import build_gate_backend, board_camera   # noqa: E402
+from gate.percept.gate_frontend import parse_kpt_mode          # noqa: E402
+from gate.percept.geometry import object_points, _iter_candidates, reproj_rms, gate_pose   # noqa: E402
+from gate.percept.kpt_memory import build_kpt_memory           # noqa: E402
 
 if any(a in ("-h", "--help") for a in sys.argv[1:]):
     print(__doc__.strip())
@@ -28,20 +31,17 @@ if any(a in ("-h", "--help") for a in sys.argv[1:]):
 try:
     DUR = float(sys.argv[1]) if len(sys.argv) > 1 else 20.0
 except ValueError:
-    print("参数不是秒数：%r\n用法：python3 tools/check/check_gate_pose.py [秒数]" % sys.argv[1])
+    print("参数不是秒数：%r\n用法：python3 tools/check/vision/check_gate_pose.py [秒数]" % sys.argv[1])
     sys.exit(2)
 cam = board_camera()
 obj3 = object_points()
 V = S.vision.gate
-# 兜底值 == 当前 cfg（别在这里改回历史字面量）
 conf_thr = float(S.get("vision.gate.keypoint.conf_thr", 0.8))
 pnp = V.get("pnp", {}) or {}
 reproj_thr = float(pnp.get("reproj_px", 20.0))
 zb = (float(pnp.get("z_min", 0.2)), float(pnp.get("z_max", 15.0)))
 
 # 诊断工具要**看见全部**角点：显式 vis_thr=0.0 绕开解码期硬门限（cfg 现为 0.5），
-# 否则"低于 0.5 的角点"根本不会出现在这张表里，就看不出"位姿为什么被拒"。
-# ⚠️ 后处理（去重/几何）仍按 cfg 生效 —— 这里打印的就是**任务会看到的那批实例**。
 backend = build_gate_backend(vis_thr=0.0)
 if backend is None:
     print("后端不可用")

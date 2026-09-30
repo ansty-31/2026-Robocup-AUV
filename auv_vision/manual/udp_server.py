@@ -1,33 +1,23 @@
 # -*- coding: utf-8 -*-
 """
 udp_server.py - RDK-side UDP remote-control bridge for keyboard testing.
-
-Run this script on the RDK. It receives PC keyboard commands over UDP and sends
 the existing 0xA5 11-byte RC-compatible frame to STM32 through uart.py.
-
 Packet format:
-    surge,sway,heave,yaw
-
+surge,sway,heave,yaw
 Each value is a float in [-1.0, 1.0].
-
 Examples:
-    1,0,0,0      forward
-    0,-1,0,0     sway left
-    0,0,1,0      heave up
-    0,0,0.0,0.6  yaw right
-    stop         neutral
-
+1,0,0,0      forward
+0,-1,0,0     sway left
+0,0,1,0      heave up
+0,0,0.0,0.6  yaw right
+stop         neutral
 Typical RDK command:
-    python3 udp_server.py
-
+python3 udp_server.py
 Dry run without STM32 serial hardware:
-    python3 udp_server.py --sim
-
+python3 udp_server.py --sim
 Telemetry (STM32 -> RDK): UartController 收 14B 遥测帧(0xAA55 + 深度/姿态 + 校验和，
-协议见 base/telemetry.py)，并按 cfg/comm.yaml → comm.depth_guard 做**限深保护**：
 深度 ≤ min_depth_m(默认 0.3m) 时禁止上浮——键盘按"上浮"也不会把机身顶出水面。
-遥测打印：[UART←] depth=...（节流 comm.debug.tel_log_ms）。
-"""
+遥测打印：[UART←] depth=...（节流 comm.debug.tel_log_ms）。"""
 import os as _os, sys as _sys
 if __package__ in (None, ""):        # 支持直接 python3 manual/xxx.py 运行
     _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
@@ -36,13 +26,11 @@ import argparse
 import socket
 import time
 
-import base.settings as S
-from base.uart import UartController
-
+import base.cfg.settings as S
+from base.hw.uart import UartController
 
 def clamp(value, lo=-1.0, hi=1.0):
     return max(lo, min(hi, float(value)))
-
 
 def parse_motion_packet(data):
     text = data.decode("utf-8", errors="ignore").strip().lower()
@@ -53,7 +41,6 @@ def parse_motion_packet(data):
     if len(parts) != 4:
         raise ValueError("expected: surge,sway,heave,yaw")
     return tuple(clamp(part) for part in parts)
-
 
 def apply_runtime_overrides(args):
     """Command-line overrides only affect this process; YAML files are untouched."""
@@ -70,7 +57,6 @@ def apply_runtime_overrides(args):
         S.comm.ramp.speed_per_s = float(args.ramp)
     if args.debug is not None:
         S.DEBUG = bool(args.debug)
-
 
 def main():
     parser = argparse.ArgumentParser(
@@ -140,7 +126,7 @@ def main():
             if now - last_rx > timeout_s:
                 target = (0.0, 0.0, 0.0, 0.0)
 
-            uart.send_dof(*target)     # 发帧时顺带收遥测/限深（base/uart.py:_drain_rx）
+            uart.send_dof(*target)     # 发帧时顺带收遥测/限深（base/hw/uart.py:_drain_rx）
             time.sleep(0.005)
     except KeyboardInterrupt:
         print("\n[UDP] keyboard interrupt")
@@ -152,7 +138,6 @@ def main():
             uart.close()
             sock.close()
             print("[UDP] stopped")
-
 
 if __name__ == "__main__":
     main()

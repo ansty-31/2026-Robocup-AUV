@@ -1,37 +1,31 @@
 # -*- coding: utf-8 -*-
-"""tools/check/auv_kpt_meter.py — 距离-响应阶梯实测表（只读相机 + 只跑推理；**不碰串口、不驱动船**）
-
+"""tools/check/vision/auv_kpt_meter.py — 距离-响应阶梯实测表（只读相机 + 只跑推理；**不碰串口、不驱动船**）
 用途：**换水 / 换光 / 换门之后的第一件事** —— 量出"这个权重在这种环境下、几米内还能出角点"，
-把"门不识别"分成"模型弱响应（能救）"与"完全没响应（要重训）"两种情况。
-
 用法（板端，**工程根下**，先确认没有别的 preview/main.py 占着相机）：
-    cd ~/Desktop/AUV_New && python3 tools/check/auv_kpt_meter.py 75      # 秒数，默认 75
-
 每 ~4.5s 打印一行：
-    t | 模型最高分（**门槛压到 0.01，故意暴露真实响应**） | 最高分那框的 4 角点置信度
-      | 画面里最大红色连通块（门框）面积占比与 bbox | >=0.5 角点数
-
-判据：要能解 PnP 需要 >=3 个角点 conf >= `vision.gate.keypoint.conf_thr`（**该阈值以 cfg 为准**）。
-⚠️ 这里把 `model.score_threshold` 压到 0.01 **只为暴露响应**，不代表能当阈值用；
-   改判据请用 `tools/check/check_kpt_decode.py`（它连原始 logit 一起报）。
-"""
+改判据请用 `tools/check/vision/check_kpt_decode.py`（它连原始 logit 一起报）。"""
+import os
 import sys
 import time
 
-sys.path.insert(0, ".")
+# 工程根 = 向上第一个含 `cfg/` 的目录（**别写死层级**：脚本搬过位置，写死会静默指错）
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+while _ROOT != os.path.dirname(_ROOT) and not os.path.isdir(os.path.join(_ROOT, "cfg")):
+    _ROOT = os.path.dirname(_ROOT)
+sys.path.insert(0, _ROOT)
 import numpy as np                                              # noqa: E402
 import cv2                                                      # noqa: E402
 
-import base.settings as S                                       # noqa: E402
+import base.cfg.settings as S                                       # noqa: E402
 
 S.vision.model.score_threshold = 0.01        # 暴露真实响应（见文件头注释）
-from base.camera import create_camera                           # noqa: E402
-from gate.gate_detector import build_gate_backend               # noqa: E402
+from base.hw.camera import create_camera                           # noqa: E402
+from gate.percept.gate_detector import build_gate_backend               # noqa: E402
 
 DUR = float(sys.argv[1]) if len(sys.argv) > 1 else 75.0
 b = build_gate_backend()
 if b is None:
-    print("✗ 门角点后端不可用（权重缺失/路径不对）→ 先跑 tools/check/check_paths.py")
+    print("✗ 门角点后端不可用（权重缺失/路径不对）→ 先跑 tools/check/pipeline/check_paths.py")
     raise SystemExit(3)
 cam = create_camera("front")
 lo1, hi1 = np.array([0, 90, 70]), np.array([12, 255, 255])

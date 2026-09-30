@@ -1,22 +1,17 @@
 # -*- coding: utf-8 -*-
 """preprocess.py — 目标识别前的图像预处理（推理链路）
-
-    D 域（默认，`vision.image.chain: D`）：
-        raw → 缩放到模型方形输入（默认 640x640）→ 画面补偿 enhance(WB→CLAHE→gamma)
-        → 640 上去畸变 remap（可选，需标定 yaml；与训练链路 prepare_frames.py 一致，
-         几何等价，见 calibration_maps_640）
-    A 域（`vision.image.chain: A`，原识别方案，配 AUV_4 权重）：
-        raw → 原始分辨率去畸变 remap@720p → 缩放 640 → 画面补偿（+ clahe_clip 0.5）
-    两序**几何等价**，差别是性能与训练分布；**链路必须与权重同域**，否则跨域掉点。
+D 域（默认，`vision.image.chain: D`）：
+raw → 缩放到模型方形输入（默认 640x640）→ 画面补偿 enhance(WB→CLAHE→gamma)
+→ 640 上去畸变 remap（可选，需标定 yaml；与训练链路 prepare_frames.py 一致，
+A 域（`vision.image.chain: A`，原识别方案，配 AUV_4 权重）：
+raw → 原始分辨率去畸变 remap@720p → 缩放 640 → 画面补偿（+ clahe_clip 0.5）
 （训练数据集制作在 PC 工程 RDKX5-YOLOv11n- 中完成，不在本工程范围）
-参数源：cfg/vision.yaml（image.* / camera.*_calibration / model.input_size）
-"""
+参数源：cfg/vision.yaml（image.* / camera.*_calibration / model.input_size）"""
 import os
 
 import numpy as np
 
-import base.settings as S
-
+import base.cfg.settings as S
 
 def _cv2():
     try:
@@ -25,7 +20,6 @@ def _cv2():
     except ImportError:
         raise RuntimeError("本链路需要 opencv：pip install opencv-python"
                            "（板端: sudo apt install python3-opencv）")
-
 
 # ---------------------------------------------------------------------------
 # 链路步骤（纯函数，与板端逐条一致）
@@ -46,22 +40,15 @@ def calibration_maps(path, width, height):
     return cv2.initUndistortRectifyMap(k, dist, None, new_k,
                                        (width, height), cv2.CV_16SC2)
 
-
 RAW_W, RAW_H = 1280, 720          # 标定 yaml 的原生分辨率（yaml 未写时的缺省）
-
 
 def calibration_maps_640(path, size=640):
     """640 域去畸变映射：dest(去畸变 size×size) ← src(畸变 size×size)
-
     与 PC 工程 `scripts/1_prepare/map_pose_dataset.py` 的「D 域」严格同式：
-
-        S = diag(size/RAW_W, size/RAW_H, 1)
-        nk720 = getOptimalNewCameraMatrix(K, dist, (RAW_W,RAW_H), 0, (RAW_W,RAW_H))
-        nk640 = S @ nk720 ;  K640 = S @ K
-        initUndistortRectifyMap(K640, dist, None, nk640, (size,size))
-
-    几何上与「先 remap@720p 再缩放」等价（因为 nk640 = S·nk720）。
-    """
+    S = diag(size/RAW_W, size/RAW_H, 1)
+    nk640 = S @ nk720 ;  K640 = S @ K
+    initUndistortRectifyMap(K640, dist, None, nk640, (size,size))
+    几何上与「先 remap@720p 再缩放」等价（因为 nk640 = S·nk720）。"""
     cv2 = _cv2()
     fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_READ)
     if not fs.isOpened():
@@ -78,10 +65,8 @@ def calibration_maps_640(path, size=640):
     return cv2.initUndistortRectifyMap(sc @ k, dist, None, sc @ nk720,
                                        (size, size), cv2.CV_16SC2)
 
-
 _CLAHE_CACHE = {}
 _GAMMA_CACHE = {}
-
 
 def _clahe(clip):
     c = _CLAHE_CACHE.get(clip)
@@ -89,7 +74,6 @@ def _clahe(clip):
         c = _cv2().createCLAHE(clipLimit=clip, tileGridSize=(8, 8))
         _CLAHE_CACHE[clip] = c
     return c
-
 
 def _gamma_lut(gamma):
     lut = _GAMMA_CACHE.get(gamma)
@@ -99,10 +83,8 @@ def _gamma_lut(gamma):
         _GAMMA_CACHE[gamma] = lut
     return lut
 
-
 _WB_CACHE = {}
 _FUSED_CACHE = {}
-
 
 def _wb_luts(gains):
     """白平衡的 256 项 LUT：与原 float 式 np.clip(v*g,0,255).astype(uint8) 逐像素等价"""
@@ -114,7 +96,6 @@ def _wb_luts(gains):
         _WB_CACHE[key] = luts
     return luts
 
-
 def _fused_luts(gains, gamma):
     """clip==0 时把 白平衡∘gamma 融合成每通道一张 LUT（省一次整幅 pass）"""
     key = (tuple(float(g) for g in gains), float(gamma))
@@ -125,14 +106,10 @@ def _fused_luts(gains, gamma):
         _FUSED_CACHE[key] = luts
     return luts
 
-
 def enhance(frame, gains, clip, gamma):
     """画面补偿：白平衡通道增益 → LAB-L CLAHE(clip>0 时) → gamma LUT。
-
-    白平衡由 float 乘/裁剪/回 uint8（640×640 上约 31 ms/帧）改为 256 项 LUT（约 12 ms）；clip==0 时再把 gamma
     融合进同一张 LUT，每通道只做一次 cv2.LUT。
-    CLAHE 对象与 gamma LUT 缓存复用（原先每帧 createCLAHE / 重建 LUT）。
-    """
+    CLAHE 对象与 gamma LUT 缓存复用（原先每帧 createCLAHE / 重建 LUT）。"""
     cv2 = _cv2()
     if clip <= 0:                      # 无 CLAHE：WB 与 gamma 融合，单次 LUT
         w = _fused_luts(gains, gamma)
@@ -147,7 +124,6 @@ def enhance(frame, gains, clip, gamma):
         l = _clahe(clip).apply(l)
         f = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
     return cv2.LUT(f, _gamma_lut(gamma))
-
 
 # ---------------------------------------------------------------------------
 # 统一入口
@@ -184,26 +160,14 @@ class ModelPreprocessor(object):
 
     def process(self, frame_bgr):
         """raw(BGR,任意尺寸) → [去畸变] → 缩放 → 画面补偿，顺序由 `chain` 决定。
-
         `vision.image.chain` 两个值就是"两套识别方案"，**必须与权重成对使用**：
-
         | chain | 链路 | 权重（门） | clahe_clip |
         |---|---|---|---|
-        | **D**（默认/新方案） | `resize(640) → enhance → remap@640` | 阶段一 `g240_i16` | 0 |
-        | **A**（原方案） | `remap@720p → resize(640) → enhance` | AUV_4 `d38b803e…` | 0.5 |
-
-        ⚠️ 跨域掉点：拿 A 域权重喂 D 域图（或反之）角点会飘 —— 代次与链路的配对见
-        `doc/记录/过门-状态机与参数.md` §9.5；板端两个仓库的分工见 `tools/README.md` §6。
-
-        D 域（`chain: D`）的理由：① remap@640 比 remap@720p 省约一半时间；
         ② enhance 本来就在 640 上做；③ 与训练链路一致
         （`RDKX5-YOLOv11n-/scripts/1_prepare/prepare_frames.py` 现在只产 D 域）。
-
         几何：A/D 两序**等价**（nk640 = S·nk720，见 `calibration_maps_640`），
-        差别只在性能与训练分布 ⇒ A 域不是"错的链路"，是**另一代权重的配套链路**。
         kpt 回缩放后都落在**去畸变 720p** 空间，相机模型一律 `rectified=True` 的 nk720，
-        **不要**改成 raw K/D。
-        """
+        **不要**改成 raw K/D。"""
         cv2 = _cv2()
         h, w = frame_bgr.shape[:2]
         f = frame_bgr

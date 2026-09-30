@@ -88,17 +88,17 @@ AUV_BOARD_DIR="$A_DIR" AUV_FORKS_FILE="$TOOLS_DIR/board_forks_Adomain.txt" AUV_P
   bash "$TOOLS_DIR/deploy_to_board.sh" --no-test 2>&1 | sed 's/^/        /'
 step "代码同步完成"
 
-# ---- 5) base/settings.py：板端 = 真发串口（SIM_MODE=False）----
+# ---- 5) base/cfg/settings.py：板端 = 真发串口（SIM_MODE=False）----
 cat > /tmp/Adomain_settings.py <<'PYEOF'
 import sys
-p = 'base/settings.py'
+p = 'base/cfg/settings.py'
 L = open(p, encoding='utf-8').read().split('\n')
 hits = [i for i, l in enumerate(L) if l.startswith('SIM_MODE = ')]
 if len(hits) != 1:
     print('  x SIM_MODE 锚点 %d 个 -> 中止' % len(hits)); sys.exit(2)
 i = hits[0]
 if 'sync_Adomain_repo.sh' in '\n'.join(L[i:i + 4]):
-    print('  = base/settings.py 已是 A 域状态（跳过）')
+    print('  = base/cfg/settings.py 已是 A 域状态（跳过）')
 else:
     block = [
         'SIM_MODE = False         # 无硬件调试：串口仅打印（板上置 False）',
@@ -111,7 +111,7 @@ else:
         j += 1
     L[i:j] = block
     open(p, 'w', encoding='utf-8').write('\n'.join(L))
-    print('  ok base/settings.py: SIM_MODE -> False')
+    print('  ok base/cfg/settings.py: SIM_MODE -> False')
 PYEOF
 base64 -w0 /tmp/Adomain_settings.py | timeout 120 "$STREAM" "cd '$A_DIR' && base64 -d | python3 -" 2>&1 \
   | grep -vE "Permanently added" | sed 's/^/        /'
@@ -123,7 +123,7 @@ rm -f /tmp/Adomain_settings.py
   echo "mkdir -p 'bak/Adomain_ref_$STAMP'"
   echo "[ -f models/gate_kpt_stage1_g240_i16_bayese_640x640_nv12.bin ] && { cp -p models/gate_kpt_stage1_g240_i16_bayese_640x640_nv12.bin 'bak/Adomain_ref_$STAMP/'; rm -f models/gate_kpt_stage1_g240_i16_bayese_640x640_nv12.bin; echo '  [removed] 阶段一权重（属 D 域，旧仓库不用）'; }"
   # 转向调用日志 `turn_log` 已从 common/ 挪到 base/（用户 2026-09-27 定）→ 旧位置删掉，先备份
-  echo "[ -f common/turn_log.py ] && { cp -p common/turn_log.py 'bak/Adomain_ref_$STAMP/turn_log.py.old'; rm -f common/turn_log.py; echo '  [moved] common/turn_log.py → base/turn_log.py（旧位置已删，备份在 bak/Adomain_ref_$STAMP/）'; }"
+  echo "[ -f common/turn_log.py ] && { cp -p common/turn_log.py 'bak/Adomain_ref_$STAMP/turn_log.py.old'; rm -f common/turn_log.py; echo '  [moved] common/turn_log.py → base/log/turn_log.py（旧位置已删，备份在 bak/Adomain_ref_$STAMP/）'; }"
   echo "find . -name __pycache__ -type d -not -path './bak/*' -prune -exec rm -rf {} + 2>/dev/null; echo CLEAN-OK"
 } > /tmp/Adomain_clean.sh
 timeout 120 "$STREAM" "bash -s" < /tmp/Adomain_clean.sh 2>/dev/null | grep -vE "^\s*$" | sed 's/^/        /'
@@ -134,22 +134,22 @@ timeout 60 "$STREAM" "cd '$A_DIR' && cat > '$REF_BOARD'" < "$LOCAL/$REF_REL" 2>/
 # ---- 6) 板端自检 ----
 {
   echo "cd '$A_DIR'"
-  echo "python3 -m py_compile main.py preview_detect.py base/settings.py common/preprocess.py common/cfgnode.py common/turn_deg.py gate/gate_decode.py gate/gate_postproc.py gate/gate_task.py gate/gate_detector.py gate/heading_align.py gate/kpt_memory.py gate/geometry.py && echo COMPILE-OK"
+  echo "python3 -m py_compile main.py preview_detect.py base/cfg/settings.py common/vision/preprocess.py common/cfg/cfgnode.py common/motion/turn_deg.py gate/percept/gate_decode.py gate/percept/gate_postproc.py gate/motion/gate_task.py gate/percept/gate_detector.py gate/motion/heading_align.py gate/percept/kpt_memory.py gate/percept/geometry.py && echo COMPILE-OK"
   echo "echo '--- (1) 域指纹 + (2) A 链序 vs 参考实现逐像素 + (3) AUV_4 角点分布 ---'"
-  echo "timeout 900 python3 tools/check/check_domain.py --equiv-ref '$REF_BOARD' --equiv-frames log/frames --limit 4 --frames log/frames --limit 4; echo DOMAIN-RC=\$?"
+  echo "timeout 900 python3 tools/check/pipeline/check_domain.py --equiv-ref '$REF_BOARD' --equiv-frames log/frames --limit 4 --frames log/frames --limit 4; echo DOMAIN-RC=\$?"
   echo "echo '--- (4) 过门下游与在用副本逐字节一致 ---'"
-  echo "for f in gate/gate_postproc.py gate/kpt_memory.py gate/geometry.py gate/gate_task.py gate/heading_align.py common/turn_deg.py common/cfgnode.py common/preprocess.py; do a=\$(md5sum \$f 2>/dev/null | cut -d' ' -f1); b=\$(md5sum '$NEW_DIR'/\$f 2>/dev/null | cut -d' ' -f1); if [ \"\$a\" = \"\$b\" ]; then echo \"  [same] \$f\"; else echo \"  [DIFF] \$f  A=\$a  new=\$b\"; fi; done"
+  echo "for f in gate/percept/gate_postproc.py gate/percept/kpt_memory.py gate/percept/geometry.py gate/motion/gate_task.py gate/motion/heading_align.py common/motion/turn_deg.py common/cfg/cfgnode.py common/vision/preprocess.py; do a=\$(md5sum \$f 2>/dev/null | cut -d' ' -f1); b=\$(md5sum '$NEW_DIR'/\$f 2>/dev/null | cut -d' ' -f1); if [ \"\$a\" = \"\$b\" ]; then echo \"  [same] \$f\"; else echo \"  [DIFF] \$f  A=\$a  new=\$b\"; fi; done"
   echo "echo '  —— 以下两个文件板端**就地改过**（接入域映射，属预期的不同）——'"
-  echo "for f in gate/gate_decode.py gate/gate_detector.py; do echo \"  [domain-map] \$f  \$(md5sum \$f | cut -c1-8)（在用副本 \$(md5sum '$NEW_DIR'/\$f | cut -c1-8)）\"; done"
+  echo "for f in gate/percept/gate_decode.py gate/percept/gate_detector.py; do echo \"  [domain-map] \$f  \$(md5sum \$f | cut -c1-8)（在用副本 \$(md5sum '$NEW_DIR'/\$f | cut -c1-8)）\"; done"
   echo "echo '--- (4b) 检测域→PnP域 几何映射核对（合成往返 + 位姿回收）---'"
   echo "timeout 900 python3 tools/check/check_domain_map.py --frames log/frames; echo DOMAINMAP-RC=\$?"
   echo "echo '--- (5) A 域口径的老参数 + 两个新功能的键 ---'"
   cat <<'PYEOF'
 python3 - <<'PY'
-import base.settings as S
+import base.cfg.settings as S
 want = [('vision.image.chain', 'A'), ('vision.image.clahe_clip', 0.5),
         ('vision.model.score_threshold', 0.5), ('vision.gate.det.conf', 0.5),
-        ('vision.gate.keypoint.conf_thr', 0.7), ('vision.gate.geometry.frame_w', 0.70),
+        ('vision.gate.keypoint.conf_thr', 0.7), ('vision.gate.percept.geometry.frame_w', 0.70),
         ('comm.gate.timeout_ms', 180000), ('comm.gate.align.confirm_frames', 4),
         ('comm.gate.align.px_x', 0.20), ('comm.gate.z.cross', 0.7),
         ('comm.gate.z.near_lost_m', 1.0), ('comm.gate.z.near_lost_ratio', 0.60),

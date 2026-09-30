@@ -10,16 +10,16 @@ import time
 import numpy as np
 import pytest
 
-import base.settings as S
-import base.telemetry as T
-from base import uart as U
-from base.camera import SimCamera, create_camera
+import base.cfg.settings as S
+import base.hw.telemetry as T
+from base.hw import uart as U
+from base.hw.camera import SimCamera, create_camera
 
 
 def test_settings_loads_real_yaml_values():
     """配置真的从 cfg/*.yaml 读进来了（抽查几个关键真实值），缺路径返回 None。"""
-    assert S.comm.gate.pass_target == 1
-    # ⚠️ 这几个是"板端现场值"（2026-09-18 用户定：以板端为准写回本地），会随现场调参变，
+    #   钉死具体数字就违背本用例自己的约定（改参数 = 每次都要改测试 = 假红）。
+    assert int(S.comm.gate.pass_target) >= 1
     #    所以这里只断言**类型与不变量**，不钉死数值（钉死 = 每次调参都要改测试 = 假红）。
     assert 0.0 < float(S.vision.gate.keypoint.conf_thr) <= 1.0
     assert isinstance(bool(S.vision.gate.kpt_mem.enable), bool)
@@ -29,7 +29,6 @@ def test_settings_loads_real_yaml_values():
             float(S.vision.gate.keypoint.conf_thr)
     assert S.vision.gate.pnp.z_max == 15.0
     assert S.comm.frame.header == 0xA5
-    # ⚠️ **限深下限是"现场定死"的唯一例外：0.55 不准改**（2026-09-18 用户定）。
     #    行为本身另有用例（test_depth_guard_blocks_surfacing_only，阈值从 cfg 读、相对判定），
     #    这一条专门钉**数值**：改了它必须有人来解释。
     assert float(S.comm.depth_guard.min_depth_m) == pytest.approx(0.55), \
@@ -386,7 +385,6 @@ def test_depth_guard_stale_action_block_up(monkeypatch):
 # ---------------------------------------------------------------- 硬停（安全）
 # 根因：_ramp_step 是**字节级平滑**，neutral() 的 force 只绕过心跳节流、不绕过 ramp；
 #       而下位机没有"无帧超时停车"（comm.yaml heartbeat 注释）→ 锁在最后一个非零字节上。
-#       （2026-09-18 用户水里实测到"船一直转"，证据见 doc/_注释历史_fragments/base_tests.md）
 class _CountWrite(object):
     def __init__(self, u):
         self.u = u
@@ -400,11 +398,7 @@ class _CountWrite(object):
 
 
 def test_stop_hard_ramps_axes_back_to_neutral():
-    """stop_hard() 必须把四个轴字节**真的**带回中位（不是发一帧就算）。
-
-    注意：ramp 是"字节/秒"，需要**真实时间**流逝（`step_max=speed×dt`），
-    所以这里必须 sleep —— 紧凑循环里 dt≈0，轴根本不会动。
-    """
+    """stop_hard() 必须把四个轴字节**真的**带回中位（不是发一帧就算）。"""
     u = U.UartController(sim=True)
     mid = S.comm.frame.axis_mid
     for _ in range(5):
@@ -482,11 +476,7 @@ class _FakeAxesUart(object):
 
 def test_axis_watchdog_trips_when_one_axis_is_held_same_direction():
     """★ **轴饱和看门狗**（用户 2026-09-27 定）：同一轴、同一方向连续发轴 ≥ max_same_dir_s
-    ⇒ 先硬停（estop）再强制退出（生产里是 `os._exit(9)`；用例注入 on_trip 记录，免得带走 pytest）。
-
-    为什么必须是独立线程：任务可能卡在某个循环里（现场"一开始进 turn 就卡住"），写在任务控制流
-    里的保护那时根本跑不到。
-    """
+    里的保护那时根本跑不到。"""
     u = _FakeAxesUart()
     trips = []
     w = U._AxisWatchdog(u, max_same_dir_s=0.15, min_off_b=13, poll_ms=20,
@@ -527,11 +517,7 @@ def test_axis_watchdog_ignores_reversals_deadzone_and_short_pulses():
 
 def test_axis_watchdog_only_watches_yaw():
     """★ **只盯 yaw**（用户 2026-09-27 明确："看门狗只管 yaw 轴的，剩下的不能管"）。
-
-    为什么：yaw 是闭环收敛量（正常转向越转误差越小，同向连续满舵 = 反馈卡住/在自转）；
-    而 surge/sway/heave **可以合法长同向**——冲刺几秒直行、扫视/横向对中持续平移、保深持续垂向。
-    拿它们当"卡死"判据会**误杀正常动作**（长直行被掐 = 直接失败）。
-    """
+    而 surge/sway/heave **可以合法长同向**——冲刺几秒直行、扫视/横向对中持续平移、保深持续垂向。"""
     u = _FakeAxesUart()
     trips = []
     w = U._AxisWatchdog(u, max_same_dir_s=0.15, min_off_b=13, poll_ms=20,
@@ -559,7 +545,6 @@ def test_axis_watchdog_only_watches_yaw():
 
 def test_axis_watchdog_axes_come_from_cfg():
     """盯哪些轴由 `comm.watchdog.axes` 决定（缺省只 yaw；乱写轴名忽略并告警）。"""
-    # 现场 cfg 必须写 axes: [yaw]；测试 cfg 覆盖（AUV_CFG_DIR）可能没这一段 ⇒ 只要求"有就必须是 yaw"，
     # 而**代码默认**永远只盯 yaw（这才是"配不上也不能变宽"的保证）。
     _cfg_axes = S.get("comm.watchdog.axes", None)
     assert _cfg_axes in (None, ["yaw"]), _cfg_axes

@@ -1,12 +1,7 @@
 # -*- coding: utf-8 -*-
 """tests/conftest.py — 公共装置：工程根入 sys.path + 无硬件 SIM 默认值。
-
-必须在任何测试模块 import base.settings **之前** 执行：
-  * AUV_SIM_MODE=1 → S.SIM_MODE=True（UartController 默认只打印，不发串口）
-  * AUV_STREAM=0   → SimCamera.read() 不新建 UDP 推流器（测试不碰网络）
-
-模块以顶层包互相引用（import base.settings as S），所以工程根必须在 sys.path 上。
-"""
+* AUV_SIM_MODE=1 → S.SIM_MODE=True（UartController 默认只打印，不发串口）
+* AUV_STREAM=0   → SimCamera.read() 不新建 UDP 推流器（测试不碰网络）"""
 import os
 import sys
 

@@ -11,10 +11,10 @@
 > `common/streak.py`、DOF ramp、`comm.handover` / `comm.back` / `STATE_BACK` 均**已确定不需要、
 > 已删除**，本文只描述当前实际存在的扁平 v1.2 方案。
 
-> **v1.2 变更**：新增「角点逐点融合滤波」层（§4.8，代码 `gate/kpt_memory.py`）——
+> **v1.2 变更**：新增「角点逐点融合滤波」层（§4.8，代码 `gate/percept/kpt_memory.py`）——
 > 识别不动，只在**每个特征点自身的数据**上做鲁棒自适应融合，抑制水面倒影引起的
 > 小漂移 / 短消失 / 偶发鬼点，避免状态机在 full↔p3p↔coarse 之间抖动、进而误触发
-> REACQUIRE 后退。专项说明见 **`doc/算法说明-gate-角点逐点融合滤波.md`**。
+> REACQUIRE 后退。专项说明见 **`doc/记录/算法说明-gate-角点逐点融合滤波.md`**。
 > 同时按已落地代码校订 §4.6 REACQUIRE 的限幅/闭环、§5.3 相位机与近距过门判据、§5.4 参数表。
 
 > 目标：把当前 gate 策略（"整门 bbox 面积估算距离 + bbox 框心对中 + 大框消失计数"）
@@ -57,7 +57,7 @@
 - **数据集与推理必须同域**：标注/训练帧必须经过与板上推理**同一条**链路——
   `undistort(remap) → enhance(WB→CLAHE→gamma) → 640 缩放`；该链路与 ball 共用、已对齐，gate 不新增；
   录帧后离线过同一链路存 PNG 再标注即可（keypoint 对域偏移比 bbox 更敏感，别跳步）；
-- 记录与预处理代码：`manual/recorder.py` / `common/preprocess.py` **均不改**（§7.1）。
+- 记录与预处理代码：`manual/recorder.py` / `common/vision/preprocess.py` **均不改**（§7.1）。
 
 ### 2.2 keypoint 标注（已定：标"外轮廓角"；允许只标可见角）
 - **角的物理定义（已定）**：标门框**外轮廓角点** = 两相邻管外沿交点处的像素（labeler 最一致、
@@ -137,7 +137,7 @@ def object_points(W_m, H_m, from_front=True):
 ```
 前视帧 ──(undistort+enhance)──► [gate keypoint 模型] ──► 门检测 + 4 角点(px + conf)
                                                                  │
-                       §4.8 角点逐点融合滤波 (gate/kpt_memory.py，**可选/默认开启**)
+                       §4.8 角点逐点融合滤波 (gate/percept/kpt_memory.py，**可选/默认开启**)
                        置信度加权 + 历史分布定半径 + α-β 平均 + 短消失回忆
                        输出: 融合后的 4 角点 + 连续置信度（接口不变）
                                                                  ▼
@@ -307,10 +307,10 @@ REACQUIRE(信息重取): 短时后退(surge<0, 限幅+限时)
 keypoint 前端的对应关系见 §4.6 降级表；随着前端（训练/推理）成熟，若发现"某模式长期用不到/某模式常触发"，
 只改 `keypoints_to_img_pts` 这一个 adapter 的判据，几何内核（§4.4/§4.5）与 GateTask 相位机不动。
 
-### 4.8 角点逐点融合滤波（v1.2 新增；代码 `gate/kpt_memory.py`；**可选功能，默认开启**）
+### 4.8 角点逐点融合滤波（v1.2 新增；代码 `gate/percept/kpt_memory.py`；**可选功能，默认开启**）
 
 > **开关与优先级**：`vision.gate.kpt_mem.enable`（当前 `cfg/vision.yaml` 中为 `true`，**默认开启** = 周一 09-14 原行为）→
-> 关闭时 `build_kpt_memory()` 返回 `None`，`gate/gate_task.py` 按**角点单帧直用**处理，
+> 关闭时 `build_kpt_memory()` 返回 `None`，`gate/motion/gate_task.py` 按**角点单帧直用**处理，
 > 行为与没集成这个功能时逐字节一致。优先级：环境变量 `AUV_GATE_KPT_MEM` > `enable` > 兜底 `false`；
 > `AUV_GATE_KPT_MEM=0 python3 main.py --task gate` 可临时关掉而不改配置，`=1` 强制打开。
 > `preview_detect.py --fuse` 用 `force=True` **强制**打开（忽略默认值/环境变量），便于 fused vs raw 对比。
@@ -352,17 +352,17 @@ keypoint 前端的对应关系见 §4.6 降级表；随着前端（训练/推理
 `vision.gate.kpt_mem.enable=false` 即回到原始行为（默认是 `true`，= 周一原行为）。
 **边界**：这是**逐点独立**的滤波（不联合 4 点、不是位姿滤波器）；不含 §4.6 的几何结构约束
 （宽高比/平行度等本次刻意不加，避免过严滤除）。专项说明见
-`doc/算法说明-gate-角点逐点融合滤波.md`。
+`doc/记录/算法说明-gate-角点逐点融合滤波.md`。
 
 ## 5. 代码框架整理
 
 ### 5.0 代码架构原则（ball / gate 完全解耦，公共只留"地基"）
 ```
 auv_vision/
-├── base/settings.py / base/camera.py / base/uart.py      # 公共地基（不掺任务逻辑）
-├── common/preprocess.py  # 图像链路（识别前处理）
-├── common/detector.py    # 后端注册表 + 通用件（NMS/坐标缩放/帧缓存）；不写任务分支
-├── common/PID.py         # PID 等任务公用小件
+├── base/cfg/settings.py / base/hw/camera.py / base/hw/uart.py      # 公共地基（不掺任务逻辑）
+├── common/vision/preprocess.py  # 图像链路（识别前处理）
+├── common/vision/detector.py    # 后端注册表 + 通用件（NMS/坐标缩放/帧缓存）；不写任务分支
+├── common/motion/PID.py         # PID 等任务公用小件
 ├── main.py            # 状态机装配：按 comm.tasks.enabled 注册 ball/gate 任务对象
 ├── task1_2/           # ball 专属：沿用现状，原则"gate 改动不碰 ball"
 │   ├── ball.py          # 任务一撞球 BallTask
@@ -396,7 +396,7 @@ model:
 ```
 - `DetectorHub._models: {task: 实例}`（注册表只负责"任务→后端"，无任务逻辑）；
   `_cache` 按 task 分开（同帧两模型各一次前向；任务顺序执行，同一时刻只有一个模型热）；
-- **keypoint 解码放 `gate/gate_decode.py`**（§5.0 结构）：X5 OE 的 pose 头输出张量与 reg/cls
+- **keypoint 解码放 `gate/percept/gate_decode.py`**（§5.0 结构）：X5 OE 的 pose 头输出张量与 reg/cls
   分裂头不同，新增 `decode_yolo11_kpt`：按检测框聚合 keypoint、缩放到全尺寸帧、附每点置信度；
   `ball` 路径不引用它，球侧零回归；模型导出前核对 kpt 张量坐标基准（相对输入/相对框/归一化方式），
   用 §6 合成测试反查；
@@ -416,9 +416,9 @@ ema_pose()                # 可选(平移 EMA + 四元数平均, Bumblebee pose_
 ```
 > 内核只吃 `(img2, obj3)` 点对 → 未来加特征匹配只需新增 adapter #2（§2.4）。
 
-### 5.3 gate/gate_task.py — GateTask（已落地：相位机 + 位姿闭环 + 缺角仲裁）
+### 5.3 gate/motion/gate_task.py — GateTask（已落地：相位机 + 位姿闭环 + 缺角仲裁）
 
-> **架构说明**：`gate/gate_task.py` 是**扁平 v1.2** 的**单一完整实现**（相位机 + 位姿闭环 +
+> **架构说明**：`gate/motion/gate_task.py` 是**扁平 v1.2** 的**单一完整实现**（相位机 + 位姿闭环 +
 > 缺角仲裁都在同一个文件里），`gate/` 下没有子包。
 
 ```
@@ -503,7 +503,7 @@ vision.gate:   geometry(§3)
                pnp{reproj_px, z_min, z_max, refine, max_z_jump_m}
 vision.model:  task_models(§5.1)   # gate 权重 + kpt_order
 ```
-> 详细含义/调参方向见 `doc/算法说明-gate-角点逐点融合滤波.md` 与 `cfg/*.yaml` 内注释。
+> 详细含义/调参方向见 `doc/记录/算法说明-gate-角点逐点融合滤波.md` 与 `cfg/*.yaml` 内注释。
 
 ## 6. 测试与验证（先无硬件闭环）
 
@@ -521,7 +521,7 @@ vision.model:  task_models(§5.1)   # gate 权重 + kpt_order
 
 ### 7.1 预处理：不改，沿用 ball 已对齐的同域链路
 - **结论**：本地训练与板上推理的预处理（去畸变 → 画面补偿 → 640 缩放）在 ball 阶段已协调好，
-  gate 沿用同一链路，**`common/preprocess.py` / `manual/recorder.py` 均不改**，也不新增数据集导出工具/函数；
+  gate 沿用同一链路，**`common/vision/preprocess.py` / `manual/recorder.py` 均不改**，也不新增数据集导出工具/函数；
 - 唯一要求：gate 标注帧取自**同一条链路的输出**（录帧后离线批处理一遍即可，纯跑批，无新代码）；
 - 工程习惯（可选非必需）：批处理时把白平衡/gamma/CLIP/标定版本写个小 json 记档，便于日后调参追溯；
 - 换 gate 权重时复测 §7.2 第 0 条（缩放策略拉伸 vs letterbox 一致——ball 已验证过，gate 复测一次）。
@@ -555,7 +555,7 @@ vision.model:  task_models(§5.1)   # gate 权重 + kpt_order
 ### v1.2 追加
 
 ✅ 已做：
-⑥ **角点逐点融合滤波**（§4.8 / `gate/kpt_memory.py`；**现为可选功能、默认开启**）落地并单测（用例在 `tests/`）：
+⑥ **角点逐点融合滤波**（§4.8 / `gate/percept/kpt_memory.py`；**现为可选功能、默认开启**）落地并单测（用例在 `tests/`）：
   抑制倒影引起的小漂移/短消失/偶发鬼点，mode 抖动与假 REACQUIRE 显著下降；
 ⑦ **REACQUIRE 限幅与闭环**（§4.6）：单次 `max_ms`、同段 `max_times`、退够即停 `stop_ratio`、
   失败后 HOLD `reset_after_ms`；后退速度 `surge.reacquire` 降为 0.25；

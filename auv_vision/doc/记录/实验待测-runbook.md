@@ -24,7 +24,7 @@
 > 现场现象会像"算法不灵"，其实是标尺错了。
 >
 > **产出**（三份，缺一不可）：
-> ① `log/pnp_<日期>/*.jsonl` 原始 dump；② `tools/analyze/pnp_calib.py` 生成的 `report.md` + `summary.csv`；
+> ① `log/pnp_<日期>/*.jsonl` 原始 dump；② `tools/analyze/calib/pnp_calib.py` 生成的 `report.md` + `summary.csv`；
 > ③ 本文 §6 的**记录表**（每档一行真值与环境备注）。
 >
 > **时间预算**：阶段 A（台架几何）≈ 60~90 min；阶段 B（水池）≈ 20 min。
@@ -55,7 +55,7 @@
 > ✅ **2026-09-22 晚：三个独立方法已把空气侧比例量到同一个数** ——
 > ① A1 门框反解 fx≈1102~1141；② **卷尺靶子（1.00 m 竖向跨度 @3 m = 379 px）+ A1 联立** → `fx_air=1111`；
 > ③ **±50 cm 横向档"刚好出画"**的边界要求 `fx ≳ 1095`；
-> ④ **卷尺刻度周期法**（`tools/analyze/tape_ticks.py`，1 cm 刻度 @1 m = 10.76 px，三张图离散 0.6%）⇒ `f = 1083 ± 7 px`。
+> ④ **卷尺刻度周期法**（`tools/analyze/calib/tape_ticks.py`，1 cm 刻度 @1 m = 10.76 px，三张图离散 0.6%）⇒ `f = 1083 ± 7 px`。
 > ⇒ **`fx_air ≈ 1080~1110 px`、`k_air ≈ 0.72`**，并且**`c ≈ 0`**（两个独立原理一致）。
 > 明细与不确定度见 §6 表 A0b、`ruler_calib.py`（`--gate`）与 `tape_ticks.py`。
 >
@@ -180,11 +180,11 @@ z_meas = fx_cfg · W_cfg / Δu        （PnP 用配置值反解）
 > ⇒ **不需要改 `frame_w/frame_h`**（除非卷尺量下来实际门**普遍**小于 0.77，那时才改并连带重算上表 4 个阈值）。
 >
 > **建议（不需要重新采集）**：卷尺量 **3~5 个实际要过的门**，记录**均值与离散**——这直接决定
-> 上面那条余量要留多少；`tools/analyze/pnp_calib.py` 反解出的 `W*` 可作为交叉核对，
+> 上面那条余量要留多少；`tools/analyze/calib/pnp_calib.py` 反解出的 `W*` 可作为交叉核对，
 > 但它会在 0.70~0.77 之间落一个"平均口径"，**不要**把它当成单个门的真值。
 这是本实验的**已知真值**，直接决定"预期 `a` 是多少"。
 **2026-09-22 已按它改过 cfg**（`cfg/vision.yaml`：`frame_w 0.70→0.77`、`frame_h 0.50→0.56`；
-`gate/geometry.py` 的 `GATE_FRAME_W/H` 与 `_D_GEOM` 同步改，`test_gate_defaults_match_cfg` 守着两处同值）。
+`gate/percept/geometry.py` 的 `GATE_FRAME_W/H` 与 `_D_GEOM` 同步改，`test_gate_defaults_match_cfg` 守着两处同值）。
 
 | 阶段 | `frame_w` | `frame_h` | 标尺比 `W_cfg/W_true` | 后果 |
 |---|---|---|---|---|
@@ -222,7 +222,7 @@ z_meas = fx_cfg · W_cfg / Δu        （PnP 用配置值反解）
 **用实测尺寸离线复核（不动 cfg）**——把 `--frame-w/--frame-h` 传进去即可：
 
 ```bash
-python3 tools/analyze/pnp_calib.py --frame-w 0.77 --frame-h 0.56 --report $D/report_077.md $D/A_pnp_z*.jsonl
+python3 tools/analyze/calib/pnp_calib.py --frame-w 0.77 --frame-h 0.56 --report $D/report_077.md $D/A_pnp_z*.jsonl
 ```
 
 **顺带一个好消息**：若 77×56 是外缘、管外径 5 cm，则开口 ≈ **0.67×0.46 m**，
@@ -235,7 +235,7 @@ python3 tools/analyze/pnp_calib.py --frame-w 0.77 --frame-h 0.56 --report $D/rep
 
 ### 1.2 相机域（必须同域，否则深度整体缩放错）
 
-检测角点所在域由 `vision.image.undistort` 决定，`gate/gate_detector.py::board_camera()` 跟着选：
+检测角点所在域由 `vision.image.undistort` 决定，`gate/percept/gate_detector.py::board_camera()` 跟着选：
 
 | `image.undistort` | PnP 用的内参 | 说明 |
 |---|---|---|
@@ -293,7 +293,7 @@ python3 tools/analyze/pnp_calib.py --frame-w 0.77 --frame-h 0.56 --report $D/rep
   （`preview_detect.py --gate-kpt` 看 `dxn≈0`），在地面沿四角画十字标记，之后所有平移都从它量。
 - `up_true`：门中心相对**光轴高度**的垂直距离（门中心更高 → `up+`）。**不要**用"离地高度"当 `up`。
 - `yaw_true`：船体相对"正对姿态"（门居中且左右边等长）的转角。台架用转台刻度；
-  水里用 `python3 common/turn_deg.py --deg 20 --dir left`（闭环走遥测 yaw），
+  水里用 `python3 common/motion/turn_deg.py --deg 20 --dir left`（闭环走遥测 yaw），
   **这次实验里它充当角度参考**；要更严格就用外部角度基准（地面线 + 激光笔）并在备注里写明用了哪种。
 
 **布置原则**：门固定不动（挂墙/挂架），**动船**（移船比移门容易且可复现）；
@@ -354,7 +354,7 @@ mkdir -p /tmp/pnp && tar xf /tmp/pnp.tgz -C /tmp/pnp
 | **C 离线** | 任意 | 用 A/B 产出的 dump | 选参扫描、p3p 对比、**回填与复核** | §4C |
 
 两个阶段的产出格式**完全一样**（都是 `preview_detect --dump` / `label_corners` 那种 JSONL），
-所以 `tools/analyze/pnp_calib.py` 对两边一视同仁：**只要文件名里带真值，就能一起算、分开算**。
+所以 `tools/analyze/calib/pnp_calib.py` 对两边一视同仁：**只要文件名里带真值，就能一起算、分开算**。
 
 ---
 
@@ -362,7 +362,7 @@ mkdir -p /tmp/pnp && tar xf /tmp/pnp.tgz -C /tmp/pnp
 
 ```bash
 cd ~/Desktop/AUV_New      # 你实际在用的工程目录（/home/sunrise/AUV 是旧副本，别混用）
-python3 tools/check/check_pipeline_identity.py                  # 训练/推理同域自证（不过就别往下做）
+python3 tools/check/pipeline/check_pipeline_identity.py                  # 训练/推理同域自证（不过就别往下做）
 python3 preview_detect.py --gate-kpt --duration 10              # 看权重/相机是否正常出框
 python3 -c "import base.settings as S; print(dict(S.vision.gate.geometry), dict(S.vision.gate.keypoint), dict(S.vision.gate.pnp))"
 ```
@@ -484,25 +484,25 @@ fx=782.5 时该角点在 1102 px，装得下；fx≈1110 时在 1285 px，**刚�
 2026-09-22 用户按"离墙 85 cm、画面宽度 120 cm"算出 fx≈**907**，与门框四档反推的 **1110** 差 22%
 —— 差值量级正是"距离口径"，所以**必须把口径偏置一起解出来**。
 
-> 📋 **现场照着做就够的那一页**：`doc/现场卡-靶子法.md`（摆位铁律 / 刻度窗口 / **档位组合的精度表** / 命令 / 当场判读）。
+> 📋 **现场照着做就够的那一页**：`doc/现场/现场卡-靶子法.md`（摆位铁律 / 刻度窗口 / **档位组合的精度表** / 命令 / 当场判读）。
 > 下面这一节是它的完整版与背景。
 
 **做法（约 15 min；一档一条命令，图存到 `ruler_*` 目录，别混进 `pnp_*`）**
 
 ```bash
 # ① 采图：三档各一条命令（相机/船在每个档位上摆好，别在采图期间改距离）
-python3 tools/analyze/label_corners.py --capture log/pnp_$(date +%m%d)/ruler_z150 --n 3   # === 1.50 m ===
-python3 tools/analyze/label_corners.py --capture log/pnp_$(date +%m%d)/ruler_z200 --n 3   # === 2.00 m ===
-python3 tools/analyze/label_corners.py --capture log/pnp_$(date +%m%d)/ruler_z300 --n 3   # === 3.00 m ===
+python3 tools/analyze/calib/label_corners.py --capture log/pnp_$(date +%m%d)/ruler_z150 --n 3   # === 1.50 m ===
+python3 tools/analyze/calib/label_corners.py --capture log/pnp_$(date +%m%d)/ruler_z200 --n 3   # === 2.00 m ===
+python3 tools/analyze/calib/label_corners.py --capture log/pnp_$(date +%m%d)/ruler_z300 --n 3   # === 3.00 m ===
 
 # ② 量刻度：点 3 个刻度（左/中/右，即 0 / 50 / 100 cm），一个 JSONL 收全部三档
 D=log/pnp_$(date +%m%d)
-python3 tools/analyze/label_corners.py --measure --images "$D/ruler_z150/*.jpg" --out $D/ruler.jsonl
-python3 tools/analyze/label_corners.py --measure --images "$D/ruler_z200/*.jpg" --out $D/ruler.jsonl
-python3 tools/analyze/label_corners.py --measure --images "$D/ruler_z300/*.jpg" --out $D/ruler.jsonl
+python3 tools/analyze/calib/label_corners.py --measure --images "$D/ruler_z150/*.jpg" --out $D/ruler.jsonl
+python3 tools/analyze/calib/label_corners.py --measure --images "$D/ruler_z200/*.jpg" --out $D/ruler.jsonl
+python3 tools/analyze/calib/label_corners.py --measure --images "$D/ruler_z300/*.jpg" --out $D/ruler.jsonl
 
 # ③ 解算 (fx, c) + 留一校验 + 与 cfg fx 的比例 k_med
-python3 tools/analyze/ruler_calib.py --report $D/ruler_air.md --title "空气侧靶子法" $D/ruler.jsonl
+python3 tools/analyze/calib/ruler_calib.py --report $D/ruler_air.md --title "空气侧靶子法" $D/ruler.jsonl
 ```
 
 1. 🔴 **卷尺要横着放**（2026-09-22 实测教训）。画面是 **1280×720** —— **宽度方向的余量是高度方向的 1.78 倍**。
@@ -538,10 +538,10 @@ python3 tools/analyze/ruler_calib.py --report $D/ruler_air.md --title "空气侧
 
 ```bash
 # ① 两档以上：直接解 (f, c)
-python3 tools/analyze/ruler_calib.py --report $D/ruler_air.md $D/ruler.jsonl
+python3 tools/analyze/calib/ruler_calib.py --report $D/ruler_air.md $D/ruler.jsonl
 
 # ② 只有一档（或想顺带把"模型眼里的门宽 W_eff"一起解出来）：与门框 dump 联立
-python3 tools/analyze/ruler_calib.py --gate "$D/A_pnp_z*.jsonl" \
+python3 tools/analyze/calib/ruler_calib.py --gate "$D/A_pnp_z*.jsonl" \
         --report $D/joint_air.md --title "空气侧 联立" $D/ruler.jsonl
 ```
 
@@ -646,32 +646,32 @@ python3 tools/analyze/ruler_calib.py --gate "$D/A_pnp_z*.jsonl" \
 D=log/pnp_$(date +%m%d)          # ← 一次性记住这个目录，后面每档都用它
 
 # === 1.00 m ===
-mkdir -p $D/A_z100 && python3 tools/analyze/label_corners.py --capture $D/A_z100 --n 5
+mkdir -p $D/A_z100 && python3 tools/analyze/calib/label_corners.py --capture $D/A_z100 --n 5
 ```
 ```bash
 # === 1.50 m ===
 D=log/pnp_$(date +%m%d)
-mkdir -p $D/A_z150 && python3 tools/analyze/label_corners.py --capture $D/A_z150 --n 5
+mkdir -p $D/A_z150 && python3 tools/analyze/calib/label_corners.py --capture $D/A_z150 --n 5
 ```
 ```bash
 # === 2.00 m ===
 D=log/pnp_$(date +%m%d)
-mkdir -p $D/A_z200 && python3 tools/analyze/label_corners.py --capture $D/A_z200 --n 5
+mkdir -p $D/A_z200 && python3 tools/analyze/calib/label_corners.py --capture $D/A_z200 --n 5
 ```
 ```bash
 # === 2.50 m ===
 D=log/pnp_$(date +%m%d)
-mkdir -p $D/A_z250 && python3 tools/analyze/label_corners.py --capture $D/A_z250 --n 5
+mkdir -p $D/A_z250 && python3 tools/analyze/calib/label_corners.py --capture $D/A_z250 --n 5
 ```
 ```bash
 # === 3.00 m ===
 D=log/pnp_$(date +%m%d)
-mkdir -p $D/A_z300 && python3 tools/analyze/label_corners.py --capture $D/A_z300 --n 5
+mkdir -p $D/A_z300 && python3 tools/analyze/calib/label_corners.py --capture $D/A_z300 --n 5
 ```
 ```bash
 # （可选）=== 0.80 m ===
 D=log/pnp_$(date +%m%d)
-mkdir -p $D/A_z080 && python3 tools/analyze/label_corners.py --capture $D/A_z080 --n 5
+mkdir -p $D/A_z080 && python3 tools/analyze/calib/label_corners.py --capture $D/A_z080 --n 5
 ```
 
 **标注**（想什么时候标就什么时候标；一档一条命令，输出文件名里的 `z100` 就是真值）：
@@ -679,19 +679,19 @@ mkdir -p $D/A_z080 && python3 tools/analyze/label_corners.py --capture $D/A_z080
 ```bash
 D=log/pnp_$(date +%m%d)
 
-python3 tools/analyze/label_corners.py --images "$D/A_z100/*.jpg" --out "$D/A_pnp_z100.jsonl"
+python3 tools/analyze/calib/label_corners.py --images "$D/A_z100/*.jpg" --out "$D/A_pnp_z100.jsonl"
 ```
 ```bash
-python3 tools/analyze/label_corners.py --images "$D/A_z150/*.jpg" --out "$D/A_pnp_z150.jsonl"
+python3 tools/analyze/calib/label_corners.py --images "$D/A_z150/*.jpg" --out "$D/A_pnp_z150.jsonl"
 ```
 ```bash
-python3 tools/analyze/label_corners.py --images "$D/A_z200/*.jpg" --out "$D/A_pnp_z200.jsonl"
+python3 tools/analyze/calib/label_corners.py --images "$D/A_z200/*.jpg" --out "$D/A_pnp_z200.jsonl"
 ```
 ```bash
-python3 tools/analyze/label_corners.py --images "$D/A_z250/*.jpg" --out "$D/A_pnp_z250.jsonl"
+python3 tools/analyze/calib/label_corners.py --images "$D/A_z250/*.jpg" --out "$D/A_pnp_z250.jsonl"
 ```
 ```bash
-python3 tools/analyze/label_corners.py --images "$D/A_z300/*.jpg" --out "$D/A_pnp_z300.jsonl"
+python3 tools/analyze/calib/label_corners.py --images "$D/A_z300/*.jpg" --out "$D/A_pnp_z300.jsonl"
 ```
 
 **按键（窗口要先用鼠标点一下聚焦，否则按键不生效 —— 这是"按了没反应"最常见的原因）**
@@ -720,26 +720,26 @@ python3 tools/analyze/label_corners.py --images "$D/A_z300/*.jpg" --out "$D/A_pn
 ```bash
 # === lat = +50 cm（门在画面右侧）===
 D=log/pnp_$(date +%m%d)
-mkdir -p $D/A_lat+50 && python3 tools/analyze/label_corners.py --capture $D/A_lat+50 --n 3
-python3 tools/analyze/label_corners.py --images "$D/A_lat+50/*.jpg" --out "$D/A_pnp_z150_lat+50.jsonl"
+mkdir -p $D/A_lat+50 && python3 tools/analyze/calib/label_corners.py --capture $D/A_lat+50 --n 3
+python3 tools/analyze/calib/label_corners.py --images "$D/A_lat+50/*.jpg" --out "$D/A_pnp_z150_lat+50.jsonl"
 ```
 ```bash
 # === lat = +25 cm ===
 D=log/pnp_$(date +%m%d)
-mkdir -p $D/A_lat+25 && python3 tools/analyze/label_corners.py --capture $D/A_lat+25 --n 3
-python3 tools/analyze/label_corners.py --images "$D/A_lat+25/*.jpg" --out "$D/A_pnp_z150_lat+25.jsonl"
+mkdir -p $D/A_lat+25 && python3 tools/analyze/calib/label_corners.py --capture $D/A_lat+25 --n 3
+python3 tools/analyze/calib/label_corners.py --images "$D/A_lat+25/*.jpg" --out "$D/A_pnp_z150_lat+25.jsonl"
 ```
 ```bash
 # === lat = −25 cm ===
 D=log/pnp_$(date +%m%d)
-mkdir -p $D/A_lat-25 && python3 tools/analyze/label_corners.py --capture $D/A_lat-25 --n 3
-python3 tools/analyze/label_corners.py --images "$D/A_lat-25/*.jpg" --out "$D/A_pnp_z150_lat-25.jsonl"
+mkdir -p $D/A_lat-25 && python3 tools/analyze/calib/label_corners.py --capture $D/A_lat-25 --n 3
+python3 tools/analyze/calib/label_corners.py --images "$D/A_lat-25/*.jpg" --out "$D/A_pnp_z150_lat-25.jsonl"
 ```
 ```bash
 # === lat = −50 cm ===
 D=log/pnp_$(date +%m%d)
-mkdir -p $D/A_lat-50 && python3 tools/analyze/label_corners.py --capture $D/A_lat-50 --n 3
-python3 tools/analyze/label_corners.py --images "$D/A_lat-50/*.jpg" --out "$D/A_pnp_z150_lat-50.jsonl"
+mkdir -p $D/A_lat-50 && python3 tools/analyze/calib/label_corners.py --capture $D/A_lat-50 --n 3
+python3 tools/analyze/calib/label_corners.py --images "$D/A_lat-50/*.jpg" --out "$D/A_pnp_z150_lat-50.jsonl"
 ```
 
 判据（2026-09-22 改，原判据 `|t_x − lat| ≤ 3 cm` **站不住**）：
@@ -762,20 +762,20 @@ z=1.50 m，门**原地**垫高/放低（每次都量一次"门中心高度 − �
 ```bash
 # === up = +20 cm（门中心在光轴上方）===
 D=log/pnp_$(date +%m%d)
-mkdir -p $D/A_up+20 && python3 tools/analyze/label_corners.py --capture $D/A_up+20 --n 3
-python3 tools/analyze/label_corners.py --images "$D/A_up+20/*.jpg" --out "$D/A_pnp_z150_up+20.jsonl"
+mkdir -p $D/A_up+20 && python3 tools/analyze/calib/label_corners.py --capture $D/A_up+20 --n 3
+python3 tools/analyze/calib/label_corners.py --images "$D/A_up+20/*.jpg" --out "$D/A_pnp_z150_up+20.jsonl"
 ```
 ```bash
 # === up = +10 cm ===
 D=log/pnp_$(date +%m%d)
-mkdir -p $D/A_up+10 && python3 tools/analyze/label_corners.py --capture $D/A_up+10 --n 3
-python3 tools/analyze/label_corners.py --images "$D/A_up+10/*.jpg" --out "$D/A_pnp_z150_up+10.jsonl"
+mkdir -p $D/A_up+10 && python3 tools/analyze/calib/label_corners.py --capture $D/A_up+10 --n 3
+python3 tools/analyze/calib/label_corners.py --images "$D/A_up+10/*.jpg" --out "$D/A_pnp_z150_up+10.jsonl"
 ```
 ```bash
 # === up = −10 cm（门中心在光轴下方）===
 D=log/pnp_$(date +%m%d)
-mkdir -p $D/A_up-10 && python3 tools/analyze/label_corners.py --capture $D/A_up-10 --n 3
-python3 tools/analyze/label_corners.py --images "$D/A_up-10/*.jpg" --out "$D/A_pnp_z150_up-10.jsonl"
+mkdir -p $D/A_up-10 && python3 tools/analyze/calib/label_corners.py --capture $D/A_up-10 --n 3
+python3 tools/analyze/calib/label_corners.py --images "$D/A_up-10/*.jpg" --out "$D/A_pnp_z150_up-10.jsonl"
 ```
 
 判据：门在光轴**上方**时 `t_y` 为**负**（`t_y ≈ −up`），偏差 ≤ 3 cm。
@@ -839,7 +839,7 @@ python3 tools/analyze/label_corners.py --images "$D/A_up-10/*.jpg" --out "$D/A_p
 ⇒ "psi 新鲜"真正等价于 **"当前这一帧是 full"**。而且 `_on_width` 的 ALIGN 分支**从不启动 HDG**。
 ⇒ **卡住正航向的不是 800 ms，而是"居中达标那一刻必须正好是 full 帧"**（远距/斜门只在部分帧出 4 角时就中招）。
 日志里新增字段 **`hdg_skip`** 记录原因（`mode=p3p(...)` / `off` / `done` / `no_psi` / `stale`），
-`tools/analyze/analyze_task_log.py` 的 ⑦b 段会把它汇总打印。
+`tools/analyze/log/analyze_task_log.py` 的 ⑦b 段会把它汇总打印。
 
 新增开关 **`comm.gate.hdg.wait_fresh_ms`（默认 0 = 旧行为）**：>0 时若那一刻不是 full，
 船**原地等**（动作 `wait_hdg`，不下发 surge）最多这么久，等到 full 就进正航向，超时才进 APPROACH。
@@ -853,7 +853,7 @@ HDG 期间 `sway/heave/surge` 全 0（只转，测量要求静止），转完回
 每门的内部流程：SETTLE(400ms) → MEASURE(攒 5 帧 full 取中位) → `|psi| ≤ tol_deg(8°)` 就锁定 DONE
 → 否则按**冻结的**目标角转（`max_iters=3`，超时 8s）→ 再测；迭代用完 GIVEUP（带残余航向继续走）。
 
-**转向的极性不是假设**：`TurnCore` 在首次转向时用 0.6s/0.3 舵量**探向**（`common/turn_deg.py:20`），
+**转向的极性不是假设**：`TurnCore` 在首次转向时用 0.6s/0.3 舵量**探向**（`common/motion/turn_deg.py:20`），
 用下位机回传的绝对航向闭环；**没有遥测就拒转**（等待 `wait_tel_ms=3000` 后放弃正航向）。
 所以"推进器极性"这一条已经被设计消掉了 —— 前提是**遥测 yaw 是通的**。
 
@@ -868,26 +868,26 @@ z=1.50 m、船不动，把**门**绕竖轴转（地面角度线；转完停稳 3
 ```bash
 # === yaw = +20°（门的右边缘向远离船的方向摆）===
 D=log/pnp_$(date +%m%d)
-mkdir -p $D/A_yaw+20 && python3 tools/analyze/label_corners.py --capture $D/A_yaw+20 --n 3
-python3 tools/analyze/label_corners.py --images "$D/A_yaw+20/*.jpg" --out "$D/A_pnp_z150_yaw+20.jsonl"
+mkdir -p $D/A_yaw+20 && python3 tools/analyze/calib/label_corners.py --capture $D/A_yaw+20 --n 3
+python3 tools/analyze/calib/label_corners.py --images "$D/A_yaw+20/*.jpg" --out "$D/A_pnp_z150_yaw+20.jsonl"
 ```
 ```bash
 # === yaw = +10° ===
 D=log/pnp_$(date +%m%d)
-mkdir -p $D/A_yaw+10 && python3 tools/analyze/label_corners.py --capture $D/A_yaw+10 --n 3
-python3 tools/analyze/label_corners.py --images "$D/A_yaw+10/*.jpg" --out "$D/A_pnp_z150_yaw+10.jsonl"
+mkdir -p $D/A_yaw+10 && python3 tools/analyze/calib/label_corners.py --capture $D/A_yaw+10 --n 3
+python3 tools/analyze/calib/label_corners.py --images "$D/A_yaw+10/*.jpg" --out "$D/A_pnp_z150_yaw+10.jsonl"
 ```
 ```bash
 # === yaw = −10° ===
 D=log/pnp_$(date +%m%d)
-mkdir -p $D/A_yaw-10 && python3 tools/analyze/label_corners.py --capture $D/A_yaw-10 --n 3
-python3 tools/analyze/label_corners.py --images "$D/A_yaw-10/*.jpg" --out "$D/A_pnp_z150_yaw-10.jsonl"
+mkdir -p $D/A_yaw-10 && python3 tools/analyze/calib/label_corners.py --capture $D/A_yaw-10 --n 3
+python3 tools/analyze/calib/label_corners.py --images "$D/A_yaw-10/*.jpg" --out "$D/A_pnp_z150_yaw-10.jsonl"
 ```
 ```bash
 # === yaw = −20° ===
 D=log/pnp_$(date +%m%d)
-mkdir -p $D/A_yaw-20 && python3 tools/analyze/label_corners.py --capture $D/A_yaw-20 --n 3
-python3 tools/analyze/label_corners.py --images "$D/A_yaw-20/*.jpg" --out "$D/A_pnp_z150_yaw-20.jsonl"
+mkdir -p $D/A_yaw-20 && python3 tools/analyze/calib/label_corners.py --capture $D/A_yaw-20 --n 3
+python3 tools/analyze/calib/label_corners.py --images "$D/A_yaw-20/*.jpg" --out "$D/A_pnp_z150_yaw-20.jsonl"
 ```
 
 判据：`psi ≈ +yaw`；**偏置** = 各档 `psi − yaw` 中位数（≤3°），**噪声** = 各档 `psi` 的 std（≤4°）。
@@ -897,7 +897,7 @@ python3 tools/analyze/label_corners.py --images "$D/A_yaw-20/*.jpg" --out "$D/A_
 ### A5 陆上先出一个小结（**先别改 cfg**）
 
 ```bash
-python3 tools/analyze/pnp_calib.py --no-invert $D/A_pnp_z*.jsonl | tail -12
+python3 tools/analyze/calib/pnp_calib.py --no-invert $D/A_pnp_z*.jsonl | tail -12
 ```
 把这两件事记进 §6 表 A2：① 正对档拟合的 `a0 / b0 / R²`；② 反演出的 `W_true / H_true`。
 **不要现在就回填 `cfg/vision.yaml`** —— 水下的 k 还没测，回填会拿空气标尺去跑船（见 §4B 开头）。
@@ -961,23 +961,23 @@ RMS p50 0.55~7.4 px）——**注意这是手标角点**：它验证的是"PnP �
 
 ```bash
 # === 1.00 m ===
-cd ~/Desktop/AUV_New && python3 tools/check/auv_kpt_meter.py 25
+cd ~/Desktop/AUV_New && python3 tools/check/vision/auv_kpt_meter.py 25
 ```
 ```bash
 # === 1.50 m ===
-cd ~/Desktop/AUV_New && python3 tools/check/auv_kpt_meter.py 25
+cd ~/Desktop/AUV_New && python3 tools/check/vision/auv_kpt_meter.py 25
 ```
 ```bash
 # === 2.00 m ===
-cd ~/Desktop/AUV_New && python3 tools/check/auv_kpt_meter.py 25
+cd ~/Desktop/AUV_New && python3 tools/check/vision/auv_kpt_meter.py 25
 ```
 ```bash
 # === 2.50 m ===
-cd ~/Desktop/AUV_New && python3 tools/check/auv_kpt_meter.py 25
+cd ~/Desktop/AUV_New && python3 tools/check/vision/auv_kpt_meter.py 25
 ```
 ```bash
 # === 3.00 m ===
-cd ~/Desktop/AUV_New && python3 tools/check/auv_kpt_meter.py 25
+cd ~/Desktop/AUV_New && python3 tools/check/vision/auv_kpt_meter.py 25
 ```
 
 每行输出是：`t | 最高分 | 4 个角点置信度 | 红块面积/bbox | ≥0.5 角点数`。
@@ -1022,8 +1022,8 @@ python3 preview_detect.py --gate-kpt --duration 20 --dump $D/B_pnp_z300.jsonl
 **对拍（强烈建议，只要 2~3 帧/档）**：在同一位置用干净帧手工标一次，用来**分解误差来源**：
 
 ```bash
-python3 tools/analyze/label_corners.py --capture $D/B_z150 --n 3
-python3 tools/analyze/label_corners.py --images "$D/B_z150/*.jpg" --out $D/B_manual_z150.jsonl
+python3 tools/analyze/calib/label_corners.py --capture $D/B_z150 --n 3
+python3 tools/analyze/calib/label_corners.py --images "$D/B_z150/*.jpg" --out $D/B_manual_z150.jsonl
 ```
 
 判读（§4C 的两个 dump 一起算）：
@@ -1076,13 +1076,13 @@ k = (水下 z_meas / z_true) / (空气侧 z_meas / z_true)
 
   ```bash
   D=log/pnp_$(date +%m%d)
-  python3 tools/analyze/label_corners.py --capture $D/wet_z100 --n 3     # === 1.00 m ===
-  python3 tools/analyze/label_corners.py --capture $D/wet_z150 --n 3     # === 1.50 m ===
-  python3 tools/analyze/label_corners.py --capture $D/wet_z200 --n 3     # === 2.00 m ===
-  python3 tools/analyze/label_corners.py --measure --images "$D/wet_z100/*.jpg" --out $D/ruler.jsonl
-  python3 tools/analyze/label_corners.py --measure --images "$D/wet_z150/*.jpg" --out $D/ruler.jsonl
-  python3 tools/analyze/label_corners.py --measure --images "$D/wet_z200/*.jpg" --out $D/ruler.jsonl
-  python3 tools/analyze/ruler_calib.py --report $D/ruler_wet.md --title "水下靶子法" $D/ruler.jsonl
+  python3 tools/analyze/calib/label_corners.py --capture $D/wet_z100 --n 3     # === 1.00 m ===
+  python3 tools/analyze/calib/label_corners.py --capture $D/wet_z150 --n 3     # === 1.50 m ===
+  python3 tools/analyze/calib/label_corners.py --capture $D/wet_z200 --n 3     # === 2.00 m ===
+  python3 tools/analyze/calib/label_corners.py --measure --images "$D/wet_z100/*.jpg" --out $D/ruler.jsonl
+  python3 tools/analyze/calib/label_corners.py --measure --images "$D/wet_z150/*.jpg" --out $D/ruler.jsonl
+  python3 tools/analyze/calib/label_corners.py --measure --images "$D/wet_z200/*.jpg" --out $D/ruler.jsonl
+  python3 tools/analyze/calib/ruler_calib.py --report $D/ruler_wet.md --title "水下靶子法" $D/ruler.jsonl
   ```
 
   ⚠️ **相机—靶距离必须在**水里**量**（标好刻度的长杆，别靠岸上刻的记忆）；
@@ -1110,7 +1110,7 @@ k = (水下 z_meas / z_true) / (空气侧 z_meas / z_true)
   C（fx=1207.6）解 PnP，比门距。
 - **结果**：门距 **1.12 m（A） vs 1.79 m（C），差 59%**；两套标定**各自内部自洽**
   （同一套的两种算法差 0.001~0.002 m）。
-- **交叉验证**：直接调用板端 `gate/geometry.py`（`CameraModel.from_yaml(rectified=True)`
+- **交叉验证**：直接调用板端 `gate/percept/geometry.py`（`CameraModel.from_yaml(rectified=True)`
   + `gate_pose`，IPPE + `solvePnPRefineLM`），与离线评估**逐帧 depth/rms 完全一致**
   ⇒ 不是评估器实现的差异。
 - **畸变形状质量**（与 fx 无关的一项）：
@@ -1205,7 +1205,7 @@ k = (水下 z_meas / z_true) / (空气侧 z_meas / z_true)
 
 **④b 新发现：C 的 rectified K ≠ raw K（A 恰好相等，别沿用旧假设）**
 
-用仓库自己的 `gate/geometry.py::CameraModel.from_yaml(rectified=True)` 实测：
+用仓库自己的 `gate/percept/geometry.py::CameraModel.from_yaml(rectified=True)` 实测：
 
 | 标定 | raw fx | rectified fx | rect/raw |
 |---|---|---|---|
@@ -1242,7 +1242,7 @@ k = (水下 z_meas / z_true) / (空气侧 z_meas / z_true)
 | # | 待办 | 判据 |
 |---|---|---|
 | 1 | 板端同步在用内参 C | 板端 `cfg/front_camera.yaml` md5 = `cb757ca6`；首字节 `%YAML:1.0`；板端 cv2（4.11）能 `CameraModel.from_yaml` 读入 |
-| 2 | 确认 `camera.front.calibration` 指向**在用副本**（不是 `/home/sunrise/AUV`） | `tools/check/check_paths.py` 通过 |
+| 2 | 确认 `camera.front.calibration` 指向**在用副本**（不是 `/home/sunrise/AUV`） | `tools/check/pipeline/check_paths.py` 通过 |
 | 3 | §B4 水下靶子法复核 | `fx_water = 1207.6 ± 5%`（原判据 782.5±5% 作废） |
 | 4 | 按新标尺重算米制阈值并小步验证 | 见 ③ 表；每改一项要能用同批数据证明误差变小（Q6） |
 | 5 | E2 域实验 → 重训（训练集**必须含清水帧**） | E1 结论 4：清水 ~159 px 是头号问题 |
@@ -1265,9 +1265,9 @@ k = (水下 z_meas / z_true) / (空气侧 z_meas / z_true)
 
 ```bash
 D=log/pnp_$(date +%m%d)
-python3 tools/analyze/pnp_calib.py --sweep --report $D/report.md --csv $D/summary.csv \
+python3 tools/analyze/calib/pnp_calib.py --sweep --report $D/report.md --csv $D/summary.csv \
         --frames-csv $D/frames.csv $D/*pnp_z*.jsonl
-python3 tools/analyze/pnp_calib.py --kpt-mem $D/B_pnp_z150*.jsonl        # 融合开/关
+python3 tools/analyze/calib/pnp_calib.py --kpt-mem $D/B_pnp_z150*.jsonl        # 融合开/关
 ```
 输出 `conf_thr × reproj_px` 的"可用率 vs 深度误差 p90"格点（报告 §4.1）。
 
@@ -1282,11 +1282,11 @@ python3 tools/analyze/pnp_calib.py --kpt-mem $D/B_pnp_z150*.jsonl        # 融�
    水下跑船用哪套要写清，见 §5.4 脚注）；
 2. **重跑同一批 dump**（不用再下水）确认误差下降：
    ```bash
-   python3 tools/analyze/pnp_calib.py --report $D/report_after.md --csv $D/summary_after.csv $D/*pnp_z*.jsonl
+   python3 tools/analyze/calib/pnp_calib.py --report $D/report_after.md --csv $D/summary_after.csv $D/*pnp_z*.jsonl
    ```
    判据（Q6）：逐档 `|相对误差| ≤ 5%`，`a` 落回 1.00 ± 0.02；
 3. 跑无硬件用例：`python3 -m pytest tests/ -q`（cfg 改动可能让"兜底默认值 == cfg"的不变量用例变红，
-   红了就同步 `gate/gate_task.py` 的 `_D_*` 表）；
+   红了就同步 `gate/motion/gate_task.py` 的 `_D_*` 表）；
 4. 板端对齐：`AUV_BOARD_DIR=/home/sunrise/Desktop/AUV_New bash tools/deploy/check_board_parity.sh --board`。
 
 ---
@@ -1296,7 +1296,7 @@ python3 tools/analyze/pnp_calib.py --kpt-mem $D/B_pnp_z150*.jsonl        # 融�
 ### 5.1 一键命令
 
 ```bash
-python3 tools/analyze/pnp_calib.py \
+python3 tools/analyze/calib/pnp_calib.py \
     --sweep --report log/pnp_report.md --csv log/pnp_summary.csv \
     --frames-csv log/pnp_frames.csv \
     log/pnp_0921/pnp_z*.jsonl
@@ -1330,7 +1330,7 @@ python3 tools/analyze/pnp_calib.py \
 
 > ⚠️ **回填前先看拟合的 `b`**：若 `b` 明显非 0，或各档相对误差**随距离单调变化**（不是纯比例），
 > 说明问题不只是尺寸标尺（还有畸变残差、角点系统性外扩/内缩、真值口径不一致），
-> 此时**不要**用单点比例去校正 —— 先把畸变与角点口径查清（S1 近距档 + `tools/analyze/analyze_kpt_dump.py`）。
+> 此时**不要**用单点比例去校正 —— 先把畸变与角点口径查清（S1 近距档 + `tools/analyze/log/analyze_kpt_dump.py`）。
 
 ### 5.3b 从 A1 的拟合里**免费**拿到距离口径偏置 `c`
 
@@ -1410,7 +1410,7 @@ c = −(截距) / (斜率)
 ⇒ **竖向是真正的瓶颈，而且"收紧 `px_y` 没用"**（它只挪进近起点；穿越瞬间的误差下限由死区决定）。
 三个真正有用的杠杆，按性价比：
 1. **给上浮侧也加死区补偿**（`comm.dof_comp` 现在只作用于 `heave<0`）→ 上浮侧地板 4.5 cm → 2.2 cm，
-   和右侧对称；属于**代码改动**（`base/uart.py` 的 dive_boost），要在 mock + 台架验过再上水；
+   和右侧对称；属于**代码改动**（`base/hw/uart.py` 的 dive_boost），要在 mock + 台架验过再上水；
 2. **抬 `comm.motion.pid_heave.kp`**（1.0 → 1.3~1.5）→ 纯配置，把"有推力的最小误差"按比例缩小
    （0.138/1.3 → 3.4 cm）；代价是竖直方向更容易过冲、抖动；
 3. **把相机与机身竖直中心的对齐偏置量出来**（`gate.geometry.body_center_offset`，现在**只读入、不参与运算**）：
@@ -1487,7 +1487,7 @@ c = −(截距) / (斜率)
 | ⇒ `frame_w/frame_h` | **不改（0.77/0.56）** | 上一条；早先"角点在管中线 0.72"是 `c` 简并的产物 |
 | `t_x` / `t_y` **符号** | ✓ 正确（`t_x` 与 `lat` 同号；`t_y` 与 `up` 反号，图像 y 向下） | §2；换空气内参后仍成立 |
 | `t_x` / `t_y` **尺度** | ⚠️ **未实测**（真值摆放不准，实测差分斜率 0.70 / −0.82~−1.00）。**理论值 0.97**（米制横向量对焦距误差免疫：`z` 与像素→米 的 `f` 同源抵消）⇒ 2026-09-22 决定**接受符号+理论值，不重测** | §A2 注释、§A6 |
-| `psi` 符号与量级 | **`psi ≈ −yaw`**（斜率 −0.96~−1.12）✓；与 `heading_align` 的约定自洽（psi>0 ⇒ 右转） | §3；`gate/geometry.py:316`、`gate/heading_align.py:272` |
+| `psi` 符号与量级 | **`psi ≈ −yaw`**（斜率 −0.96~−1.12）✓；与 `heading_align` 的约定自洽（psi>0 ⇒ 右转） | §3；`gate/percept/geometry.py:316`、`gate/motion/heading_align.py:272` |
 | `psi` 偏置 / 噪声 | 偏置 +1~+4°（与门面/船姿摆不正有关）；帧内 std 0.6~2.4° ✓（`hdg.tol_deg=8°` 留够余量） | §3 |
 | `psi` 在**斜门**下 | ✓ 合成扫描：0~70° 误差中位 ≤0.1°、帧间 std 随斜角**变小**（0.68°→0.14°）；角点 σ=5 px 时 5 帧中位数仍 ≤1.04° | §A3b |
 | `psi` 对**内参误差** | 内参错 30% ⇒ psi 误差 ≤3.5°（航向对焦距宽容；但 RMS 会涨到 5~14 px） | §A3b |
@@ -1501,7 +1501,7 @@ c = −(截距) / (斜率)
 |---|---|---|---|---|---|
 | | | | | | |
 
-### 表 B1 · 水下：响应阶梯（`tools/check/auv_kpt_meter.py` 读数）
+### 表 B1 · 水下：响应阶梯（`tools/check/vision/auv_kpt_meter.py` 读数）
 
 | 距离 (m) | 最高分 | ≥0.5 角点数 | 能否解 PnP（≥3 点 ≥conf_thr） | 备注 |
 |---|---|---|---|---|
@@ -1549,7 +1549,7 @@ c = −(截距) / (斜率)
 |---|---|---|
 | 全场 `可用率=0`、`mode=coarse` | 权重没跑起来 / 忘了 `--gate-kpt` | 先做 S0；看终端有没有 `det` |
 | 只有近距档 `可用率=0`、RMS 却很大 | **`frame_w/frame_h` 比例不对**（残差超 `reproj_px`） | 临时 `--reproj-px 40` 复算确认，再按 §5.3 反演 |
-| 各档误差**随距离单调漂** | 真值口径不一致 / 畸变残差 / 角点系统性外扩 | 统一零点；跑 `tools/analyze/analyze_kpt_dump.py` 看角点口径 |
+| 各档误差**随距离单调漂** | 真值口径不一致 / 畸变残差 / 角点系统性外扩 | 统一零点；跑 `tools/analyze/log/analyze_kpt_dump.py` 看角点口径 |
 | `z_meas` 比卷尺**小**（`a<1`） | `frame_w` 标小了 | 按 §5.4 乘 `1/a`（**不要**手写"补偿系数"） |
 | `t_x` 符号反 | 相机域/坐标约定搞错 | 查 `image.undistort` 与 `dof_map`，**不要在任务里加负号** |
 | `psi` 每档偏置都不一样 | 转台/地面角度线没校准 | 重做 S4；先确认"正对"姿态真的正对（`dxn≈0` 且左右边等长） |

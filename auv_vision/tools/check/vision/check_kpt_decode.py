@@ -1,21 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""tools/check/check_kpt_decode.py — 门 keypoint 解码约定自检（离线，单图，不动相机/船）
-
+"""tools/check/vision/check_kpt_decode.py — 门 keypoint 解码约定自检（离线，单图，不动相机/船）
 用途：把"角点乱飞"定性到底是 **模型** 还是 **解码约定**。
 同一张图跑一次模型，把同一个 cell 的原始 kpt 输出用几种候选公式解出来，
 画在同一张图上（不同颜色）并打印数值 —— 哪个公式把点钉在门框角上，就是对的。
-
-    # 板端（有权重 + hbm_runtime）
-    python3 tools/check/check_kpt_decode.py --image log/frames/pv_000040.jpg --out /tmp/decode_check.jpg
-
 候选公式（anchor = 选择到的网格 cell 下标；stride = input_w / g）：
-    V0 现在实现 : (raw)                    * stride
-    V1 ultralytics: (raw*2 + anchor - 0.5) * stride
-    V2 anchor   : (raw   + anchor)         * stride
-    V3 anchor-.5: (raw   + anchor - 0.5)   * stride
-    V4 已是像素 : (raw)                    * 1        （有些导出把解码烘进模型）
-"""
+V0 现在实现 : (raw)                    * stride
+V1 ultralytics: (raw*2 + anchor - 0.5) * stride
+V2 anchor   : (raw   + anchor)         * stride
+V3 anchor-.5: (raw   + anchor - 0.5)   * stride
+V4 已是像素 : (raw)                    * 1        （有些导出把解码烘进模型）"""
 from __future__ import annotations
 
 import argparse
@@ -25,14 +19,17 @@ import sys
 import numpy as np
 
 # 工程根 = tools/check/x.py 往上**三**级（分类重整后本脚本深了一层）
-_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 工程根 = 向上第一个含 `cfg/` 的目录（**别写死层级**：脚本搬过位置，写死会静默指错）
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+while _ROOT != os.path.dirname(_ROOT) and not os.path.isdir(os.path.join(_ROOT, "cfg")):
+    _ROOT = os.path.dirname(_ROOT)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-import base.settings as S                                       # noqa: E402
-from common.preprocess import ModelPreprocessor                 # noqa: E402
-from common.detector import bgr_to_packed_nv12_fast, bgr_to_packed_nv12  # noqa: E402
-from gate.gate_decode import find_model_input, _KPT_PER_PT  # noqa: E402
+import base.cfg.settings as S                                       # noqa: E402
+from common.vision.preprocess import ModelPreprocessor                 # noqa: E402
+from common.vision.detector import bgr_to_packed_nv12_fast, bgr_to_packed_nv12  # noqa: E402
+from gate.percept.gate_decode import find_model_input, _KPT_PER_PT  # noqa: E402
 
 VARIANTS = ("V0", "V1", "V2", "V3", "V4")
 COLORS = {"V0": (0, 0, 255), "V1": (0, 255, 0), "V2": (255, 0, 0),
@@ -126,7 +123,7 @@ def main():
     print("图片 %dx%d | 权重 %s" % (w, h, os.path.basename(str(gc.path))))
 
     import hbm_runtime
-    from gate.gate_decode import decode_yolo11_kpt
+    from gate.percept.gate_decode import decode_yolo11_kpt
     model = hbm_runtime.HB_HBMRuntime(str(gc.path))
     key = find_model_input(model)
     pre = ModelPreprocessor(calib_path=S.vision.camera.front.calibration)
@@ -141,7 +138,6 @@ def main():
 
     conf = a.conf if a.conf is not None else S.vision.model.score_threshold
     if a.per_cell:
-        # ⚠️ 别把 --conf 抬成 max(0.4, conf-0.1)：那会把"没有 cell ≥0.40"误读成"模型失效"；
         #    这里按传入值（默认 0.05）。
         pc = float(os.environ.get("AUV_KPT_PERCELL_CONF", "0.05")) \
             if a.conf is None else max(0.01, float(a.conf))
@@ -205,11 +201,7 @@ def main():
 # ------------------------------------------------------------------ 逐 cell 全局判定
 def raw_max_scores(outs):
     """每个输出张量的最大值（原始值 + sigmoid）。
-
-    **刻意不假设通道布局**（NHWC 与 CHW 两种导出都见过）：只取全局最大值，
-    并把 shape 打出来便于识别哪个分支是类别。类别分支输出是 **logit**：
-    `>0` ⇒ 有响应（sigmoid>0.5）；`<= -4` ⇒ 基本等于没响应。**两者修法完全不同。**
-    """
+    并把 shape 打出来便于识别哪个分支是类别。类别分支输出是 **logit**："""
     rows = []
     items = outs.items() if isinstance(outs, dict) else list(enumerate(outs))
     for name, arr in items:
@@ -224,11 +216,8 @@ def raw_max_scores(outs):
 
 def per_cell_report(outs, labels, pre_size, conf=0.4, limit=200):
     """对每个"有输出的 cell"比较：该 cell 解出的**框** vs 各候选公式解出的**四角包围盒**。
-
     YOLO-pose 的性质：目标的框 ≈ 其关键点的包围盒（门的框就是四角的外接框）。
-    所以**正确约定**应让 |bbox(kpts) - box| ≈ 几个 px；错的会差 ≈ stride 量级。
-    这个判据不依赖肉眼，也不依赖 NMS 选了哪个 cell。
-    """
+    这个判据不依赖肉眼，也不依赖 NMS 选了哪个 cell。"""
     nc = len(labels)
     kch = _KPT_PER_PT * 4
     grids = {}
@@ -261,7 +250,6 @@ def per_cell_report(outs, labels, pre_size, conf=0.4, limit=200):
                                pts[:, 0].max(), pts[:, 1].max()])
                 rows[t].append(float(np.mean(np.abs(qb - box))))
     print("=" * 70)
-    # ★ 先报"模型到底响不响应"（不假设布局：逐张量报最大值）
     rows_ = raw_max_scores(outs)
     print("模型响应自检（逐输出张量；类别分支的原始值是 logit）")
     print("  %-10s %-22s %12s %12s" % ("输出名", "shape", "原始最大值", "sigmoid"))

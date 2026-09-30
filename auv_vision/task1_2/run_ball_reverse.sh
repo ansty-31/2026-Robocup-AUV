@@ -3,7 +3,7 @@
 #
 # 撞球 → **直线倒车** REV_S 秒返回（简单、不依赖轨迹/视觉；不做记忆回放）
 #      → 前进 POST_FWD_S 秒（重新摆位）
-#      → 左转 TURN_DEG 度（**遥测闭环**，见 common/turn_deg.py）
+#      → 左转 TURN_DEG 度（**遥测闭环**，见 common/motion/turn_deg.py）
 #      → main.py --task gate（过门）
 #
 # 流程：待机 → (可选)下潜 → (可选)前进 → main.py --task ball → 直接倒车
@@ -19,7 +19,7 @@
 #         AUV_LOG_TAG(run)        日志文件名前缀（**用前缀区分轮次，别用 date**：板子时钟不准）
 #                                 → log/<tag>ball.jsonl / log/<tag>gate.jsonl / /tmp/<tag>path.csv
 #         AUV_BALL_LOG / AUV_GATE_LOG / AUV_DOF_LOG   单独覆盖这三个路径
-#                                 逐帧日志（过门那份）用 tools/analyze/analyze_task_log.py 判读
+#                                 逐帧日志（过门那份）用 tools/analyze/log/analyze_task_log.py 判读
 #         AUV_REV_ON_FAIL(0)    撞球任务非 0 退出时是否仍然倒车（1=倒）
 #         AUV_POST_FWD_S(2)       倒车后**前进秒数**（0=跳过）
 #         AUV_POST_FWD_SURGE(0.35) 该前进的速度
@@ -90,7 +90,7 @@ echo "=================================================================="
 # ---- 通用：定时发一组 DOF（结束时回中位；Ctrl-C 也会回中位）----------------
 timed_dof() {   # $1=秒 $2=surge $3=sway $4=heave $5=yaw $6=标签
   python3 - "$1" "$2" "$3" "$4" "$5" "$6" <<'PYEOF'
-from base.uart import UartController
+from base.hw.uart import UartController
 import sys, time
 dur, surge, sway, heave, yaw = (float(sys.argv[1]), float(sys.argv[2]),
                                float(sys.argv[3]), float(sys.argv[4]),
@@ -159,7 +159,7 @@ else
   [ -n "${TURN_KD}" ] && turn_args+=(--kd "${TURN_KD}")
   [ -n "${TURN_NORM}" ] && turn_args+=(--norm-deg "${TURN_NORM}")
   [ "${TURN_LEFT}" = "0" ] && turn_args+=(--dir right) || turn_args+=(--dir left)
-  python3 common/turn_deg.py "${turn_args[@]}"
+  python3 common/motion/turn_deg.py "${turn_args[@]}"
   trc=$?
   case "${trc}" in
     0) echo "-- 转向到达（退出码 0）--" ;;
@@ -178,7 +178,7 @@ if [ "${GATE_AFTER}" = "1" ]; then
   AUV_TASK_LOG="${GATE_LOG}" python3 main.py --task gate
   grc=$?
   echo "过门任务退出码 ${grc}（0=正常结束，3=后端不可用拒绝启动）"
-  echo "逐帧日志：${GATE_LOG}（拉回来用 python3 tools/analyze/analyze_task_log.py 判读）"
+  echo "逐帧日志：${GATE_LOG}（拉回来用 python3 tools/analyze/log/analyze_task_log.py 判读）"
 else
   echo "-- 已按 AUV_GATE_AFTER=0 跳过过门任务 --"
 fi

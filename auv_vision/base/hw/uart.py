@@ -2,7 +2,7 @@
 """uart.py — 串口 v2：11B 帧(0xA5+7轴+3键)；上层 DOF 目标→DOF_MAP 真值表→轴字节(速度平滑)，
 模拟遥控输出；心跳 ≥20Hz；急停=连发中性帧。帧语义见 README 与 docs/CUP_AUV。
 
-上行（下位机 → 上位机）：`base/telemetry.py` 的 14B 遥测帧（0xAA55 + 深度/姿态 + 校验和），
+上行（下位机 → 上位机）：`base/hw/telemetry.py` 的 14B 遥测帧（0xAA55 + 深度/姿态 + 校验和），
 每次发帧时顺带读空接收缓冲 → `self.telemetry.depth_m`；`comm.depth_guard` 据此**禁止上浮**
 （深度 ≤ min_depth_m 时把 heave 清零、heave 轴立刻回中），保证机身不冒出水面。
 """
@@ -12,8 +12,8 @@ import sys
 import threading
 import time
 
-import base.settings as S
-import base.telemetry as TEL
+import base.cfg.settings as S
+import base.hw.telemetry as TEL
 
 try:
     import serial
@@ -22,7 +22,6 @@ except ImportError:
     HAS_SERIAL = False
 
 # 限深保护的兜底阈值（m）：**必须与 cfg/comm.yaml 的 `depth_guard.min_depth_m` 同值**。
-#   只在"配置缺键"时才生效，但那个方向很危险：兜底值一旦偏小，限深就从现场设定值一路放宽到
 #   兜底值 —— **露出水面 = 本次比赛立即停止**。
 #   有不变量用例 `test_base.py::test_depth_guard_fallback_matches_cfg` 钉住两者相等。
 _D_MIN_DEPTH_M = 0.55
@@ -215,14 +214,9 @@ class UartController(object):
 
     def _ramp_step(self):
         """轴字节级平滑（模拟摇杆手感）：
-
         按 `ramp.speed_per_s`(字节/秒) 让输出连续逼近目标，避免速度直接激增；
         `<=0` 直通。
-
-        限深保护在平滑**之前**生效（`_apply_depth_guard`）：深度不足时上浮分量被清零，
-        且 heave 轴**当帧直接回中**（`depth_guard.snap`，不等 ramp）——否则平滑惯性还会
-        继续往上浮，等不到下一帧就已经冒出水面了。
-        """
+        继续往上浮，等不到下一帧就已经冒出水面了。"""
         now = _now_ms()
         dt = max(0.0, (now - self._last_update_ms) / 1000.0)
         self._last_update_ms = now
@@ -251,11 +245,7 @@ class UartController(object):
     # ---------------- 接收：下位机遥测（深度等） ----------------
     def _drain_rx(self):
         """读空串口接收缓冲 → 遥测解析（深度/姿态）。无串口、无数据 = 空操作。
-
-        发送路径每帧都调它（见 `_write`），所以遥测的实时性跟着心跳（≥20Hz）。
-
-        SIM + `AUV_SIM_TEL_JSONL`：不发串口，改为**回放一段录制的遥测**（离线复现闭环用）。
-        """
+        SIM + `AUV_SIM_TEL_JSONL`：不发串口，改为**回放一段录制的遥测**（离线复现闭环用）。"""
         if self._tel_playback is not None:
             return self._tel_playback.pump(self.telemetry)
         if self.sim or self._ser is None:
@@ -310,16 +300,10 @@ class UartController(object):
 
     def _apply_dive_boost(self, surge, sway, heave, yaw):
         """**下潜动力单独放大**（底层共用机制，撞球/过门都吃）。
-
         只处理 `heave < 0`（下潜）：乘上 `dive_scale` 后夹到 [-1, 0]；上浮/悬停/平移/转向
-        一律原样 —— 所以它是"单独调下潜这一路"的旋钮，不影响其它通道。
-
-        背景（为什么要单独放大）：DOF→字节→下位机 `RC_Matching*`（映射值 ≤35 直接返回 0）
         使实际推力远小于 DOF 数字；下潜偏弱时就把这一路放大，比在任务层加补偿/脉冲简单得多。
-
         注：很小的下潜指令（如 −0.05）即使放大也仍可能落在死区(<0.138)内 —— 要连很小的
-        指令也变成有效推力，`dive_scale` 得给足（≈3~4）。
-        """
+        指令也变成有效推力，`dive_scale` 得给足（≈3~4）。"""
         c = S.get("comm.dof_comp", None) or {}
         if not bool(c.get("enable", True)) or heave >= 0.0:
             return (surge, sway, heave, yaw)
@@ -465,20 +449,14 @@ class UartController(object):
     def stop_hard(self, dt=0.05, verify=True, settle_s=0.6, tol_deg=2.0,
                   max_extra=3, quiet=False):
         """**真正停住**：连发中性帧走完 ramp，再用遥测 yaw 验证它停下来了。
-
-        为什么不能只发一帧 `neutral()`：`_ramp_step` 对 yaw/surge/sway/heave 做字节级
         平滑，`force=True` 只绕过心跳节流、**不绕过 ramp** → 单帧发出时轴字节还在半路；
         而下位机**没有无帧超时停车**，随后的 `close()` 一关串口，船就锁在"最后一个还在转的
-        字节"上（现场踩到，见 doc/_注释历史_fragments/base_tests.md）。
-
         做法：① 连发中性帧，次数按 `ramp.speed_per_s` 与"最大偏离 127 字节"算够；
-              ② 静置 `settle_s` 期间继续发中性，同时用**遥测 yaw** 看有没有还在转；
-                 仍在转 → 再补 `max_extra` 轮（打印告警）。
-
+        ② 静置 `settle_s` 期间继续发中性，同时用**遥测 yaw** 看有没有还在转；
+        仍在转 → 再补 `max_extra` 轮（打印告警）。
         Returns:
-            True  = 已回到中位（遥测确认停了；**无遥测时返回 True 但会打印"未验证"**）
-            False = 遥测显示仍在转（推进器/水流顶着，或下位机没跟上）
-        """
+        True  = 已回到中位（遥测确认停了；**无遥测时返回 True 但会打印"未验证"**）
+        False = 遥测显示仍在转（推进器/水流顶着，或下位机没跟上）"""
         mid = int(S.comm.frame.axis_mid)
         spd = float(S.comm.ramp.speed_per_s or 0.0)
         # 最大偏离（±127 字节）走完需要多少帧，再留 2 帧余量
@@ -554,12 +532,7 @@ class UartController(object):
 
     # ---------------- 收尾 ----------------
     def close(self):
-        """关闭 DOF 轨迹日志与串口（可重复调用）。
-
-        ⚠️ 兜底：**关串口前如果轴不在中位，先 `stop_hard()`** —— 下位机没有"无帧超时停车"，
-        带着半路的 ramp 字节关串口 = 船一直转/一直倒车（现场踩过）。已在中位时一帧都不多发
-        （所以既有行为与用例不受影响）。
-        """
+        """关闭 DOF 轨迹日志与串口（可重复调用）。"""
         mid = int(S.comm.frame.axis_mid)
         if any(int(a) != mid for a in self._axes[:4]):
             try:
@@ -582,24 +555,14 @@ class UartController(object):
 
 class _AxisWatchdog(object):
     """**轴饱和看门狗**（用户 2026-09-27 定，阈值 5.0s）：**只看 yaw 轴** —— 同一方向**连续**发 yaw ≥
-    `max_same_dir_s`（**缺省 10.0s**，2026-09-28 定）⇒ **硬停 + 强制退出**。
-
-    ⚠️ **为什么只管 yaw（用户 2026-09-27 明确：剩下的不能管）**：
-      · yaw 是**闭环收敛量** —— 正常的转向应当越转误差越小，同一个方向连续满舵 5s 只可能是
-        "反馈卡住/舵效不对/在自转"，这才需要掐死；
-      · surge/sway/heave 是**可以合法长同向**的：冲刺(through)本来就是几秒直行、扫视/横向对中是
-        持续平移、保深是持续垂向 —— 拿它们当"卡死"判据会**误杀正常动作**（长直行被掐 = 直接失败）。
-      · 想看哪些轴由 `comm.watchdog.axes`（轴名列表，缺省 `[yaw]`）决定；判据本身通用。
-
-    为什么要独立线程、要放在 `base/uart.py`：
-      · 任务可能**卡在某个循环里**（现场"一开始进 turn 就卡住"）——写在任务控制流里的保护
-        那时根本跑不到；只有独立线程 + 串口这个唯一出口拦得住。
-      · 只看**实际下发的轴字节**（`uart._axes`，已过 ramp），不关心是谁发的（任务/手动/脚本）。
-      · 越界时**必须先硬停再退出**：下位机没有"无帧超时停车"，直接退出/关串口会把船锁在
-        最后那个非中位字节上（现场踩过）⇒ 先 `estop()`（连发原始中性帧，绕过 ramp），
-        再补一串中性帧，最后才强制退出。
-      · `on_trip` 可注入（用例换成记录器，避免 `os._exit` 把 pytest 带走）。
-    """
+    · yaw 是**闭环收敛量** —— 正常的转向应当越转误差越小，同一个方向连续满舵 5s 只可能是
+    "反馈卡住/舵效不对/在自转"，这才需要掐死；
+    · surge/sway/heave 是**可以合法长同向**的：冲刺(through)本来就是几秒直行、扫视/横向对中是
+    · 想看哪些轴由 `comm.watchdog.axes`（轴名列表，缺省 `[yaw]`）决定；判据本身通用。
+    那时根本跑不到；只有独立线程 + 串口这个唯一出口拦得住。
+    · 只看**实际下发的轴字节**（`uart._axes`，已过 ramp），不关心是谁发的（任务/手动/脚本）。
+    · 越界时**必须先硬停再退出**：下位机没有"无帧超时停车"，直接退出/关串口会把船锁在
+    再补一串中性帧，最后才强制退出。"""
 
     AXES = ("yaw", "surge", "heave", "sway")
 
@@ -670,8 +633,6 @@ class _AxisWatchdog(object):
                 ax = list(self.uart._axes)
             except Exception:
                 continue
-            # ★ 巡检体整体兜异常：任何意外都不许把线程弄死（线程静默退出 = 保护静默失效，
-            #   比没有看门狗更危险 —— 2026-09-27 用例就是靠这里抓出 KeyError 的）。
             try:
                 self._poll_once(ax, mid, now=time.monotonic(), dirs=dirs, t0=t0)
             except Exception as e:
@@ -725,8 +686,6 @@ class _AxisWatchdog(object):
             except Exception:
                 pass
             return
-        # ★ 退出前**必须 flush**：`os._exit()` 不走 stdio 清理 ⇒ 重定向/管道下这条最关键的日志
-        #   （以及 estop 的消息）会**整段丢掉**。板端实测踩到过：只看到 exit=9，看不到为什么。
         for _f in (sys.stdout, sys.stderr):
             try:
                 _f.flush()

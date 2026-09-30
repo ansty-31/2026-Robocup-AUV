@@ -1,28 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """turn_deg.py — 按给定角度原地转：**下位机遥测 yaw + PID 全闭环**（没有任何开环段）。
-
-闭环量 = 下位机回传的绝对航向 `yaw_deg`（`base/telemetry.py`）。我们不知道"多少秒 = 90°"
-（角速度随电量/水流/负载变），所以把"还剩多少度"喂给 PID —— PID 只负责**逐步收敛到目标角**。
-
-**极性（σ：`psi = σ × 遥测 yaw`）是定死的常量，不现场测**，和普通 yaw 环一样：
-    σ = 固件约定 × `comm.dof_map.yaw.sign` × `comm.telemetry.yaw_sign`
-固件约定 = **船右转时原始 yaw 减小**（一次实测确定，换固件/IMU 才要复核）。
-当前 cfg 两个旋钮都是 +1 ⇒ σ = -1。
-旧版靠"固定舵探向"定这个符号，已删除（开环探向本身会白转十几度，实测数字见 `doc/注释历史.md`）。
-
-    · **阻塞版** `turn(uart, deg, ...)` —— 给脚本用（自己 sleep 循环，跑完才返回）
-    · **逐帧版** `TurnCore`            —— 给主循环用（每帧 step() 一次，不阻塞相机/日志/fps）
-
+闭环量 = 下位机回传的绝对航向 `yaw_deg`（`base/hw/telemetry.py`）。我们不知道"多少秒 = 90°"
+σ = 固件约定 × `comm.dof_map.yaw.sign` × `comm.telemetry.yaw_sign`
+· **阻塞版** `turn(uart, deg, ...)` —— 给脚本用（自己 sleep 循环，跑完才返回）
+· **逐帧版** `TurnCore`            —— 给主循环用（每帧 step() 一次，不阻塞相机/日志/fps）
 参数唯一来源 `comm.motion.turn_pid`（缺键 → 代码兜底）：
-    kp 管"多早开始收力/收敛多紧"，out_max 管"最大转速"（想整体更慢就降它，别只降 kp；
-    ⚠️ 别降到 0.15 那一档：15% 推力恰卡在执行器死区 0.138 边上 ⇒ "还剩二十几度就没推力"）。
-    deadzone_deg 兼「到位判据」，norm_deg 是误差归一化分母（err_norm = 剩余角 / norm_deg）。
-
+deadzone_deg 兼「到位判据」，norm_deg 是误差归一化分母（err_norm = 剩余角 / norm_deg）。
 退出码（阻塞版 main）：0=到达 ｜ 3=超时未到达 ｜ 4=舵效不足（几乎没转）
-                      ｜ 5=**无遥测 → 拒转**（没有闭环量就一根舵都不发；**没有盲转备案**）
-                      ｜ 6=**方向自证失败**（命令朝一边、船朝另一边 ⇒ 停转，查极性/接线）
-"""
+｜ 5=**无遥测 → 拒转**（没有闭环量就一根舵都不发；**没有盲转备案**）"""
 from __future__ import annotations
 
 import argparse
@@ -31,18 +17,17 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 工程根 = common/<类>/x.py 往上三级（本文件在子目录里，可直接当脚本跑）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from common.PID import PID                                          # noqa: E402
-from common.cfgnode import nums                                     # noqa: E402
-from base.turn_log import turn_log                                  # noqa: E402 转弯调用日志
+from common.motion.PID import PID                                          # noqa: E402
+from common.cfg.cfgnode import nums                                     # noqa: E402
+from base.log.turn_log import turn_log                                  # noqa: E402 转弯调用日志
 
-# 固件约定：**船右转时原始 yaw 减小** ⇒ 该常量 = -1（一次实测确定，换固件/IMU 才要复核）。
 _FW_RIGHT_YAW_SIGN = -1.0
 
 # 代码内兜底（cfg 缺失时用；正常走 comm.motion.turn_pid）
 _D_TURN_PID = dict(
-    # ⚠️ kd 必须 0、deadzone_deg 必须 ≥ 执行器死区折算角（见 cfg/comm.yaml 的 turn_pid 注释）：
     #   内层 20Hz 下 kd=0.1 的 D 项就超过 out_max ⇒ 每帧出力正负反转、原地极限环。
     kp=0.2, ki=0.0, kd=0.0, out_max=0.30, deadzone_deg=6.0, norm_deg=15.0,
     # div_deg：**方向自证**（唯一一条兜底，非测量）：命令一直朝目标方向、误差却和初始同号
@@ -50,19 +35,11 @@ _D_TURN_PID = dict(
     div_deg=15.0,
     # 转向闭环推进周期(s)：脚本的 turn(period) 与 gate 转向内层循环共用同一节拍
     period=0.05,
-    # sat_max_s：**满舵保护**（用户 2026-09-27 定）——命令饱和到 ±out_max 连续多久 ⇒ **立刻停**。
-    #   为什么必须：舵效不对 / 遥测不动 / 被外力顶住时，闭环会一直满舵（现场"一开始就转个不停、
     #   超时保护也不起作用"）；保护不能只指望 turn 自己的超时（那个要求每帧都被 step 到）。
     #   **只满舵还不算**——必须同时"没进展"（这段时间误差改善 < `sat_progress_deg`）才停，
-    #   否则慢船的正常长饱和会被误杀（用例 test_motion 实测过）。
-    #   0 = 关掉这条保护。实测：健康转向的饱和段通常 < 0.5s。
     sat_max_s=2.0, sat_progress_deg=5.0,
-    # overshoot_tol_deg：**超转容差 = 10.0°**（用户 2026-09-28 定："逐步收敛，可以超转但超转不得超过 10 度"）
-    #   —— 判据的基准是**下发的 deg**，不是 ψ：实测**超转** `0 ≤ done_deg − deg ≤ 10°` 就算这一小步到位
     #   （未转够仍按 err 死区判），且在这窗里**不再触发满舵保护**（`sat`）；**超过 10° 不认**，
     #   由下一个新鲜 ψ 带回来（典型轨迹：目标 32° ⇒ 10→20→30→(超到)38→回到 32）。
-    #   为什么必须：满舵保护原来只看"|err| 有没有变小"，而**超转会让 |err| 变大** ⇒
-    #   一次正常的轻微超转会被误判成"没进展/转反了"而把转向掐死（用户："不应该这么被限死"）。
     #   0 = 关掉这条（只看残余误差 err，退回到"超一点也可能被掐"）。
     overshoot_tol_deg=10.0)
 
@@ -88,7 +65,7 @@ def yaw_sign():
     """
     sd, st = 1.0, 1.0
     try:
-        import base.settings as S
+        import base.cfg.settings as S
         ch = (S.comm.get("dof_map", None) or {}).get("yaw", None) or {}
         sd = float(ch.get("sign", 1.0) or 1.0)
         st = float(S.get("comm.telemetry.yaw_sign", 1.0) or 1.0)
@@ -103,7 +80,7 @@ def turn_cfg():
     out = dict(_D_TURN_PID)
     src = "代码内置"
     try:
-        import base.settings as S
+        import base.cfg.settings as S
         node = (S.comm.get("motion", None) or {}).get("turn_pid", None)
         if isinstance(node, dict):
             out.update(nums(node, _D_TURN_PID))
@@ -115,13 +92,10 @@ def turn_cfg():
 
 def stop_hard(uart, log=print, verify=True):
     """把船**真正**停住（不是发一帧 neutral 就完事）。
-
-    为什么必须（水里实测 + 代码核实）：`base/uart.py::_ramp_step` 对 yaw/surge/sway/heave 做
     **字节级平滑**，`neutral()` 的 `force=True` **只绕过心跳节流、不绕过 ramp** → 单帧 neutral
     发出时轴字节还在半路（yaw 84→128 只到 ~95 = 仍在转）；而**下位机没有无帧超时停车**，
     随后 `close()` 一关串口，船就锁在那个值上一直转。
-    优先用 `uart.stop_hard()`（连发中性帧走完 ramp + 遥测 yaw 验证）；没有该方法就自己连发。
-    """
+    优先用 `uart.stop_hard()`（连发中性帧走完 ramp + 遥测 yaw 验证）；没有该方法就自己连发。"""
     sh = getattr(uart, "stop_hard", None)
     try:
         if callable(sh):
@@ -225,10 +199,7 @@ class TurnCore(object):
 
     def remain_done(self):
         """**距"下发的 deg"还差多少度**（= 超转容差的基准，用户 2026-09-28 定）。
-
-        `done_deg` 是"朝目标方向实际转过的角度"（负 = 转反了）⇒ 未转够时为正、超转时为负；
-        这里取绝对值：越接近 0 = 越接近我们下发的那个角度（**允许超一点**）。
-        """
+        这里取绝对值：越接近 0 = 越接近我们下发的那个角度（**允许超一点**）。"""
         try:
             return abs(float(self.deg) - float(self.done_deg))
         except Exception:
@@ -298,15 +269,12 @@ class TurnCore(object):
         _over = float(self.done_deg) - float(self.deg)
         _in_win = (self.over_tol > 0.0 and 0.0 <= _over <= self.over_tol)
 
-        # ★ 满舵保护（用户 2026-09-27 定）：命令饱和到 ±out_max 持续 `sat_max_s` ⇒ **立刻停**。
-        #   加在"算完 out"之后、"到位/超时"判断之前 ⇒ 它比超时更早生效（现场要的就是这个）。
         if self.sat_max_s > 0.0 and abs(self.out) >= 0.9 * self.om:
             if self._sat_ms <= 0.0:
                 self._sat_err0 = abs(err)          # 进入饱和段：记起点误差
                 self._sat_remain0 = _remain         # 以及"距下发的 deg 还差多少"
             self._sat_ms += dt * 1000.0
             if self._sat_ms >= self.sat_max_s * 1000.0:
-                # 进展有两种口径，取更好的那个（用户 2026-09-28 定：基线是**下发的 deg**）：
                 #   ① 残余误差 |err| 变小；② 朝下发的 deg 推进（|deg − done_deg| 变小）。
                 #   轻微超转时 ① 会变差，但 ② 仍在推进（或已进容差窗）⇒ **不许掐**。
                 prog_err = (self._sat_err0 or abs(err)) - abs(err)
@@ -341,10 +309,8 @@ class TurnCore(object):
                         self.imag_sign, self.sigma_src))
             return self.state, 0.0
 
-        # ★ 到位判据有两条，满足任一 + 连续 3 帧：
         #   ① 残余误差 |err| ≤ deadzone_deg（原来的判据）；
         #   ② **转到下发的 deg 的容差窗内**：|done_deg − deg| ≤ overshoot_tol_deg
-        #      —— 用户 2026-09-28 定："超转容差的目标是下发的 deg 才行"。基准是**我们下发的角**，
         #      不是 ψ 的残差 ⇒ 轻微超转（done_deg 略大于 deg）也算到位，不会被满舵保护掐死。
         if abs(err) <= self.dz or _in_win:
             self.on_target += 1
@@ -437,7 +403,7 @@ def main():
                     help="只用来自检：强制 σ（默认不传 ⇒ 用定死的乘式）")
     args = ap.parse_args()
 
-    from base.uart import UartController
+    from base.hw.uart import UartController
     u = UartController()
     if u.sim:
         print("!! 串口处于 SIM（只打印）：[turn] 不会真正驱动电机")

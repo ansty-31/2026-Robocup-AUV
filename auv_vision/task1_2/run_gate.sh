@@ -39,7 +39,7 @@ fi
 GATE_BIN="$(python3 - <<'PYEOF'
 import sys
 sys.path.insert(0, ".")
-import base.settings as S
+import base.cfg.settings as S
 cfg = S.get("vision.model.task_models.gate", None) or {}
 print(cfg.get("path", "") or "")
 PYEOF
@@ -60,7 +60,7 @@ sleep "${WAIT_S}"
 if [ "${DESCEND_S}" != "0" ]; then
   echo "==== [3/5] 串口下潜 ${DESCEND_S} 秒 ===="
   python3 - "$DESCEND_S" <<'PYEOF'
-from base.uart import UartController
+from base.hw.uart import UartController
 import sys, time
 dur = float(sys.argv[1]) if len(sys.argv) > 1 else 3.0
 u = UartController()
@@ -83,7 +83,7 @@ fi
 if [ "${FWD_S}" != "0" ]; then
   echo "==== [4/5] 串口前进 ${FWD_S} 秒 (surge=${FWD_SURGE}) ===="
   python3 - "$FWD_S" "$FWD_SURGE" <<'PYEOF'
-from base.uart import UartController
+from base.hw.uart import UartController
 import sys, time
 dur = float(sys.argv[1]) if len(sys.argv) > 1 else 3.0
 surge = float(sys.argv[2]) if len(sys.argv) > 2 else 0.35

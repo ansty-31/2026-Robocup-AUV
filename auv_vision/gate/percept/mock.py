@@ -1,20 +1,16 @@
 # -*- coding: utf-8 -*-
-"""gate/mock.py — MockGateBackend：脚本化进近/穿门检测序列（SIM/测试）
+"""gate/percept/mock.py — MockGateBackend：脚本化进近/穿门检测序列（SIM/测试）
 
 按帧序号推进一段"进近门"虚拟轨迹（可用 pose_fn 注入自定义），输出带 4 角点的
-Det（角点缺失/整门消失可脚本化），供 GateTask 在无硬件下闭环验证逻辑。
 
 用法示例：
-    backend = MockGateBackend(camera=board_camera())
-    hub.register("gate", backend)
 """
 from __future__ import annotations
 
 import numpy as np
 
-from common.detector import Det
-from gate.geometry import object_points
-
+from common.vision.detector import Det
+from gate.percept.geometry import object_points
 
 class MockGateBackend(object):
     """每 detect() 前进一帧；pose_fn(f) -> (rvec, tvec) 或 None(=目标消失)。"""

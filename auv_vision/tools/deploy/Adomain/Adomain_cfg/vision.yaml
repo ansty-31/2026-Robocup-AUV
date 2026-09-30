@@ -29,9 +29,9 @@ camera:
     calibration: null
 
 stream:
-  # 前视画面推流（零转码 MJPEG；推流端 manual/stream.py + base/camera.py）。
+  # 前视画面推流（零转码 MJPEG；推流端 manual/stream.py + base/hw/camera.py）。
   # 语义：**谁打开相机谁顺带推流**（UVC 只允许单进程取流）→ 开录像/识别都能同时推、不争相机。
-  # 实测代价与方案见 doc/前视USB相机低延迟推流方案.md；临时开：AUV_STREAM=1（env 优先于本开关）。
+  # 实测代价与方案见 doc/记录/前视USB相机低延迟推流方案.md；临时开：AUV_STREAM=1（env 优先于本开关）。
   enable: false            # 默认关（调任务时一般在板端直接看画面）
   host: 192.168.137.2      # 水面 PC 的 IP（接收脚本/ffplay 跑在这台机器上）
   port: 5000               # UDP 端口（PC: ffplay -f mjpeg "udp://@:5000"）
@@ -83,7 +83,7 @@ model:
            kind: keypoint, labels: [gate],
            kpt_order: [TL, TR, BR, BL]}   # 门 keypoint 权重(4角点)
     # ★ 2026-09-26 换代：**阶段一 g240_i16 版**（md5 `ef52c18b…`，3,938,787 B）。
-    #   契约与后处理约束见 **`doc/gate_pose_decode_spec.md`**（输入 NV12/640/squish、输出
+    #   契约与后处理约束见 **`doc/设计/gate_pose_decode_spec.md`**（输入 NV12/640/squish、输出
     #   9 张量 float NHWC、kpt `x_px = x_cell × stride` 且 **v 要自己 sigmoid**）。
     #   上一代 `gate_kpt_bayese_640x640_nv12.bin` 已移入 `bak/bakup_auv5/`（回退改回这一行即可）。
 
@@ -117,12 +117,12 @@ gate:                         # 过门（§3 几何 / keypoint / PnP 参数）
              # body_center_offset：相机—机身安装偏置(m)，**只读入、不参与运算**（未标定）。
              # bar_width/sym_bars：未参与运算（keypoint 只标外轮廓四角，留作记录）。
   det: {conf: 0.5}   # ★A 域：老候选框阈值（= 老 model.score_threshold；D 域 0.6）
-      # ★ 2026-09-26（`doc/gate_pose_decode_spec.md` §6 `CONF`）：**候选框 score 阈值，只作用于 gate**。
+      # ★ 2026-09-26（`doc/设计/gate_pose_decode_spec.md` §6 `CONF`）：**候选框 score 阈值，只作用于 gate**。
       #   刻意**不复用** `model.score_threshold`（当前 0.6，是 ball/gate **共用**的；
       #   它被谁改过都别指望 gate 跟着变）——给 gate 调阈值不该顺手改掉撞球的行为。
       #   `preview_detect.py --conf` 会覆盖这里。
   postproc: {edge_tol: 0.10, min_edges: 2, geom_check: true}
-      # ★ 解码后处理（规范 §4；实现 `gate/gate_postproc.py`，调用点 `gate_decode.detect`）：
+      # ★ 解码后处理（规范 §4；实现 `gate/percept/gate_postproc.py`，调用点 `gate_decode.detect`）：
       #   edge_tol  = **重复框**判据里"边重合"的容忍 = 该比例 × 小框短边；
       #   min_edges = 至少几条边重合才算同一个门 → 丢**小框**（且要求小框 conf 更低）。
       #   ⚠️ 判据**不是包含关系**：远处第二个门可能落在近门框内，用包含会误删真门（规范实测误删 15 个）。
@@ -134,7 +134,7 @@ gate:                         # 过门（§3 几何 / keypoint / PnP 参数）
       #   corner = 2026-09-18 的旧行为（角点更全更可信优先，防水面倒影形成的"第二个门框"抢门）。
       #            要回退成旧行为：把这里改成 corner（一行，不动代码）。
   keypoint: {conf_thr: 0.7, vis_thr: 0.5}   # ★A 域：老工作点（D 域随阶段一权重改为 0.8/0.5）；与 comm 无对应项
-      # ★ 2026-09-26：随阶段一权重换代，按 `doc/gate_pose_decode_spec.md` §6 的工作点重设
+      # ★ 2026-09-26：随阶段一权重换代，按 `doc/设计/gate_pose_decode_spec.md` §6 的工作点重设
       #   （`V_MIN = 0.8`）——旧值 0.9/0.7 是给上一代权重现场试出来的，不是本模型的标定值。
       # conf_thr：**任务侧**可信下限（= 规范的 `V_MIN`）——判 mode / 选门 / 计数（gate_task）。
       #   4 个角点都 ≥ 它才算 `mode == full`；**psi 只吃 full 帧** ⇒ 直接决定正航向能不能启动。
@@ -144,7 +144,7 @@ gate:                         # 过门（§3 几何 / keypoint / PnP 参数）
       #   不许参与 PnP**，但"看不见它"就没法诊断门为什么不全 ⇒ 让它留在画面/日志里，
       #   由 conf_thr 这一层保证它进不了 mode/PnP。null = 沿用 conf_thr（历史行为）。
       # ⚠️ 代码兜底 `gate_task._D_KPT` 必须与 conf_thr 同值（有用例 test_gate_defaults_match_cfg 守）。
-      # 阈值实测依据见 gate/过门-状态机与参数.md §9.2；挑阈值用
+      # 阈值实测依据见 doc/记录/过门-状态机与参数.md §9.2；挑阈值用
       #   `preview_detect.py --gate-kpt`（它按 vis_thr=0.0 显示模型原始置信度，不受这里影响）。
   kpt_mem: {enable: false, alpha: 0.4, beta: 0.1, valid_ms: 800,
             k_sigma: 3.0, r_min_px: 10.0, r_max_px: 80.0,
@@ -158,10 +158,10 @@ gate:                         # 过门（§3 几何 / keypoint / PnP 参数）
             # ⚠️ recall_conf(0.45) **必须 < keypoint.conf_thr**，否则"回忆点"会被 mode 判成
             #    真实可见 → 拿外推点解 PnP 必失败。
             # 算法（置信度加权 / 历史分布定半径 / α-β 平均 / 短消失回忆 / 长丢失衰减）与
-            # 实测见 doc/算法说明-gate-角点逐点融合滤波.md；调参影响见 过门-状态机与参数.md §4.2。
+            # 实测见 doc/记录/算法说明-gate-角点逐点融合滤波.md；调参影响见 过门-状态机与参数.md §4.2。
   pnp: {reproj_px: 20.0, z_min: 0.2, z_max: 15.0, refine: true,
         max_z_jump_m: 0.8}       # 帧间 z 突变>该值视为错解弃帧(防满速冲门)
   # reproj_px：候选位姿重投影 RMS 上限(px)。**实测 8px 会拒掉约 88% 候选位姿**
   #   （模型四角固有残差 ≈10~18px），现场放宽到 20；candidate 可用率与选值理由见
-  #   gate/过门-状态机与参数.md §9.2。⚠️ 位姿被拒 → 强制退化 coarse → 居中收敛不了。
+  #   doc/记录/过门-状态机与参数.md §9.2。⚠️ 位姿被拒 → 强制退化 coarse → 居中收敛不了。
   #   安全网：pnp.max_z_jump_m 弃帧 + 上帧位姿消歧（放宽它不等于放任错解）。

@@ -1,20 +1,14 @@
 # -*- coding: utf-8 -*-
 """stream.py — 画面推流/接收库（统一入口：根目录 manual.sh（或 python3 -m manual.stream））
-
-板端发送（零转码）：相机输出 MJPEG，本模块把**原始 JPEG 字节**原样转发，不解码不重编码。
 PC 端接收：按 JPEG 边界跨 UDP 数据报重组，显示/录制/统计；或直接拉 HTTP MJPEG。
-
-给 `base/camera.py` 用的接口：
-    pusher = stream.MjpegPusher(host, port, pkt=8000, stream_fps=30)
-    pusher.offer(jpeg_bytes)        # 非阻塞，只保留最新帧
-
+给 `base/hw/camera.py` 用的接口：
+pusher = stream.MjpegPusher(host, port, pkt=8000, stream_fps=30)
+pusher.offer(jpeg_bytes)        # 非阻塞，只保留最新帧
 给 `manual.py` 用的接口：
-    open_raw_camera(...), CameraSource, SimSource,
-    MjpegPusher, MjpegHttpServer,          # 发送
-    UdpReceiver, HttpReceiver, Stats, Sink # 接收/显示/录制
-
-完整方案见 doc/前视USB相机低延迟推流方案.md。
-"""
+open_raw_camera(...), CameraSource, SimSource,
+MjpegPusher, MjpegHttpServer,          # 发送
+UdpReceiver, HttpReceiver, Stats, Sink # 接收/显示/录制
+完整方案见 doc/记录/前视USB相机低延迟推流方案.md。"""
 import os as _os, sys as _sys
 if __package__ in (None, ""):        # 支持直接 python3 manual/xxx.py 运行
     _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
@@ -52,14 +46,10 @@ def _as_bytes(buf):
 # ===========================================================================
 def open_raw_camera(dev=0, width=1280, height=720, fps=60):
     """以 MJPEG 打开 UVC 相机，尽量拿到**原始 JPEG**。
-
     返回 (cap, mode)：
-      mode == "raw" → read() 返回 (1,N) uint8 原始 JPEG（零解码，可直接转发）
-      mode == "bgr" → 相机不支持原始 JPEG 输出，read() 返回 BGR（推流需重编码）
-
-    注意：OpenCV 的 V4L2 后端默认协商 **YUYV**（本相机 720p YUYV 只有 9fps），
-    必须显式 FOURCC=MJPG + CONVERT_RGB=0 才能到 60fps 档。
-    """
+    mode == "raw" → read() 返回 (1,N) uint8 原始 JPEG（零解码，可直接转发）
+    mode == "bgr" → 相机不支持原始 JPEG 输出，read() 返回 BGR（推流需重编码）
+    必须显式 FOURCC=MJPG + CONVERT_RGB=0 才能到 60fps 档。"""
     if cv2 is None:
         raise RuntimeError("需要 opencv-python（cv2）")
     cap = cv2.VideoCapture(dev, getattr(cv2, "CAP_V4L2", 0))
@@ -393,10 +383,7 @@ class Stats(object):
 
 
 class Sink(object):
-    """显示/录制端：永远只用最新帧，来不及就丢。
-
-    save_fps=0 时按前若干帧实测帧率再建 writer（避免"30fps 写 25fps 流"造成的时长失真）。
-    """
+    """显示/录制端：永远只用最新帧，来不及就丢。"""
 
     def __init__(self, show=True, scale=1.0, save=None, save_fps=0.0, probe_frames=60,
                  save_raw=None):

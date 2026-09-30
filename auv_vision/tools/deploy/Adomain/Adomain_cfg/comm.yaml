@@ -7,7 +7,7 @@
 #   tasks·ball·gate                             任务装配与**各任务特有**的旋钮
 # 约定：**共用参数只写在 motion 里**，任务段不重复抄一份；任务段确实要单独一套时才写覆盖键
 #       （如 `gate.pid_sway`）。注释只写"是什么 + 当前值 + 单位/量纲 + 调它的后果"；
-#       实测记录 / 历史演进 / 推导与调参决策规则见 gate/过门-状态机与参数.md。
+#       实测记录 / 历史演进 / 推导与调参决策规则见 doc/记录/过门-状态机与参数.md。
 
 serial:
   device: /dev/ttyS1
@@ -38,10 +38,10 @@ ramp:
 telemetry:                 # 下位机上行姿态/深度的**符号归一**（2026-09-23）
   yaw_sign: 1.0            # 遥测 yaw × 它。默认 1.0 = 不改行为。
                            #   它就是"回传 yaw 的符号"这一个旋钮，转向环的极性 σ 直接由它算出
-                           #   （`common/turn_deg.py::yaw_sign()` = 固件常量 × `dof_map.yaw.sign` × 本键）：
+                           #   （`common/motion/turn_deg.py::yaw_sign()` = 固件常量 × `dof_map.yaw.sign` × 本键）：
                            #   改这里，转向的闭环极性自动跟着改，不会出现"配置与代码各记一套符号"。
                            #   ⚠️ 别为了"让船转对方向"去翻它 —— 方向不对先查 `dof_map.yaw.sign` 与接线。
-depth_guard:               # 限深保护：只压上浮，不动前进/转向（base/uart.py::_apply_depth_guard）
+depth_guard:               # 限深保护：只压上浮，不动前进/转向（base/hw/uart.py::_apply_depth_guard）
   enable: true             #   当前深度 ≤ min_depth_m → 本帧 heave 清零并当帧回中，机身顶不出水面
   min_depth_m: 0.55        # ⚠️ **现场定死 = 0.55，不准改**（有不变量用例守着）；**别再整份覆盖板端 cfg**
                            #    （本地写 0.3 曾把板端的 0.55 冲掉过两次，本文件已与板端对齐）
@@ -51,7 +51,7 @@ depth_guard:               # 限深保护：只压上浮，不动前进/转向�
   snap: true               # 触发时 heave 轴当帧直接回中（不走 ramp），防惯性继续上浮
   log_ms: 1000             # 触发告警打印节流(ms；0=每帧都打)
 
-dof_comp:                  # **底层共用**：单独调"下潜"这一路动力（base/uart.py::_apply_dive_boost）
+dof_comp:                  # **底层共用**：单独调"下潜"这一路动力（base/hw/uart.py::_apply_dive_boost）
   enable: true             #   只对 heave<0（下潜）生效；上浮/悬停/平移/转向一律原样
   dive_scale: 2.0          # 下潜指令 × 它再夹到 [-1,0]；1.0=不放大。调法：弱→3.0/4.0，过头→1.5
                            #   下位机对映射值 ≤35 直接返回 0 ⇒ 实际推力远小于 DOF 数字（换算见 md §1.1）；
@@ -70,7 +70,7 @@ motion:                    # **ball / gate 共用的底层运动参数**（同�
              #   同一套增益下 进带6度到连续3帧收舵 从 0.15s 拖成 0.38s 以致过冲。
              #   现在转向期间由 gate_task._turn_inner_loop 按这个周期阻塞推进。
              period: 0.05}
-       # 「额定转角」PID（`common/turn_deg.py`）：gate 的正航向与转向脚本**共用同一套用法** ——
+       # 「额定转角」PID（`common/motion/turn_deg.py`）：gate 的正航向与转向脚本**共用同一套用法** ——
        #   调用形态就是 `turn_deg.py --deg N --dir left|right`（gate 里就是 `TurnCore(deg, left)`）。
        #   闭环量 = 下位机回传的 yaw；极性 σ 由代码算出（`yaw_sign()` = 固件常量 × `dof_map.yaw.sign`
        #   × `telemetry.yaw_sign`，当前 = -1）：**不需要配置、不探向、不现场测**。
@@ -140,7 +140,7 @@ ball:                      # 任务一 撞球：运动链 SEARCH→CENTER→APPR
   stop_hold_s: 1.0
   engage_hold_s: 0.8
 
-gate:                      # 过门（相位机 SEARCH→ALIGN→APPROACH→THROUGH；逐状态导读见 gate/过门-状态机与参数.md）
+gate:                      # 过门（相位机 SEARCH→ALIGN→APPROACH→THROUGH；逐状态导读见 doc/记录/过门-状态机与参数.md）
   timeout_ms: 180000       # ★A 域：老值（D 域 2026-09-18 提到 300000，说"正航向慢但稳"）
   pass_target: 1            # 完成计数目标：单门 1；高低两门可设 2
   # ---- 修正 PID：**默认共用 motion.pid_sway / motion.pid_heave** ----
@@ -170,9 +170,9 @@ gate:                      # 过门（相位机 SEARCH→ALIGN→APPROACH→THRO
   # 居中**只有 sway 平移、没有 yaw**（2026-09-20 用户定）：姿态修正由下面的 hdg.* 负责，那是 gate 唯一的 yaw 通道。
   hdg: {enable: true, tol_deg: 8.0, max_step_deg: 0.0, timeout_ms: 30000,
         turn_timeout_s: 8.0, entry_psi_first: false, psi_first_z_max: 2.5, psi_first_ratio: 0.30}
-       # 「正航向」（ALIGN 的子状态 HDG；实现 `gate/heading_align.py`）：让机身与门法向平行。
+       # 「正航向」（ALIGN 的子状态 HDG；实现 `gate/motion/heading_align.py`）：让机身与门法向平行。
        # ★ 2026-09-27 改成**一次到位**（用户定）：PnP 测到的 full 帧 psi（`_hdg_deg`，EMA）在起转
-       #   那一刻**冻结**成目标角 → `common/turn_deg.py` 按遥测 yaw 闭环转**一次** → 结束。
+       #   那一刻**冻结**成目标角 → `common/motion/turn_deg.py` 按遥测 yaw 闭环转**一次** → 结束。
        #   旧的「测→转→停稳→再测→迭代」以及**开环盲转**（blind_enable/blind_rate_dps）、
        #   **开环探向**（probe_*）全部删除：转向只允许闭环；只有 full 帧的 psi 可用（p3p 欠定）。
        # tol_deg：|psi| ≤ 它 ⇒ 不转（已经够正）。用户定 8~10（psi 帧内噪声本身 3~5°）。
@@ -197,7 +197,7 @@ gate:                      # 过门（相位机 SEARCH→ALIGN→APPROACH→THRO
       #     而 z 读数当时是 5.295 的垃圾值（width 档残留），说明"米制阈值在近距不可用"时兜底才是主力。
       #   回退：改回 0.77（一行）；要进一步缩短冲刺距离就往 0.6 走，但**别低于门框半高 0.28 m + 机身半长**。
       #   ⚠️ 历史遗留：陆上验证时读数 = 0.70×真距，若哪天决定整组 ×1.43 回填（cross 1.10 等），
-      #     那时这个 0.65 要跟着重算 —— 见 doc/实验待测-runbook.md §B4c。
+      #     那时这个 0.65 要跟着重算 —— 见 doc/记录/实验待测-runbook.md §B4c。
       cross_confirm_frames: 2,   # 连续 z≤cross 帧数才判过门(防单帧 PnP 错解冲出去)。**别降到 1**
       near_lost_m: 1.0,          # ★A 域：老值（D 域 2026-09-26 收紧为 0.6）
                                  #   那趟就是它在 z=0.868 m 判「已过门」直接满速冲的（psi=30.6°、dy=0.42）

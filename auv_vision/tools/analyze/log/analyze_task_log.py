@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-"""tools/analyze/analyze_task_log.py — 分析 main.py 的逐帧任务日志（AUV_TASK_LOG 产出的 JSONL）
+"""tools/analyze/log/analyze_task_log.py — 分析 main.py 的逐帧任务日志（AUV_TASK_LOG 产出的 JSONL）
 
 用途：下水/台架跑完后，判断"到底是识别、位姿、还是决策在卡"。
-不依赖硬件，纯离线：读 JSONL + 用 cfg 里的当前阈值反推判据。
 
 用法：
-    python3 tools/analyze/analyze_task_log.py <log.jsonl> [--task gate]
+    python3 tools/analyze/log/analyze_task_log.py <log.jsonl> [--task gate]
 """
 
 from __future__ import annotations
@@ -17,16 +16,17 @@ import os
 import statistics as st
 import sys
 
-# 工程根 = tools/<类>/x.py 往上**三**级（分类重整后本脚本深了一层）
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# 工程根 = 向上第一个含 `cfg/` 的目录（**别写死层级**：脚本搬过位置，写死会静默指错）
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+while _ROOT != os.path.dirname(_ROOT) and not os.path.isdir(os.path.join(_ROOT, "cfg")):
+    _ROOT = os.path.dirname(_ROOT)
+sys.path.insert(0, _ROOT)
 
-import base.settings as S                                    # noqa: E402
-
+import base.cfg.settings as S                                    # noqa: E402
 
 def _g(r, k, d=0.0):
     v = r.get(k, d)
     return d if v is None else v
-
 
 def _rng(name, vals):
     v = [x for x in vals if x is not None]
@@ -37,7 +37,6 @@ def _rng(name, vals):
     print("   %-8s min=%+.3f  p10=%+.3f  p50=%+.3f  p90=%+.3f  max=%+.3f"
           % (name, vs[0], vs[int(0.1 * len(vs))], st.median(vs),
              vs[int(0.9 * len(vs)) - 1], vs[-1]))
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -125,9 +124,9 @@ def main():
     # ---- ⑦ z 与"框宽测距"交叉核对 ----
     if not a.no_lazy:
         try:
-            from gate.gate_detector import board_camera
+            from gate.percept.gate_detector import board_camera
             cam = board_camera()
-            fw = float(S.get("vision.gate.geometry.frame_w", 0.70))
+            fw = float(S.get("vision.gate.percept.geometry.frame_w", 0.70))
             d = []
             for r in rows:
                 ratio, z = _g(r, "ratio"), _g(r, "z")
@@ -160,7 +159,6 @@ def main():
             print("   %-5s %4d 帧: p10=%+6.1f p50=%+6.1f p90=%+6.1f std=%5.1f°"
                   % (nm, len(v), v[int(0.1 * len(v))], st.median(v),
                      v[int(0.9 * len(v)) - 1], st.pstdev(v)))
-        # ⚠️ 水里复盘第一条就看这段：居中达标却**跳过正航向**的原因
         skips = {}
         for r in rows:
             sk = r.get("hdg_skip")
@@ -179,12 +177,11 @@ def main():
                   "%+.1f°" % st.median(full_h))
             print("      收敛阈值见 comm.gate.hdg.tol_deg（用户定 8~10°）；"
                   "若中位数明显偏一个常数，先怀疑相机—机身安装偏置"
-                  "（`gate.geometry.body_center_offset`，尚未标定），不要用别的手段去「补偿」它。")
+                  "（`gate.percept.geometry.body_center_offset`，尚未标定），不要用别的手段去「补偿」它。")
             print("   注：full 的 std = 此刻机身实际在晃多少，不是噪声底；"
-                  "噪声底用静态 dump 测（tools/analyze/analyze_heading.py）")
+                  "噪声底用静态 dump 测（tools/analyze/log/analyze_heading.py）")
 
     # ---- ⑦c 水平通道"能动力"：为什么调不动 ----
-    # ⚠️ 别把"居中"当成能用 yaw：居中只有 sway 通道（`comm.gate.align_yaw` 已删除；
     #     gate 里唯一的 yaw 来源是 ALIGN.HDG 正航向 → 增益 comm.motion.turn_pid）。
     yaw_out = float((S.get("comm.motion.turn_pid", None) or {}).get("out_max", 0.45) or 0.45)
     sway_out = float((S.get("comm.gate.pid_sway", None) or {}).get(
@@ -215,7 +212,6 @@ def main():
         print("   没有进入过 THROUGH")
     for dx, dy, z, md, rt in th[:10]:
         if md == "coarse":
-            # ⚠️ 别用 z 换算 cm：coarse 档没有测距，日志里的 z 是上一次 width/位姿留下的
             #    陈旧值（可能是垃圾）。
             print("   dx=%+.3f dy=%+.3f 框占比=%.2f mode=coarse → **该档无测距，别用 z 换算 cm**"
                   "（z=%s 是陈旧值）" % (dx, dy, rt, "%.2f" % z))
@@ -266,7 +262,6 @@ def main():
             shown += 1
     print("=" * 72)
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

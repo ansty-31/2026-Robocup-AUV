@@ -1,30 +1,21 @@
 # -*- coding: utf-8 -*-
-"""tools/check/check_paths.py — 路径依赖自检（**换拷贝/搬目录后第一件事**）
-
-为什么需要它（板端两类坑）
+"""tools/check/pipeline/check_paths.py — 路径依赖自检（**换拷贝/搬目录后第一件事**）
 -------------------------
-1. **cfg 里写绝对路径** ⇒ 把配置钉死在某一份拷贝上：标定/权重指错一份就静默用了另一个文件，
-   那份被删/被搬 ⇒ **相机初始化直接崩**。
-   规则：cfg 里**一律写仓库内相对路径**（`cfg/front_camera.yaml`、`models/x.bin`），
-   运行时由 `base.settings.resolve_path()` 按工程根解析。
-2. **相机标定 yaml 的第一个字节**：板端 cv2（4.11）靠文件开头认格式 ⇒ 前面有注释行、
-   **甚至空行**都会 `Input file is invalid`（SystemError），而 `calibration_maps`
-   **不兜底** ⇒ 崩。注释只能放在 `---` **之后**。
-
+规则：cfg 里**一律写仓库内相对路径**（`cfg/front_camera.yaml`、`models/x.bin`），
+运行时由 `base.cfg.settings.resolve_path()` 按工程根解析。
+**甚至空行**都会 `Input file is invalid`（SystemError），而 `calibration_maps`
 检查项
 ------
-  A 工程根自证：`main.py` / `cfg/` / `models/` 都在同一个根下
-  B `cfg/*.yaml` 里**没有绝对路径**（扫文本，不看注释以外的东西）
-  C 所有"路径类键"能解析且**文件存在**（用 `base.settings` 的实际解析结果）
-  D 相机标定 yaml：第一个字节是 `%YAML:1.0`，且 cv2 能读、fx 合理
-  E 提示同名拷贝（`/home/sunrise/AUV` 之类）存在时的混用风险
-
+A 工程根自证：`main.py` / `cfg/` / `models/` 都在同一个根下
+B `cfg/*.yaml` 里**没有绝对路径**（扫文本，不看注释以外的东西）
+C 所有"路径类键"能解析且**文件存在**（用 `base.cfg.settings` 的实际解析结果）
+D 相机标定 yaml：第一个字节是 `%YAML:1.0`，且 cv2 能读、fx 合理
+E 提示同名拷贝（`/home/sunrise/AUV` 之类）存在时的混用风险
 用法（板端/本地都行）
 --------------------
-    python3 tools/check/check_paths.py
-    python3 tools/check/check_paths.py --quiet      # 只打印失败项
-退出码：0=全部通过 ｜ 1=有失败项（可直接进 CI/部署前检查）
-"""
+python3 tools/check/pipeline/check_paths.py
+python3 tools/check/pipeline/check_paths.py --quiet      # 只打印失败项
+退出码：0=全部通过 ｜ 1=有失败项（可直接进 CI/部署前检查）"""
 from __future__ import annotations
 
 import argparse
@@ -33,11 +24,14 @@ import os
 import re
 import sys
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 工程根 = 向上第一个含 `cfg/` 的目录（**别写死层级**：脚本搬过位置，写死会静默指错）
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+while _ROOT != os.path.dirname(_ROOT) and not os.path.isdir(os.path.join(_ROOT, "cfg")):
+    _ROOT = os.path.dirname(_ROOT)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-#: 路径类键（与 base.settings._PATH_KEYS 同一份语义；这里列出来只为打印）
+#: 路径类键（与 base.cfg.settings._PATH_KEYS 同一份语义；这里列出来只为打印）
 PATH_KEYS = (
     "vision.camera.front.calibration",
     "vision.camera.ball.calibration",
@@ -107,20 +101,20 @@ def main(argv=None):
         for f, i, line in hits:
             bad("%s:%d  %s" % (f, i, line.strip()[:100]))
         print("    → 改成仓库内相对路径（`cfg/xxx.yaml`、`models/xxx.bin`），"
-              "运行时由 base.settings.resolve_path() 解析")
+              "运行时由 base.cfg.settings.resolve_path() 解析")
     else:
         ok("cfg/*.yaml 里没有绝对路径")
 
     # ---- C 路径类键解析 + 存在
     print("\nC 路径类键（解析后必须存在）")
     try:
-        import base.settings as S
+        import base.cfg.settings as S
     except Exception as e:
-        bad("import base.settings 失败：%s" % e)
+        bad("import base.cfg.settings 失败：%s" % e)
         S = None
     if S is not None:
         if getattr(S, "resolve_path", None) is None:
-            bad("base.settings 没有 resolve_path()（板端 settings.py 没打上补丁？）")
+            bad("base.cfg.settings 没有 resolve_path()（板端 settings.py 没打上补丁？）")
         for k in PATH_KEYS:
             v = S.get(k)
             if not v:

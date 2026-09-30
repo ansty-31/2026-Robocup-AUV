@@ -41,7 +41,7 @@ DELETED=(
   task1_2/ball_forward.py
   task1_2/run_ball_forward.sh
   tests/test_ball_forward.py
-  # 按角度原地转的实现在 common/turn_deg.py（脚本与 gate 正航向共用），
+  # 按角度原地转的实现在 common/motion/turn_deg.py（脚本与 gate 正航向共用），
   # 板端旧的 task1_2/turn_deg.py 必须删掉，否则"两个同名脚本、行为不同"必然踩坑。
   # 转向调用日志 `turn_log` 已从 common/ 挪到 base/（用户 2026-09-27 定：它是排查工具，
   # 不属 common/ 的共用运动/检测逻辑）→ 板端旧位置必须删掉，否则"两份同名模块"必然踩坑。
@@ -114,7 +114,7 @@ DELETED=(
   tests/test_detector.py
   # ⚠️ 反面教材（别再犯）：`tests/test_gate_flow.py` 曾经既是"被删的分层版用例"、又是
   #    "活文件"的同名路径 —— 那种情况下把它列进 DELETED 会把刚上传的文件再删掉。
-  #    分类重整后活文件是 `tests/tasks/test_gate_flow.py`，扁平路径 `tests/test_gate_flow.py`
+  #    分类重整后活文件是 `tests/tasks/gate/test_gate_flow.py`，扁平路径 `tests/test_gate_flow.py`
   #    才是要清的旧位置（见上面的"分类重整"段）；两者同名不同路径，**加 DELETED 时看清层级**。
   tests/test_gate_geometry.py
   tests/test_gate_kpt_memory.py
@@ -135,6 +135,71 @@ DELETED=(
   doc/psi测量步骤_20260923.txt
   # gate/过门-状态机与参数.md 已归位到 doc/记录/过门-状态机与参数.md（来源见 doc/记录/README.md）
   gate/过门-状态机与参数.md
+  # 板端遗留的改名文件：本地是 doc/记录/psi测量步骤_20260923.txt（无下划线、已在 doc/记录/），
+  # 板端 doc/ 下还多一个 `psi_测量步骤_20260923.txt`（旧名 + 多一个下划线）→ 先备份再删。
+  doc/psi_测量步骤_20260923.txt
+  # 2026-09-30 目录两层分级：**旧扁平路径全部要清**（否则板端新旧两份并存，
+  # pytest 收集到重名模块会 import-mismatch，脚本也会指错路径）。
+  base/settings.py
+  base/camera.py
+  base/uart.py
+  base/telemetry.py
+  base/turn_log.py
+  common/cfgnode.py
+  common/detector.py
+  common/preprocess.py
+  common/PID.py
+  common/turn_deg.py
+  gate/gate_decode.py
+  gate/gate_detector.py
+  gate/gate_frontend.py
+  gate/gate_postproc.py
+  gate/geometry.py
+  gate/kpt_memory.py
+  gate/mock.py
+  gate/gate_task.py
+  gate/heading_align.py
+  tools/analyze/analyze_task_log.py
+  tools/analyze/feature_coverage.py
+  tools/analyze/analyze_kpt_dump.py
+  tools/analyze/analyze_heading.py
+  tools/analyze/analyze_pnp_center.py
+  tools/analyze/pnp_calib.py
+  tools/analyze/ruler_calib.py
+  tools/analyze/tape_ticks.py
+  tools/analyze/label_corners.py
+  tools/check/check_kpt_decode.py
+  tools/check/check_gate_pose.py
+  tools/check/auv_kpt_meter.py
+  tools/check/check_dof_sign.py
+  tools/check/check_hdg_lockup.py
+  tools/check/check_domain.py
+  tools/check/check_paths.py
+  tools/check/check_pipeline_identity.py
+  tools/deploy/sync_Adomain_repo.sh
+  tools/deploy/Adomain_cfg/README.md
+  tools/deploy/Adomain_cfg/comm.yaml
+  tools/deploy/Adomain_cfg/vision.yaml
+  tools/deploy/Adomain_cfg/front_camera.yaml
+  tools/deploy/Adomain_cfg/preprocess_A_ref_20260917.py
+  tools/deploy/board_forks_Adomain.txt
+  tests/test_base.py
+  tests/test_common.py
+  tests/test_paths.py
+  tests/test_hud.py
+  tests/tasks/test_ball.py
+  tests/tasks/test_motion.py
+  tests/tasks/test_gate_flow.py
+  tests/tasks/test_gate_vision.py
+  tests/tasks/test_gate_postproc.py
+  doc/算法说明.md
+  doc/gate_pose_decode_spec.md
+  doc/现场卡-靶子法.md
+  doc/待研究-缺角位姿先验（三维信息复用）.md
+  doc/算法说明-gate-角点逐点融合滤波.md
+  doc/前视USB相机低延迟推流方案.md
+  doc/实验待测-runbook.md
+  doc/算法说明-gate-PnP移植方案.md
 )
 
 T0=$(date +%s)
@@ -199,7 +264,7 @@ n_same=0; n_new=0; n_diff=0; n_miss_local=0; n_skip=0
 #   ⚠️ 清单的**唯一来源是 tools/deploy/board_forks.txt**（check_board_parity.sh 读同一个文件）。
 #     别改回"只在这个脚本里写数组"：那边不知道分叉，--board 检查会永远红着。
 #   换目标仓库时（如给旧仓库 /home/sunrise/AUV 同步）用 AUV_FORKS_FILE 指向另一个文件：
-#     那个仓库的"故意分叉"和本仓库无关（它的 base/settings.py 也要跟着传）。
+#     那个仓库的"故意分叉"和本仓库无关（它的 base/cfg/settings.py 也要跟着传）。
 #   cfg/comm.yaml 曾按"统一为本地值"处理，现在已不在分叉清单里。
 FORK_FILE="${AUV_FORKS_FILE:-$TOOLS_DIR/board_forks.txt}"
 SKIP_FILES=()
@@ -266,14 +331,14 @@ step "废弃文件处理完成"
 # ---- 5) 板端自检 ----
 {
   echo "cd $BOARD"
-  echo "python3 -m py_compile main.py preview_detect.py base/settings.py base/camera.py base/uart.py base/telemetry.py common/detector.py common/PID.py common/preprocess.py common/turn_deg.py manual/recorder.py manual/stream.py manual/udp_server.py task1_2/ball.py gate/__init__.py gate/gate_task.py gate/gate_postproc.py gate/gate_detector.py gate/gate_decode.py gate/gate_frontend.py gate/geometry.py gate/heading_align.py gate/kpt_memory.py gate/mock.py && echo COMPILE-OK"
+  echo "python3 -m py_compile main.py preview_detect.py base/cfg/settings.py base/hw/camera.py base/hw/uart.py base/hw/telemetry.py common/vision/detector.py common/motion/PID.py common/vision/preprocess.py common/motion/turn_deg.py manual/recorder.py manual/stream.py manual/udp_server.py task1_2/ball.py gate/__init__.py gate/motion/gate_task.py gate/percept/gate_postproc.py gate/percept/gate_detector.py gate/percept/gate_decode.py gate/percept/gate_frontend.py gate/percept/geometry.py gate/motion/heading_align.py gate/percept/kpt_memory.py gate/percept/mock.py && echo COMPILE-OK"
   [ "$NO_TEST" = "1" ] || echo "echo '--- 全量 pytest ---'; timeout 600 python3 -m pytest tests/ -q > /tmp/auv_pytest.log 2>&1; tail -3 /tmp/auv_pytest.log; if grep -qE '[0-9]+ passed' /tmp/auv_pytest.log && ! grep -qE '[0-9]+ (failed|error)' /tmp/auv_pytest.log; then echo PYTEST-OK; else echo PYTEST-FAIL; fi"
   cat <<'PYEOF'
 echo '--- 配置快照 ---'
 python3 - <<'PY'
 import sys; sys.path.insert(0,'.')
-import base.settings as S
-from gate.kpt_memory import ENV_ENABLE, kpt_mem_enabled
+import base.cfg.settings as S
+from gate.percept.kpt_memory import ENV_ENABLE, kpt_mem_enabled
 print('ball : timeout_ms=%s dash_ratio=%s stop_hold_s=%s' % (S.comm.ball.timeout_ms, S.comm.ball.dash_ratio, S.comm.ball.stop_hold_s))
 print('gate : near_ratio=%s hold=%s reacquire=%s' % (S.comm.gate.coarse.near_ratio, S.comm.gate.hold.max_frames, dict(S.comm.gate.reacquire)))
 print('motion(共用) : sway_kp=%s heave_kp=%s surge_fast=%s surge_slow=%s turn_kp=%s' % (

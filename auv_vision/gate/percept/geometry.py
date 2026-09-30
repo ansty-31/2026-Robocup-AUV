@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""gate/geometry.py — 门框位姿几何内核（纯函数，前端无关）
+"""gate/percept/geometry.py — 门框位姿几何内核（纯函数，前端无关）
 
 移植自 BumblebeeAS pose_estimator（NUS 水下机器人）：
   - utils/PinholeCamera.py        → CameraModel（raw / rectified 双域）
   - utils/pose_estimator.py       → gate_pose / plane_from_pose / backproject_to_plane
   - config/object_points.py       → object_points（门框外轮廓四角, z=0 平面）
-设计文档：doc/算法说明-gate-PnP移植方案.md（§3/§4.2/§4.4/§4.5）
+设计文档：doc/记录/算法说明-gate-PnP移植方案.md（§3/§4.2/§4.4/§4.5）
 
 坐标约定（与文档一致）：
   - 图像/门框坐标系：x 向右、y 向下；门框外轮廓矩形 0.70(宽) × 0.50(高)，原点=矩形中心；
@@ -27,15 +27,10 @@ try:
 except ImportError:
     HAS_CV2 = False
 
-# 门框外轮廓尺寸（§3 已定，单位 m）
-# **陆上实验（2026-09-22 21:00 前）确认的最终值：外缘 0.77 × 0.56 m**（卷尺 77×56 cm，管外径 5 cm；
-# `ruler_calib.py --gate` 反演 W_eff = 0.78~0.80，一致到 4%）→ 这是 PnP 深度的**唯一标尺**。
-# 这里是模块默认值（也是 `object_points()` 的默认参数、`gate_task._D_GEOM` 的来源）；
-# 运行期真值以 `cfg/vision.yaml → gate.geometry` 为准，两处必须同值
-# （有用例 test_gate_defaults_match_cfg 守着）。
-# ⚠️ 与 `cfg/comm.yaml → comm.gate.z.cross`（=0.77）是**同一个物理距离的两种写法**，改一个必须改另一个。
-GATE_FRAME_W = 0.77
-GATE_FRAME_H = 0.56
+# 门框外轮廓尺寸（m）：模块默认值 = `object_points()` 默认参数 = `gate_task._D_GEOM` 兜底来源。
+# 运行期真值以 `cfg/vision.yaml → vision.gate.geometry` 为准，两处必须同值
+GATE_FRAME_W = 0.70
+GATE_FRAME_H = 0.50
 
 # 位姿可信深度范围（§4.4 质量检查初值）
 Z_BOUNDS = (0.2, 15.0)
@@ -45,7 +40,7 @@ REPROJ_THR_PX = 20.0
 
 def _need_cv2():
     if not HAS_CV2:
-        raise RuntimeError("gate/geometry.py 需要 opencv：pip install opencv-python"
+        raise RuntimeError("gate/percept/geometry.py 需要 opencv：pip install opencv-python"
                            "（板端: sudo apt install python3-opencv）")
 
 
@@ -175,15 +170,12 @@ def _finite(r, t):
 
 def _iter_candidates(camera, obj3, img2, prev=None):
     """生成候选 (rvec,tvec) 列表。
-
     - ≥4 点（共面矩形）：solvePnPGeneric(IPPE)（cv2 4/5 兼容，取 rvecs/tvecs）；
-      解全为 nan/异常时依次退 SQPNP → ITERATIVE(带上帧猜值)。
-      **注意**：退化配置(门正对、某些 z)下 IPPE 会返回 2 个 nan 解；若不判有效性，
-      就会“有候选但全废”，把后面的兜底路径堵死 → gate_pose 返回 None → 任务退化成
-      coarse（**正对门时反而丢位姿**）。
+    解全为 nan/异常时依次退 SQPNP → ITERATIVE(带上帧猜值)。
+    就会“有候选但全废”，把后面的兜底路径堵死 → gate_pose 返回 None → 任务退化成
+    coarse（**正对门时反而丢位姿**）。
     - 恰好 3 点：必须有上帧猜值 prev（ITERATIVE + guess 收敛，无猜值 3 点不可靠）；
-      为兼容 cv2 4 先试 solvePnPGeneric(P3P) 多解，失败再走 guess 路径。
-    """
+    为兼容 cv2 4 先试 solvePnPGeneric(P3P) 多解，失败再走 guess 路径。"""
     K = camera.camera_matrix()
     D = camera.dist_coeffs()
     obj3 = np.asarray(obj3, np.float32)
@@ -309,19 +301,13 @@ def plane_from_pose(rvec, tvec):
 
 def gate_normal_angles_deg(rvec, tvec=None):
     """门法向 n=R·[0,0,1]（相机系）相对光轴的**航向/俯仰角（度）**。
-
-    用途（2026-09-18）：ALIGN 里"机身正不正"没法从 `dxn` 判断 —— `dxn` 是**方位**
     （门在画面里偏多少），yaw 用它就是把门拉到光轴上，**不等于**机身与门法向平行。
     真正的朝向误差在这里：机身正对门时 n=(0,0,1) → 两角都为 0。
-
     返回 (yaw_deg, pitch_deg)：
-      yaw_deg   = atan2(n_x, n_z)  水平朝向误差（+ = 门法向偏向画面右侧 = 机身相对门**左偏**）
-      pitch_deg = atan2(n_y, n_z)  俯仰
+    yaw_deg   = atan2(n_x, n_z)  水平朝向误差（+ = 门法向偏向画面右侧 = 机身相对门**左偏**）
+    pitch_deg = atan2(n_y, n_z)  俯仰
     镜像解处理：平面目标 PnP 有前后对称的双解（n_z 可正可负，两者重投影等价），
-    n_z < 0 时取 -n，使结果落在 (-90°, 90°)，否则会出现 ±180° 的假跳变。
-    精度：实测（tools/analyze/analyze_heading.py，真实角点 dump，conf 0.7/reproj 20px）
-    帧间 |Δ| p50≈3°，EMA 4 帧后噪声 ≈3° → **够用来做"慢慢校"，不够做快速闭环**。
-    """
+    帧间 |Δ| p50≈3°，EMA 4 帧后噪声 ≈3° → **够用来做"慢慢校"，不够做快速闭环**。"""
     n, _rho = plane_from_pose(rvec, tvec if tvec is not None else np.zeros((3, 1)))
     n = np.asarray(n, np.float64).reshape(3)
     if n[2] < 0:                     # 镜像解 → 翻到朝向相机那一侧
@@ -333,10 +319,7 @@ def gate_normal_angles_deg(rvec, tvec=None):
 
 def backproject_to_plane(u, v, camera, n, rho):
     """像素 (u,v) 反投影到门平面 → **相机系** 3D 点（§4.5 核心）。
-
-    p = λ·K⁻¹[u,v,1]，λ = rho/(n·K⁻¹[u,v,1])；分母≈0（视线平行门平面）返回 None。
-    注意：返回点已在相机系——控制直接用 p；若要画回图像做叠加调试，
-    用零位姿投影（project(p, rvec=0, tvec=0)），不要再施加门位姿（否则双重变换）。"""
+    p = λ·K⁻¹[u,v,1]，λ = rho/(n·K⁻¹[u,v,1])；分母≈0（视线平行门平面）返回 None。"""
     _need_cv2()
     K_inv = np.linalg.inv(camera.camera_matrix())
     dir_ = np.asarray(K_inv @ np.array([u, v, 1.0], np.float64), np.float64).reshape(3)

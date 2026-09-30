@@ -1,33 +1,14 @@
 # -*- coding: utf-8 -*-
 """preview_detect.py — 真机实时识别预览（**只画识别框，不发任何运动指令**）
-
-在板子上实测某个 .bin 权重（默认 cfg vision.model.path，即 auv_multi.bin）
-对指定类别（默认 gate）的识别效果：
-  - 本脚本 **不创建 UartController**，不打开串口 → 船不会动；
-  - 每帧做一次推理，把识别框画在实时画面上。
-
+- 本脚本 **不创建 UartController**，不打开串口 → 船不会动；
+- 每帧做一次推理，把识别框画在实时画面上。
 显示方式（可任选/组合）：
-  --show            本机窗口 cv2.imshow（需要 DISPLAY；板子桌面终端可用）
-  --stream          把“带框画面”编码成 MJPEG，用 UDP 推给 PC 观看
-                    PC 端： ffplay -fflags nobuffer -flags low_delay -framedrop -f mjpeg "udp://@:5000"
-  --save DIR        每 N 帧存一张带框图到 DIR（默认每 30 帧）
-
+--show            本机窗口 cv2.imshow（需要 DISPLAY；板子桌面终端可用）
+--stream          把“带框画面”编码成 MJPEG，用 UDP 推给 PC 观看
+--save DIR        每 N 帧存一张带框图到 DIR（默认每 30 帧）
 用法示例（板端，工程根目录）：
-  python3 preview_detect.py --classes gate                       # 只打印统计(无显示)
-  python3 preview_detect.py --classes gate --stream              # 推给 PC 看
-  DISPLAY=:0 python3 preview_detect.py --classes gate --show     # 板子桌面窗口
-  python3 preview_detect.py --classes all --save /tmp/pv --duration 20
-  python3 preview_detect.py --classes gate --model models/auv_multi.bin --conf 0.4
-
 门角点(关键点)模式 —— 用 gate 任务模型（`vision.model.task_models.gate.path`，当前为阶段一
-`gate_kpt_stage1_g240_i16_bayese_640x640_nv12.bin`），
-画 4 个角点 + 四边形，并打印每点坐标/置信度与四角组合判定：
-  python3 preview_detect.py --gate-kpt --stream                  # 门角点预览
-  DISPLAY=:0 python3 preview_detect.py --gate-kpt --show         # 板子桌面窗口
-  python3 preview_detect.py --gate-kpt --conf 0.3 --duration 20  # 降低角点置信度门槛
-
-按 Ctrl-C 或窗口里按 q/Esc 退出；结束打印各类别累计帧数。
-"""
+按 Ctrl-C 或窗口里按 q/Esc 退出；结束打印各类别累计帧数。"""
 import argparse
 import os
 import sys
@@ -36,9 +17,9 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np                                   # noqa: E402
-import base.settings as S                            # noqa: E402
-from base.camera import create_camera                # noqa: E402
-from common.detector import DetectorHub              # noqa: E402
+import base.cfg.settings as S                            # noqa: E402
+from base.hw.camera import create_camera                # noqa: E402
+from common.vision.detector import DetectorHub              # noqa: E402
 
 try:
     import cv2
@@ -53,7 +34,6 @@ COLORS = {"red_ball": (60, 60, 255), "blue_ball": (255, 150, 30),
 _GATE_CFG = S.get("vision.model.task_models.gate", None) or {}
 KPT_NAMES = tuple(_GATE_CFG.get("kpt_order") or ("TL", "TR", "BR", "BL"))
 KPT_VIS_THR = 0.30
-
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
@@ -97,7 +77,7 @@ def main():
     backend = None
     model_desc = S.vision.model.path
     if a.gate_kpt:
-        from gate.gate_detector import build_gate_backend
+        from gate.percept.gate_detector import build_gate_backend
         backend = build_gate_backend(conf=a.conf)   # --conf 同时覆盖 gate 的候选阈值
         if backend is None:
             print("[PV] 门角点后端不可用(权重缺失)；检查 vision.model.task_models.gate.path")
@@ -124,7 +104,7 @@ def main():
     parse_kpt_mode = None
     if backend is not None:
         hub.register("gate", backend)         # 复用门任务后端(独立权重)
-        from gate.gate_frontend import parse_kpt_mode
+        from gate.percept.gate_frontend import parse_kpt_mode
 
     pusher = None
     if a.stream:
@@ -151,7 +131,7 @@ def main():
     # 一律构造出来对比（这正是它存在的意义：看开/关差别，不用改配置）
     mem, fuse_stat = None, None
     if a.fuse and a.gate_kpt:
-        from gate.kpt_memory import build_kpt_memory
+        from gate.percept.kpt_memory import build_kpt_memory
         km = S.vision.gate.kpt_mem
         mem = build_kpt_memory(km, n_kpt=4, force=True)
         if mem is None:
@@ -332,7 +312,6 @@ def main():
             dump_fh.close()
             print("[PV] dump 已保存: %s（%d 行，JSONL 逐帧可离线回看）" % (a.dump, n))
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

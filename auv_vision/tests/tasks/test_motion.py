@@ -1,24 +1,22 @@
 # -*- coding: utf-8 -*-
 """tests/tasks/test_motion.py — 运动原语：额定转角 `TurnCore` + 正航向 `HeadingAligner`。
-
 两半都是"遥测 yaw 闭环"状态机（转角是原语；正航向是 gate ALIGN 的子状态），
-所以离线用**假船**测：遥测 yaw 按 `角速率 × 下发的 yaw DOF × dt` 积分，
 时钟与 sleep 全部注入 → 确定性、毫秒级跑完。
-
-假船的默认极性 = **真机极性**（命令 +yaw 时遥测 yaw **减小**）—— 谁把 `dof_map.yaw.sign` /
-`telemetry.yaw_sign` / 接线改了，这里会先红。（板端实测依据见
-doc/_注释历史_fragments/base_tests.md）
-"""
+假船的默认极性 = **真机极性**（命令 +yaw 时遥测 yaw **减小**）—— 谁把 `dof_map.yaw.sign` /"""
 import os
 import sys
 
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 工程根 = 向上第一个含 `cfg/` 的目录（**别写死层级**：脚本搬过位置，写死会静默指错）
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+while _ROOT != os.path.dirname(_ROOT) and not os.path.isdir(os.path.join(_ROOT, "cfg")):
+    _ROOT = os.path.dirname(_ROOT)
+sys.path.insert(0, _ROOT)
 
-import base.settings as S                                          # noqa: E402
-from common.turn_deg import TurnCore, turn, turn_cfg, wrap180, yaw_sign             # noqa: E402
-from gate.heading_align import (ABORTED, DONE, GIVEUP, TURN,             # noqa: E402
+import base.cfg.settings as S                                          # noqa: E402
+from common.motion.turn_deg import TurnCore, turn, turn_cfg, wrap180, yaw_sign             # noqa: E402
+from gate.motion.heading_align import (ABORTED, DONE, GIVEUP, TURN,             # noqa: E402
                                 HeadingAligner, hdg_cfg)
 
 # 真机极性：+yaw 命令 → 遥测 yaw 减小（σ = -1）
@@ -26,7 +24,7 @@ BOARD_SIGN = -1.0
 
 
 # ======================================================================
-# 额定转角（common/turn_deg.py）
+# 额定转角（common/motion/turn_deg.py）
 # ======================================================================
 class _Tel(object):
     def __init__(self):
@@ -76,10 +74,7 @@ def _yaw_cmds(boat):
     return [c[3] for c in boat.cmd if abs(c[3]) > 1e-9]
 
 def test_yaw_sign_is_a_fixed_derivation_not_a_measurement():
-    """**极性 σ 是算出来的常量**（固件 × dof_map × telemetry），不配置、不探向、不现场测。
-
-    （当初把 σ 当成 +1 曾闭合成正反馈，板端实测依据见 doc/_注释历史_fragments/base_tests.md。）
-    """
+    """**极性 σ 是算出来的常量**（固件 × dof_map × telemetry），不配置、不探向、不现场测。"""
     sig, src = yaw_sign()
     assert sig == pytest.approx(-1.0), "出厂极性应为 -1（%s），实测 %s" % (src, sig)
     assert "dof_map" in src and "telemetry" in src
@@ -96,10 +91,7 @@ def test_yaw_sign_is_a_fixed_derivation_not_a_measurement():
     assert yaw_sign()[0] == pytest.approx(-1.0)
 
 def test_turn_left_reaches_rated_angle():
-    """左转 90°：遥测 yaw 应转出 +90°（真机极性下 +yaw 命令 → yaw 减小 ⇒ 左转 = yaw 增大）。
-
-    起点 170°（回绕边界附近）→ 左转 90° 会跨过 ±180，所以这条同时验回绕。
-    """
+    """左转 90°：遥测 yaw 应转出 +90°（真机极性下 +yaw 命令 → yaw 减小 ⇒ 左转 = yaw 增大）。"""
     b = _FakeBoat()
     y0 = b.telemetry.yaw_deg
     rc, logs = _run_turn(b, deg=90.0, left=True, timeout=20.0)
@@ -132,10 +124,7 @@ def test_pid_eases_off_near_the_target_and_respects_out_max():
 
 def test_loop_converges_without_limit_cycle():
     """**必须"逐步收敛"，不许原地极限环**（2026-09-27 仿真抓到的真问题）。
-
-    现行 cfg 是 `kd=0 / deadzone_deg=6`：一次转到位、出力不反号（导致极限环的旧参数
-    `kd=0.10 / deadzone_deg=3.0` 及其失效过程见 doc/_注释历史_fragments/base_tests.md）。
-    """
+    现行 cfg 是 `kd=0 / deadzone_deg=6`：一次转到位、出力不反号（导致极限环的旧参数"""
     cfg, _ = turn_cfg()
     assert float(cfg["kd"]) == pytest.approx(0.0), "kd 必须为 0（见 cfg/comm.yaml 的 turn_pid 注释）"
     b = _FakeBoat(start_yaw=75.07, gain=200.0)      # 增益按板端实测量级取
@@ -190,11 +179,7 @@ def test_refuses_to_turn_without_telemetry():
     assert any("拒绝转向" in s for s in logs)
 
 def test_divergence_guard_stops_the_turn():
-    """**方向自证**（唯一的兜底，不是测量）：命令朝一边、船朝另一边 ⇒ 停转（rc=6）。
-
-    构造：假船极性与真机相反（+yaw 命令使 yaw **增大**）⇒ 闭环变正反馈。
-    必须"转一点点就停"，而不是像板端那样一路转到 120°+ 把门甩出画面。
-    """
+    """**方向自证**（唯一的兜底，不是测量）：命令朝一边、船朝另一边 ⇒ 停转（rc=6）。"""
     b = _FakeBoat(imag_sign=+1.0, start_yaw=0.0, gain=60.0)      # 反极性
     # sat_max_s=0：本用例测**方向自证**，新保护（满舵无进展即停）会抢在前面 ⇒ 隔离掉
     rc, logs = _run_turn(b, deg=30.0, left=True, timeout=20.0, sat_max_s=0.0)
@@ -213,7 +198,7 @@ def test_divergence_guard_stops_the_turn():
 
 
 # ======================================================================
-# 正航向（gate/heading_align.py）：PnP 目标角 → 转一次 → 结束
+# 正航向（gate/motion/heading_align.py）：PnP 目标角 → 转一次 → 结束
 # ======================================================================
 class _World(object):
     """假船 + 假门：h=机身转角(正=右)，**psi=psi0−h**（2026-09-28 实船改正：右转使 psi **变小**），
@@ -293,10 +278,7 @@ def test_left_turn_when_psi_is_negative():
 
 def test_target_angle_is_frozen_while_turning():
     """**转动中不重测**：目标角在起转那一刻冻结成死数。
-
-    结构保证：转向期间 `HeadingAligner.step()` **根本收不到 psi**（入参只有
-    now_ms / yaw_telemetry / gate_lost）⇒ 转动中测到的"假已平行"不可能提前结束转向。
-    """
+    结构保证：转向期间 `HeadingAligner.step()` **根本收不到 psi**（入参只有"""
     import inspect
     params = list(inspect.signature(HeadingAligner.step).parameters)
     for dead in ("psi_deg", "psi_fresh", "psi_stale"):
@@ -325,10 +307,7 @@ def test_stuck_turn_times_out_then_gives_up():
     assert any("带残余航向继续走" in s for s in logs)
 
 def test_step_cap_clamps_single_turn_and_zero_means_unlimited():
-    """`max_step_deg` 只是安全钳位：**0 = 不设限**（按测到的 psi 转）；>0 才限幅。
-
-    ⚠️ 出厂默认 2026-09-28 起是 **10.0°**（不是 0）⇒ "不设限"要显式配（见 `test_turn_scale_and_max_step_shape_the_issued_angle`）。
-    """
+    """`max_step_deg` 只是安全钳位：**0 = 不设限**（按测到的 psi 转）；>0 才限幅。"""
     w = _World(psi0=60.0, stuck=True)
     al0 = HeadingAligner(cfg=dict(hdg_cfg(), max_step_deg=0.0, turn_scale=1.0), log=lambda *a: None)
     _run_hd(al0, w, frames=4)
@@ -383,10 +362,7 @@ def test_disabled_switches_off_completely():
 
 def test_no_telemetry_never_turns():
     """**没有遥测 yaw ⇒ 不转**（ABORTED，且全程零舵）。
-
-    这条守的是用户定的原则：转向只允许闭环，**不留开环盲转备案**
-    （`blind_enable` 那种"角度÷假设角速率"定时盲转已删除，不许复活）。
-    """
+    这条守的是用户定的原则：转向只允许闭环，**不留开环盲转备案**"""
     w = _World(psi0=20.0)
     al = HeadingAligner(log=lambda *a: None, turn_kwargs=dict(wait_tel_s=0.5))
     _, logs, _ = _run_hd(al, w, frames=400, telemetry=False)
@@ -402,11 +378,11 @@ def test_p3p_frames_do_not_feed_the_filter():
     """
     import numpy as np
     import cv2
-    from common.detector import Det
-    from gate.gate_detector import board_camera
-    from gate.gate_task import GateTask
-    from gate.geometry import object_points
-    from tests.tasks.test_gate_flow import _Hub, _Uart
+    from common.vision.detector import Det
+    from gate.percept.gate_detector import board_camera
+    from gate.motion.gate_task import GateTask
+    from gate.percept.geometry import object_points
+    from tests.tasks.gate.test_gate_flow import _Hub, _Uart
 
     cam = board_camera()
     obj = object_points()
@@ -441,11 +417,7 @@ def test_p3p_frames_do_not_feed_the_filter():
 
 def test_overshoot_tolerance_is_measured_against_the_issued_deg():
     """**超转容差 = 10°**（用户 2026-09-28 定："可以超转，但超转不得超过 10 度"）。
-
-    `0 ≤ done_deg − 下发的 deg ≤ overshoot_tol_deg` 即算这一小步到位，且在这窗里**不再触发满舵保护**：
-      · 关掉容差 ⇒ 超转后 |err| 与"朝下发角推进"都不再改善 ⇒ 2s 后被掐（现场"被限死"那种）；
-      · 超转 ≤ 10° ⇒ 认到位、正常 DONE；**超过 10° 不认**（由下一个新鲜 ψ 带回来）。
-    """
+    `0 ≤ done_deg − 下发的 deg ≤ overshoot_tol_deg` 即算这一小步到位，且在这窗里**不再触发满舵保护**："""
     def run(tol, cap=45.0):
         c = TurnCore(deg=20.0, left=True, timeout=30.0, log=lambda *a: None,
                      # out_max 调小只为让"满舵"这条判据在合成航迹上真的生效
@@ -456,7 +428,6 @@ def test_overshoot_tolerance_is_measured_against_the_issued_deg():
         while not c.finished() and t < 15000:
             i += 1
             # 0 → 45°：**每帧 8° 冲过去**（快得跳过 3 帧死区确认），冲到 45° 停住 ⇒ 下发 20°、超转 25°。
-            #   必须"跳过死区"才复现现场那种"转过头 ⇒ 回不来 ⇒ 被满舵保护掐死"。
             c.step(t, min(cap, i * 8.0))
             t += 100
         return c, t

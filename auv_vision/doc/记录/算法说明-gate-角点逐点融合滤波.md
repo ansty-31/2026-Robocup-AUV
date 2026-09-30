@@ -1,6 +1,6 @@
-# gate 角点逐点融合滤波 — 数据处理说明（代码 `gate/kpt_memory.py`）
+# gate 角点逐点融合滤波 — 数据处理说明（代码 `gate/percept/kpt_memory.py`）
 
-> **当前状态（20260917）**：过门（gate）= **扁平 v1.2 版**，本层代码路径就是 **`gate/kpt_memory.py`**
+> **当前状态（20260917）**：过门（gate）= **扁平 v1.2 版**，本层代码路径就是 **`gate/percept/kpt_memory.py`**
 > （`gate/` 下没有子包）。
 > `kpt_memory` 为**可选功能、默认开启**（配置里 `enable: true`，= 周一 09-14 原行为）：关掉用
 > `vision.gate.kpt_mem.enable: false`，或用 `AUV_GATE_KPT_MEM=0` 临时关闭
@@ -13,8 +13,8 @@
 > 自身**做鲁棒自适应融合滤波，用来抑制水面倒影引起的小漂移 / 短消失 / 偶发鬼点，
 > 让状态机保持稳定。
 >
-> 命名说明：这一层在讨论里被叫作 "kpt_gate"，落地的模块名是 **`gate/kpt_memory.py`
-> （类 `KptMemory`）**，配置段 `vision.gate.kpt_mem`，调用点在 `gate/gate_task.py::_step`。
+> 命名说明：这一层在讨论里被叫作 "kpt_gate"，落地的模块名是 **`gate/percept/kpt_memory.py`
+> （类 `KptMemory`）**，配置段 `vision.gate.kpt_mem`，调用点在 `gate/motion/gate_task.py::_step`。
 >
 > 定位一句话：**它是一次"融合滤波"**——准确说是
 > **逐点鲁棒自适应 α-β 融合滤波（robust adaptive α-β fusion filter），带残差尺度验证门
@@ -103,8 +103,8 @@ c_i  = (1-a)·c_i + a·conf_i                #    置信度融合（连续）
 > **可选功能、默认开启**。开关优先级：环境变量 `AUV_GATE_KPT_MEM` > 配置 `enable` > 兜底 `false`。
 > `AUV_GATE_KPT_MEM=0 python3 main.py --task gate` 临时关掉（不改配置）；`=1` 强制打开（压过 `enable: false`）。
 > `preview_detect.py --fuse` 以 `force=True` **强制**打开，便于 fused vs raw 对比。
-> 关闭时 `build_kpt_memory()` 返回 `None`，`gate/gate_task.py` 角点**单帧直用**，行为等同没集成该功能。
-> 下表默认值取自 `gate/kpt_memory.py::DEFAULTS`（`cfg/vision.yaml` 中另有覆盖值，以配置为准）。
+> 关闭时 `build_kpt_memory()` 返回 `None`，`gate/motion/gate_task.py` 角点**单帧直用**，行为等同没集成该功能。
+> 下表默认值取自 `gate/percept/kpt_memory.py::DEFAULTS`（`cfg/vision.yaml` 中另有覆盖值，以配置为准）。
 
 | 键 | 默认 | 含义 / 调参方向 |
 |---|---|---|

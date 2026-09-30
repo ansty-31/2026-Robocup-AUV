@@ -1,26 +1,8 @@
 # -*- coding: utf-8 -*-
-"""base/turn_log.py — **转向调用日志**（只写字，不参与任何控制）。
-
-位置说明（用户 2026-09-27 定）：它是**排查工具**、不属于 `common/` 的共用运动/检测逻辑，所以从
-`common/` 挪出来；**不放 `tools/`**（`tools/` 是本机工具、默认不随部署上板，而它是**运行期依赖**），
-落在本就随部署上板的基础层 `base/`。调用方：`gate/gate_task.py`、`common/turn_deg.py`。
-
-为什么要单独一个件：现场问题（"看到门就不停地转、手动插不进来"、"转了一点点就停"、
-"到底进没进那个循环"）在逐帧任务日志里**看不到"进入/离开 turn 循环"这个粒度**。
-这里把每次**调用转向**的 进入 / 锚点 / 退出 记成一行 JSON，能直接回答：
-
-    · 谁调用的（src=cli/turn/gate/gate_loop）、进了几次（n 递增）、间隔多久；
-    · 每次的参数（deg/left/σ/增益/限幅/死区/超时）；
-    · 每次的结果（state/why/实测转了deg/最大偏差/耗时ms）；
-    · **gate_loop 那条**是"任务每帧进一次内层循环"的足迹 —— 有它就能看出是不是被卡住/反复进。
-
-落盘：环境变量 `AUV_TURN_LOG` 指定的文件；没设 ⇒ `<工程根>/log/turn_calls.jsonl`（追加）。
-      显式设成空串 = 关掉。**任何异常都吞掉** —— 日志绝不许影响控制链路。
-
+"""base/log/turn_log.py — **转向调用日志**（只写字，不参与任何控制）。
+· 谁调用的（src=cli/turn/gate/gate_loop）、进了几次（n 递增）、间隔多久；
 用法：
-    from base.turn_log import turn_log
-    turn_log("enter", src="gate", deg=25.0, left=True, sig=-1.0, timeout=8.0)
-"""
+from base.log.turn_log import turn_log"""
 from __future__ import annotations
 
 import json
@@ -31,12 +13,10 @@ import time
 _LOCK = threading.Lock()
 _N = 0
 
-
 def default_path():
     """没配 `AUV_TURN_LOG` 时的落盘路径：<工程根>/log/turn_calls.jsonl。"""
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     return os.path.join(root, "log", "turn_calls.jsonl")
-
 
 def log_path():
     """当前生效的日志路径；返回 None = 关掉（`AUV_TURN_LOG=` 空串）。"""
@@ -45,12 +25,8 @@ def log_path():
         return None
     return (env or "").strip() or default_path()
 
-
 def turn_log(event, src="turn", **fields):
-    """追加一行转向调用日志。event ∈ {call, enter, anchor, exit, return, gate_loop, ...}。
-
-    ⚠️ **绝不抛异常**：日志坏了不能把转向/任务带崩（现场只有一次机会）。
-    """
+    """追加一行转向调用日志。event ∈ {call, enter, anchor, exit, return, gate_loop, ...}。"""
     global _N
     try:
         p = log_path()

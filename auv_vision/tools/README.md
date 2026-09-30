@@ -6,8 +6,8 @@
 ```bash
 # 按类跑：三个目录都可以独立工作（每个脚本自己定位工程根，在哪个 cwd 跑都行）
 bash   tools/deploy/deploy_to_board.sh          # 部署（本机 → 板端）
-python3 tools/check/check_kpt_decode.py         # 自检（跑一次看结论）
-python3 tools/analyze/analyze_task_log.py log/run_gate.jsonl   # 判读（吃日志/dump）
+python3 tools/check/vision/check_kpt_decode.py         # 自检（跑一次看结论）
+python3 tools/analyze/log/analyze_task_log.py log/run_gate.jsonl   # 判读（吃日志/dump）
 ```
 
 ```
@@ -61,17 +61,17 @@ tools/
 | 换了相机/畸变/分辨率，怕训练与推理不同域 | `check/check_pipeline_identity.py` |
 | 下水回来复盘这一轮哪里不对 | `analyze/analyze_task_log.py log/<tag>gate.jsonl` |
 | 想知道"这轮有哪些功能根本没被触发" | `analyze/feature_coverage.py log/<tag>gate.jsonl` |
-| 深度/位姿准不准、`frame_w` 该改多少 | `analyze/pnp_calib.py`（配 `doc/实验待测-runbook.md` 的流程） |
+| 深度/位姿准不准、`frame_w` 该改多少 | `analyze/pnp_calib.py`（配 `doc/记录/实验待测-runbook.md` 的流程） |
 
 > 判读命令（本地，用拉回来的 jsonl）：
 > ```bash
-> python3 tools/analyze/analyze_task_log.py log/<tag>gate.jsonl     # 相位/出口/通道
-> python3 tools/analyze/feature_coverage.py log/<tag>gate.jsonl     # 哪些功能没用上
-> python3 tools/analyze/pnp_calib.py --report r.md log/pnp_*/pnp_z*.jsonl  # PnP/深度标定（**文件名即真值**）
+> python3 tools/analyze/log/analyze_task_log.py log/<tag>gate.jsonl     # 相位/出口/通道
+> python3 tools/analyze/log/feature_coverage.py log/<tag>gate.jsonl     # 哪些功能没用上
+> python3 tools/analyze/calib/pnp_calib.py --report r.md log/pnp_*/pnp_z*.jsonl  # PnP/深度标定（**文件名即真值**）
 > ```
 >
 > PnP/深度标定的完整实验流程（怎么摆、录多久、判据、记录表、报告模板）见
-> `doc/实验待测-runbook.md`；`pnp_calib.py` 只负责「把 dump + 真值变成误差表和参数建议」。
+> `doc/记录/实验待测-runbook.md`；`pnp_calib.py` 只负责「把 dump + 真值变成误差表和参数建议」。
 
 > **过门**：当前在用的是 `gate/` **扁平 v1.2 版**（9 个文件，含 `heading_align.py`），
 > `kpt_memory` 是**可选开关、2026-09-18 起默认关闭**
@@ -119,7 +119,7 @@ bash tools/deploy/deploy_to_board.sh --dry-run    # 只报告"将上传/删除�
 2. 旧路径加进 `DELETED`，并同步删掉清单里的旧条目；
 3. 反过来也要检查：**`DELETED` 里绝不能留着一个现在还在用的路径** —— 否则部署会把刚上传的文件又删掉。
 
-（本工程已经踩过两次：一次是分层版用例与活文件同名 `tests/test_gate_flow.py`；一次是 2026-09-21
+（本工程已经踩过两次：一次是分层版用例与活文件同名 `tests/tasks/gate/test_gate_flow.py`；一次是 2026-09-21
 把 `tools/*`、`tests/*` 分到子目录，旧扁平路径全部进了 `DELETED`、新路径进清单。）
 
 实测（板端已最新）：`--no-test` **约 6 s**；带 pytest 约 15 s（其中大部分是 pytest 本身）。
@@ -219,7 +219,7 @@ bash tools/deploy/tidy_board_bak.sh            # 可选：板端备份堆多了�
 > 不会反映到本地，也不会被 `check_board_parity.sh` 看见。
 > 2026-09-27 手工换过它门权重（见下"权重分发"），当时发现的两个坑：
 > ① 它的 `cfg/vision.yaml` 里 `model.path` / `task_models.gate.path` 都是**绝对路径**，
->    而旧代码 `gate/gate_detector.py::build_gate_backend` 用 `os.path.exists(path)` **直接判存在、
+>    而旧代码 `gate/percept/gate_detector.py::build_gate_backend` 用 `os.path.exists(path)` **直接判存在、
 >    不解析相对路径** ⇒ 改这份 cfg 必须写绝对路径；
 > ② 它的 `models/` 里有个 `gate_kpt_bayese_640x640_nv12.bin.`（**名字尾部多一个点**），
 >    而 cfg 指的是不带点的名字 ⇒ 权重一直"缺失"、gate 被静默跳过。
@@ -286,9 +286,9 @@ diff -u cfg/comm.yaml "$b"        # 逐键看清差异 → 把板端现场值合
 > `deploy_to_board.sh` 命中就**不上传**（打一行 `[skip]`），`check_board_parity.sh` 命中就**不算不一致**
 > （打一行 `[分叉]`）。**两个脚本读同一个文件**：只在 deploy 里加、这边不知道，`--board` 就会永远报
 > `[板端不同]` 并 exit 1 —— 检查长期红着等于没有检查。
-> 曾经的两条（`base/settings.py` 的 SIM_MODE、`cfg/comm.yaml` 的台架分叉）在 2026-09-26
+> 曾经的两条（`base/cfg/settings.py` 的 SIM_MODE、`cfg/comm.yaml` 的台架分叉）在 2026-09-26
 > "全部以本地为准"时清空；**2026-09-27 把本地 `SIM_MODE=True` 推上板端、冲掉真驱动默认值**，
-> 于是 `base/settings.py` 重新入列（板端默认 `False` 真发串口，台架要打印用 `AUV_SIM_MODE=1`）。
+> 于是 `base/cfg/settings.py` 重新入列（板端默认 `False` 真发串口，台架要打印用 `AUV_SIM_MODE=1`）。
 > ⚠️ 分叉粒度是**整个文件**：入列后本地对该文件的改动**不再上板端**，要改必须在板端手工同步。
 > 现状：除此 1 个文件外，**板端全量跟本地一致**；上表"先 diff 再合并"的流程仍是改 cfg 前的好习惯。
 
@@ -310,10 +310,10 @@ AUV_SSH=... bash tools/deploy/check_board_parity.sh --board --write   # 板端�
 
 1. 从 `tools/deploy/board_parity.md5` 删掉那一行；
 2. 把相对路径加进 `deploy_to_board.sh` 的 `DELETED=( … )`（部署时先备份再删板端旧文件）。
-   `DELETED` 里已有的：v1.3/v1.4 分层 gate 目录、`task1_2/turn_deg.py`（已迁到 `common/turn_deg.py`）、
+   `DELETED` 里已有的：v1.3/v1.4 分层 gate 目录、`task1_2/turn_deg.py`（已迁到 `common/motion/turn_deg.py`）、
    2026-09-20 合并前的旧用例名（`test_uart.py`/`test_gate_dash.py`/`test_gate_decode.py`/
    `test_heading_align.py`/`test_turn_deg.py`/`test_preprocess_rt.py` 等）、以及 2026-09-21 分类重整前的
-   **旧扁平路径**（`tools/analyze_*.py`、`tools/check_*.py`、`tools/pnp_calib.py`、`tools/archive_baks.sh`、
+   **旧扁平路径**（`tools/analyze_*.py`、`tools/check_*.py`、`tools/pnp_calib.py`、`tools/deploy/archive_baks.sh`、
    `tests/test_*.py`）。⚠️ 加旧路径的同时，**确认没有同名活文件被误列**。
 
 > 提醒：`board_parity.md5` 的**方括号表示"已与板端逐字节核对过"**。刷清单时必须板端可达；

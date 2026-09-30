@@ -5,7 +5,7 @@
 #   确需板端本地录像时再加 --record（例如 PC 不在场）。
 #   三件套在 manual/：manual/udp_server.py（遥控桥）· manual/recorder.py（录像）· manual/stream.py（推流/接收库）
 #
-# 推流是"零转码"的：base/camera.py 打开相机时顺手把原始 MJPEG 交给 manual/stream.py 发出，
+# 推流是"零转码"的：base/hw/camera.py 打开相机时顺手把原始 MJPEG 交给 manual/stream.py 发出，
 # 所以**推流与录像共用同一路采集，互不抢相机**（UVC 只允许一个进程取流）。
 #
 # 用法（在工程根目录执行）：

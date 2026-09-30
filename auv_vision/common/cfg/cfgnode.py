@@ -1,26 +1,19 @@
 # -*- coding: utf-8 -*-
 """cfgnode.py — 配置节点读取的公共件（gate_task / heading_align / turn_deg 共用）。
-
 cfg 是 YAML → dict，读参数的规矩只有一条：
 **缺键 / 类型不对时用"等于当前 cfg 的默认值"兜底，绝不抛异常**
 （允许 `AUV_CFG_DIR` 指向缺新键的旧配置，也允许用例在内存里改 cfg）。
-
 通用读法：
-    sub(node, key)              取子节点；缺失/非 dict → {}
-    merge(node, defaults)       子节点 + 默认值 → 普通 dict（缺键/None 用默认值）
-    num(node, key, default)     取数值；缺失/非数值 → float(default)
-    nums(node, defaults)        把不全的节点规范化成完整表（缺键用 defaults 补）
-    flag(node, key, default)    取布尔（认 bool / "1|0|true|false|yes|no|on|off"）
-    pid_kw(node, defaults)      按 (kp,ki,kd,out_max,deadzone) 造 PID 参数（out_max 兼作 ±限幅）
-
+sub(node, key)              取子节点；缺失/非 dict → {}
+merge(node, defaults)       子节点 + 默认值 → 普通 dict（缺键/None 用默认值）
+num(node, key, default)     取数值；缺失/非数值 → float(default)
+nums(node, defaults)        把不全的节点规范化成完整表（缺键用 defaults 补）
+flag(node, key, default)    取布尔（认 bool / "1|0|true|false|yes|no|on|off"）
 **共用运动参数**（`comm.motion.*`：ball / gate / 转向脚本用的是同一份，任务段不再各抄一套）：
-    MOTION_DEFAULTS             代码兜底表（取值等于当前 cfg/comm.yaml 的 motion 段）
-    motion_node(key)            取共用表（dict）
-    motion_num(key)             取共用标量（float）
-
-分层：本模块**不 import 任何东西**（不读文件、不碰 yaml），所以
-`common/turn_deg.py` 这类要能脱离 cfg 独立跑的脚本可以安全地在模块级 import 它。
-"""
+MOTION_DEFAULTS             代码兜底表（取值等于当前 cfg/comm.yaml 的 motion 段）
+motion_node(key)            取共用表（dict）
+motion_num(key)             取共用标量（float）
+`common/motion/turn_deg.py` 这类要能脱离 cfg 独立跑的脚本可以安全地在模块级 import 它。"""
 from __future__ import annotations
 
 _FALSE = ("0", "false", "no", "off", "")
@@ -63,10 +56,7 @@ def nums(node, defaults):
 
 def flag(node, key, default=False):
     """取布尔开关：真 bool 原样；字符串按 1/0/true/false/yes/no/on/off 解析。
-
-    ⚠️ **不要用 `bool(node.get(k))`**：`bool("false")` 是 True —— 板端就因为这个
-    把 `kpt_mem.enable` 的一个拼写错值当成了"开"。这里统一按字符串语义解析。
-    """
+    把 `kpt_mem.enable` 的一个拼写错值当成了"开"。这里统一按字符串语义解析。"""
     if not isinstance(node, dict) or key not in node:
         return bool(default)
     v = node[key]
@@ -98,7 +88,6 @@ MOTION_DEFAULTS = dict(
     # 共用 PID（同一船/同一推进器；量纲都是"归一化偏差 ±1"）
     pid_sway=dict(kp=8.0, ki=0.01, kd=0.05, out_max=0.45, deadzone=0.05),
     pid_heave=dict(kp=1.0, ki=0.0, kd=0.15, out_max=1.0, deadzone=0.04),
-    # 共用速度档（归一化 DOF；⚠️ 任何档都不能落在执行器死区 (0, 0.138)）
     surge_fast=0.35,
     surge_slow=0.15,
     loss_inertia_surge=0.25,
@@ -125,7 +114,7 @@ def motion_pid(key):
 def motion(path, default=None):
     """读 `comm.motion.<path>`（ball / gate / 转向脚本共用的那份）。
 
-    延迟 import base.settings：本模块要保持"不碰文件"的性质（turn_deg 会在模块级 import 它）。
+    延迟 import base.cfg.settings：本模块要保持"不碰文件"的性质（turn_deg 会在模块级 import 它）。
     """
-    import base.settings as S
+    import base.cfg.settings as S
     return S.get("comm.motion." + path, default)

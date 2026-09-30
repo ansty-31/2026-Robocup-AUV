@@ -1,16 +1,12 @@
 # -*- coding: utf-8 -*-
 """recorder.py — AUV 相机录像脚本（调试用，不参与镜像封装）
-
 采集指定相机（sim/usb/mipi 占位）并保存视频：
-  后端 1（推荐，需 cv2）：mp4/avi（mp4v），带可选时间戳叠加
-  后端 2（无 cv2 时）：逐帧 .npy 落盘 + manifest.json，之后用
-       python3 recorder.py --assemble <帧目录> [-o out.mp4]  补出视频
-
+后端 1（推荐，需 cv2）：mp4/avi（mp4v），带可选时间戳叠加
+后端 2（无 cv2 时）：逐帧 .npy 落盘 + manifest.json，之后用
+python3 recorder.py --assemble <帧目录> [-o out.mp4]  补出视频
 示例（在工程根目录执行；手动模式一般直接用 ./manual.sh --record，本文件默认不参与）：
-  python3 manual/recorder.py --camera front --seconds 10 --out rec.mp4
-  python3 manual/recorder.py --camera front --frames 60 --out rec/rec.mp4 --overlay
-  python3 manual/recorder.py --assemble frames_dir --out rec.mp4
-"""
+python3 manual/recorder.py --camera front --seconds 10 --out rec.mp4
+python3 manual/recorder.py --assemble frames_dir --out rec.mp4"""
 import os as _os, sys as _sys
 if __package__ in (None, ""):        # 支持直接 python3 manual/xxx.py 运行
     _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
@@ -23,8 +19,8 @@ import time
 
 import numpy as np
 
-import base.settings as S
-from base.camera import create_camera
+import base.cfg.settings as S
+from base.hw.camera import create_camera
 
 try:
     import cv2

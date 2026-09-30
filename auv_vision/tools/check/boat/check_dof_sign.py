@@ -1,27 +1,12 @@
 # -*- coding: utf-8 -*-
-"""tools/check/check_dof_sign.py — **DOF 通道物理符号自检**（板端真实串口 + 相机）
-
-为什么需要它（**一次性标定工具**）：
-  转向环极性 σ 是**算出来的**（`common/turn_deg.py::yaw_sign()` =
-  固件常量 × `dof_map.yaw.sign` × `telemetry.yaw_sign`），不探向、不现场测；
-  这两个符号旋钮只能靠物理世界定一次 —— 相机是唯一不受 DOF/遥测符号影响的量，
-  本脚本就是定它们的那把尺子：量一次、写进 cfg，此后 σ 自动跟着走。
-  ⚠️ 别改回开环探向（白转十几度），也别在运行时现场测符号。
-
-  本脚本用**视觉**当独立真值：
-    命令 +yaw  ⇒ 若门在画面里**左移**(dx↓) 且 psi↓ ⇒ 符号正确；反之 ⇒ dof_map.yaw.sign: -1
-    命令 +sway ⇒ 若门在画面里**左移**(dx↓)        ⇒ 符号正确；反之 ⇒ dof_map.sway.sign: -1
-  同时打印遥测 yaw 的变化 ⇒ 顺带定出遥测侧符号 s（g·s 的那个 s）。
-
+"""tools/check/boat/check_dof_sign.py — **DOF 通道物理符号自检**（板端真实串口 + 相机）
+转向环极性 σ 是**算出来的**（`common/motion/turn_deg.py::yaw_sign()` =
+这两个符号旋钮只能靠物理世界定一次 —— 相机是唯一不受 DOF/遥测符号影响的量，
+本脚本就是定它们的那把尺子：量一次、写进 cfg，此后 σ 自动跟着走。
+本脚本用**视觉**当独立真值：
 用法（板端、水里、真实串口；**必须显式 --go 才会发推力**）：
-
-    AUV_SIM_MODE=0 python3 tools/check/check_dof_sign.py --dof sway --value 0.30 --hold 2.5
-    AUV_SIM_MODE=0 python3 tools/check/check_dof_sign.py --dof yaw  --value 0.40 --hold 2.0
-    AUV_SIM_MODE=0 python3 tools/check/check_dof_sign.py --dof sway --value 0.30 --dry   # 只看基线，不发推力
-
 输出：每相位的 dx/psi/遥测 yaw 均值差 → 结论 + 该改哪一行 cfg。
-安全：任何退出路径都会补发中性帧（try/finally + 信号处理）；hold 期间 50Hz 心跳。
-"""
+安全：任何退出路径都会补发中性帧（try/finally + 信号处理）；hold 期间 50Hz 心跳。"""
 from __future__ import annotations
 
 import argparse
@@ -29,15 +14,19 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# 工程根 = 向上第一个含 `cfg/` 的目录（**别写死层级**：脚本搬过位置，写死会静默指错）
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+while _ROOT != os.path.dirname(_ROOT) and not os.path.isdir(os.path.join(_ROOT, "cfg")):
+    _ROOT = os.path.dirname(_ROOT)
+sys.path.insert(0, _ROOT)
 
 import numpy as np                                                    # noqa: E402
 
-import base.settings as S                                             # noqa: E402
-from base.camera import create_camera                                 # noqa: E402
-from base.uart import UartController                                  # noqa: E402
-from gate.gate_detector import board_camera, build_gate_backend       # noqa: E402
-from gate.geometry import (gate_normal_angles_deg, gate_pose,         # noqa: E402
+import base.cfg.settings as S                                             # noqa: E402
+from base.hw.camera import create_camera                                 # noqa: E402
+from base.hw.uart import UartController                                  # noqa: E402
+from gate.percept.gate_detector import board_camera, build_gate_backend       # noqa: E402
+from gate.percept.geometry import (gate_normal_angles_deg, gate_pose,         # noqa: E402
                            object_points)
 
 KPT_MIN = 4          # 只有 4 角(full)才允许用来判方向（p3p 的 psi std 64~69° = 噪声）

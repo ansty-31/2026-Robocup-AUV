@@ -1,37 +1,22 @@
 # -*- coding: utf-8 -*-
-"""tools/analyze/ruler_calib.py — 「卷尺刻度靶子」解算器：从靶子读数求**等效焦距 fx 与距离口径 c**
-
+"""tools/analyze/calib/ruler_calib.py — 「卷尺刻度靶子」解算器：从靶子读数求**等效焦距 fx 与距离口径 c**
 要解决的问题
 ------------
 PnP 的深度 `z_meas = fx_cfg·W_cfg/Δu` 里有两个未知量在只看门框时**简并**：
-  · 相机/介质带来的有效焦距 `fx_med`（罩外是空气还是水，差 ~1.4×）；
-  · 门框的真实口径 `W_true`（外缘 0.77 还是管子中线 0.72）。
+· 相机/介质带来的有效焦距 `fx_med`（罩外是空气还是水，差 ~1.4×）；
+· 门框的真实口径 `W_true`（外缘 0.77 还是管子中线 0.72）。
 用**已知长度的卷尺刻度**当靶子就与门无关了 —— 但还需要一个距离口径 `c`：
-
-    Δu = fx·L / (z_tape + c)      L = 刻度跨度(m)，z_tape = 从固定零点量到的读数
-    ⇒ z_tape + c = fx·L/Δu        ← 对 (fx, c) **线性**，两条以上即可最小二乘
-
+Δu = fx·L / (z_tape + c)      L = 刻度跨度(m)，z_tape = 从固定零点量到的读数
 `c` 的物理含义：**光心相对你那个零点标记的偏置**（镜头/入瞳在零点前方则 c>0）。
-⚠️ 换零点只是把 `c` 变成另一个固定常数，**不会让它归零** —— 只能"零点固定成制度 + 实测一次"。
-
 输入
 ----
-`tools/analyze/label_corners.py --measure` 产出的 JSONL（`kind: "ruler"`，一行一个档位）。
 `z_tape` 优先取记录字段，缺了就从 `src`/文件名里解析（`ruler_z200` → 2.00 m）。
-
 用法
 ----
-    python3 tools/analyze/ruler_calib.py log/pnp_0922/ruler.jsonl
-    python3 tools/analyze/ruler_calib.py --report log/pnp_0922/ruler_air.md log/pnp_0922/ruler.jsonl
-    python3 tools/analyze/ruler_calib.py --skip 300 log/pnp_0922/ruler_wet.jsonl   # 丢掉最远档
-
+python3 tools/analyze/calib/ruler_calib.py log/pnp_0922/ruler.jsonl
 判据（runbook §A0b / §B4）
 -------------------------
-  · 每次解算至少 **2 档**（3 档可做留一校验）；`skew` 超过 ±2% 的档**先别用**（靶面没正对）；
-  · `fx` 的用途：与 `vision.camera.front.calibration` 里的 fx 比 ⇒ `k_med = fx_cfg/fx_med`；
-    水下解出的 `fx_water` 若与 cfg 差距在几个百分点内 ⇒ 现用标定在水里仍有效，米制阈值不用改；
-  · `c` 的用途：之后所有卷尺读数都按 `z_true = z_tape + c` 换算。
-"""
+· `c` 的用途：之后所有卷尺读数都按 `z_true = z_tape + c` 换算。"""
 from __future__ import annotations
 
 import argparse
@@ -41,7 +26,10 @@ import os
 import re
 import sys
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 工程根 = 向上第一个含 `cfg/` 的目录（**别写死层级**：脚本搬过位置，写死会静默指错）
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+while _ROOT != os.path.dirname(_ROOT) and not os.path.isdir(os.path.join(_ROOT, "cfg")):
+    _ROOT = os.path.dirname(_ROOT)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
@@ -50,11 +38,7 @@ import numpy as np                                              # noqa: E402
 
 # ------------------------------------------------------------------ 读入
 def z_from_name(s):
-    """`...z150...` → 1.50 m。
-
-    ⚠️ 靶子图是 `log/pnp_0922/ruler_z200/cap_001.jpg` —— 真值在**目录名**上（`cap_001.jpg` 里没有），
-    所以按"最后两段路径"扫，别只看 basename。
-    """
+    """`...z150...` → 1.50 m。"""
     parts = [p for p in str(s or "").replace("\\", "/").split("/") if p]
     tail = "/".join(parts[-2:]) if len(parts) >= 2 else (parts[0] if parts else "")
     m = re.search(r"z(\d{2,4})", tail)
@@ -62,11 +46,7 @@ def z_from_name(s):
 
 
 def du_from_points(p):
-    """由三个刻度点算跨度(px)：**欧氏距离**，任意方向都成立。
-
-    ⚠️ 别改回 `p[2][0]-p[0][0]`（x 差）—— 卷尺竖着放时它直接得 0。靶面与光轴垂直时
-    `z=const` 平面到图像是均匀缩放，所以欧氏距离 = `(f/z)·L`，与靶线在画面里的方向无关。
-    """
+    """由三个刻度点算跨度(px)：**欧氏距离**，任意方向都成立。"""
     q = np.asarray(p, dtype=np.float64).reshape(-1, 2)
     if q.shape[0] < 2:
         return None
@@ -75,11 +55,8 @@ def du_from_points(p):
 
 def axis_of(rec):
     """这条读数量到的是 `fx` 还是 `fy`。
-
-    靶线水平 ⇒ 量到 fx；竖直 ⇒ fy；斜着 ⇒ 两者混合（45° 附近最糟）。
     判据用 `label_corners --measure` 记下的 `theta_deg`（画面里的倾角）。
-    没有 theta（手写记录）时按 `axis` 键，再不行默认 x。
-    """
+    没有 theta（手写记录）时按 `axis` 键，再不行默认 x。"""
     th = rec.get("theta_deg")
     if th is not None:
         th = abs(float(th)) % 180.0
@@ -111,7 +88,6 @@ def load_records(paths):
                         skipped += 1
                         continue
                     du = r.get("du")
-                    # ⚠️ **优先用 `p` 重算**：`du` 可能是把竖向跨度算成 x 差的旧版本写下的，
                     #    三点才是原始观测。两者不一致时以 `p` 为准，这样老记录自动被治好。
                     if r.get("p"):
                         du = du_from_points(r["p"])            # 欧氏距离（任意方向）
@@ -129,11 +105,10 @@ def load_records(paths):
                            "skew": float(r.get("skew") or 0.0),
                            "mid_frac": r.get("mid_frac"), "off_mid": r.get("off_mid"),
                            "theta_deg": r.get("theta_deg")}
-                    # ⚠️ 同理：三点在场就**重算**斜视/中点偏离。老版本在 du≈0 时把 skew
                     #    算成 3.0（300%），留在记录里会污染报告。
                     if r.get("p"):
                         try:
-                            from tools.analyze.label_corners import span_stats
+                            from tools.analyze.calib.label_corners import span_stats
                             st = span_stats(r["p"])
                             rec.update({"skew": st["skew"], "mid_frac": st["mid_frac"],
                                         "off_mid": st["off_mid"], "theta_deg": st["theta_deg"]})
@@ -219,7 +194,6 @@ def solve(recs):
     if len(recs) >= 3:
         for i in range(len(recs)):
             sub = [r for j, r in enumerate(recs) if j != i]
-            # ⚠️ 子集必须**保留每个轴的档**，否则那个焦距在子集里根本没有约束
             #    （丢掉某轴唯一的档后，留一会给出 fx=-223 这种垃圾）。
             if {r["axis"] for r in sub} != set(axes):
                 continue
@@ -240,7 +214,7 @@ def solve(recs):
 def cfg_focal(default=None):
     """cfg 里的 `(fx, fy)`（读不到就返回 default，不抛）。"""
     try:
-        import base.settings as S
+        import base.cfg.settings as S
         p = S.get("vision.camera.front.calibration", None)
         for cand in (p, os.path.join(_ROOT, "cfg", os.path.basename(p or ""))):
             if cand and os.path.exists(cand):
@@ -267,7 +241,7 @@ def load_gate(paths):
     复用 `pnp_calib.parse_gt_from_name` 的命名约定（`pnp_z150.jsonl` → 1.50 m）。
     返回 [{src, z, du, n}]，`du` = 每帧 `|x_TR − x_TL|` 的中位数（门框横向跨度）。
     """
-    from tools.analyze.pnp_calib import parse_gt_from_name
+    from tools.analyze.calib.pnp_calib import parse_gt_from_name
     out = []
     for pat in paths:
         for p in sorted(glob.glob(pat)) or [pat]:
@@ -301,17 +275,10 @@ def load_gate(paths):
 
 def solve_joint(ruler, gate, ratio=1.0, c_grid=None):
     """靶子 + 门框**联立**解 `(fx, fy, c, W_eff)`。
-
     靶子 `Δu = f_轴·L/(z+c)`（水平靶线给 `fx`、竖直给 `fy`）；门 `Δu = fx·W/(z+c)`。
-    固定 `c` 时**线性** ⇒ 对 `c` 一维扫描，每个 `c` 闭式解其余参数，取相对残差最小者。
-
     未知量按手头数据自动决定：
-      · 靶子只有竖向档 → `(fy, fx·W)`，并用 `fx = ratio·fy` 联结（`ratio` = cfg 的 fx/fy）；
-      · 靶子有横向档 → 直接解 `fx`，**不需要**任何等比假设。
-
-    ⚠️ 为什么必须联立：**单档靶子只有 1 个观测**，`(f, c)` 是整条曲线（简并）；
-    门框的几档提供额外的"比例"信息，把 `c` 与 `W_eff` 一起压出来。
-    """
+    · 靶子只有竖向档 → `(fy, fx·W)`，并用 `fx = ratio·fy` 联结（`ratio` = cfg 的 fx/fy）；
+    门框的几档提供额外的"比例"信息，把 `c` 与 `W_eff` 一起压出来。"""
     if not gate:
         raise ValueError("联立解需要门框 dump（--gate）")
     if not ruler:
@@ -363,7 +330,7 @@ def solve_joint(ruler, gate, ratio=1.0, c_grid=None):
 
 
 def report_joint(ruler, gate, best, fx_cfg_value=None, title="靶子+门框 联立解"):
-    A = ["# %s（`tools/analyze/ruler_calib.py --gate`）\n" % title]
+    A = ["# %s（`tools/analyze/calib/ruler_calib.py --gate`）\n" % title]
     A.append("模型：靶子 `Δu = fy·L/(z+c)`；门框 `Δu = fx·W_eff/(z+c)`，`fx/fy` 取自 cfg。")
     A.append("固定 `c` 时对 `(fy, fx·W_eff)` 线性 ⇒ 一维扫描 `c`，取相对残差最小者。\n")
     A.append("| 观测 | z_tape (m) | 长度/宽度 | Δu 实测 (px) | Δu 预测 (px) | 残差 (px) |")
@@ -409,7 +376,7 @@ def report_joint(ruler, gate, best, fx_cfg_value=None, title="靶子+门框 联�
 # ------------------------------------------------------------------ 报告
 def report(recs, skipped, res, fx_cfg_value, title="卷尺靶子解算", fy_cfg_value=None):
     A = []
-    A.append("# %s（`tools/analyze/ruler_calib.py`）\n" % title)
+    A.append("# %s（`tools/analyze/calib/ruler_calib.py`）\n" % title)
     A.append("模型：`Δu = f·L/(z_tape + c)` ⇒ `z_tape + c = f·L/Δu`（对 `f, c` 线性，最小二乘）。")
     A.append("**水平靶线量到 `fx`、竖直靶线量到 `fy`** —— 混着量就同时解两个，"
              "顺便验证「罩是否各向异性」（不再需要假设 `fx/fy` 等比）。\n")
@@ -459,7 +426,6 @@ def report(recs, skipped, res, fx_cfg_value, title="卷尺靶子解算", fy_cfg_
                              100 * (max(v) - min(v)) / 2 / res["focal"][ax]))
         A.append("⇒ " + "、".join(spread) + "、c ±%.3f m —— 超过判据（f ±2%%，c ±3 cm）"
                  "说明档位分布不够开或标注有系统偏差。" % ((max(c_s) - min(c_s)) / 2))
-    # ⚠️ 斜视告警按**全部输入读数**判（包括被你 `--skip` 或被过滤掉的那些档），
     #    否则"歪掉的那一档"正好会从报告里消失 —— 那是最需要看见的信息。
     bad = [r for r in recs if abs(float(r.get("skew") or 0.0)) > 0.02]
     if bad:

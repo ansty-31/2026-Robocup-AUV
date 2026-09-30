@@ -1,19 +1,15 @@
 # -*- coding: utf-8 -*-
-"""tests/tasks/test_gate_postproc.py — 解码后处理（规范 §4）的无硬件用例
-
-覆盖 `gate/gate_postproc.py` 四条规则里的可离线部分：
-  ① 可信角点（V_MIN 口径） ② 四角几何合法（顺序 + 不自交）
-  ③ 重复框去重（**不看包含**） ④ 选门键（near / corner 两种策略）
-外加一条**配置守卫**：代码兜底 == cfg（与 test_gate_defaults_match_cfg 同一约定）。
-
-这些是**逻辑**证明：能证明规则按写的那样跑，**不能**证明它在水里/板端的效果。
-"""
+"""tests/tasks/gate/test_gate_postproc.py — 解码后处理（规范 §4）的无硬件用例
+覆盖 `gate/percept/gate_postproc.py` 四条规则里的可离线部分：
+① 可信角点（V_MIN 口径） ② 四角几何合法（顺序 + 不自交）
+③ 重复框去重（**不看包含**） ④ 选门键（near / corner 两种策略）
+外加一条**配置守卫**：代码兜底 == cfg（与 test_gate_defaults_match_cfg 同一约定）。"""
 import numpy as np
 import pytest
 
-import base.settings as S
-from common.detector import Det
-from gate import gate_postproc as pp
+import base.cfg.settings as S
+from common.vision.detector import Det
+from gate.percept import gate_postproc as pp
 
 FW, FH = 1280, 720
 
@@ -121,10 +117,7 @@ def test_dedup_config_can_disable_by_edges():
 # --------------------------------------------------------------------------
 def test_apply_drops_illegal_quad_and_preserves_order():
     """规范 §4②：**先 L/R 归一**（左右标反 → 交换后保留），归一救不回来的才丢；保序。
-
-    只有"上下也反/自交"这种真的非法才丢；左右反不算非法（模型约一半实例会标反，
-    旧行为会把近门整条丢掉，沿革见 doc/_注释历史_fragments/base_tests.md）。
-    """
+    只有"上下也反/自交"这种真的非法才丢；左右反不算非法（模型约一半实例会标反，"""
     good = _det(score=0.9, x=100, y=100, w=200, h=150)
     lr_swapped = _det(score=0.8, x=400, y=200, w=200, h=150,
                       kpts=[(600, 200), (400, 200), (400, 350), (600, 350)])  # 左右反 → 归一
@@ -146,7 +139,6 @@ def test_lr_normalize_skips_placeholder_and_single_side():
               confs=(0.9, 0.9, 0.9, 0.9))     # TL 是 (0,0) 占位（模型没找到时会这样）
     assert pp.visible_mask(ph)[0] == False, "(0,0) 占位不算可见"
     # 占位**不参与**求均值：真左列只剩 BL(600)，右列 400/400 ⇒ 确实标反 ⇒ 必须交换。
-    # 若把占位的 x=0 算进去，均值变成 300 ≤ 400 ⇒ 会被误判成"没标反"而漏掉这次归一。
     assert pp.lr_normalize(ph) is True
     one = _det(kpts=[(600, 200), (0, 0), (0, 0), (600, 350)],
                confs=(0.9, 0.0, 0.0, 0.9))     # 只有左列可见
@@ -211,18 +203,16 @@ def test_pick_does_not_touch_safety_defaults():
 
 
 # --------------------------------------------------------------------------
-# ⑦ 解码后端接线（不加载真实模型：把 _init_backend 换成空实现）
 # --------------------------------------------------------------------------
 def test_gate_backend_wires_det_conf_and_postproc(monkeypatch):
-    from gate.gate_decode import GateKeypointBackend
-    from gate.geometry import CameraModel
+    from gate.percept.gate_decode import GateKeypointBackend
+    from gate.percept.geometry import CameraModel
 
     monkeypatch.setattr(GateKeypointBackend, "_init_backend", lambda self: None)
     cam = CameraModel.pinhole(1280, 720, fx=1024.0, fy=1152.0, cx=702.0, cy=409.0)
     b = GateKeypointBackend(path="models/nonexistent.bin", labels=["gate"],
                             kpt_order=["TL", "TR", "BR", "BL"], camera=cam)
     # 候选阈值走 gate 专用的 det.conf（**不是**共用的 model.score_threshold）
-    # ⚠️ 别写成"两者必须不相等"：两者取值可以巧合相同，那种断言会假红。
     #    这里改成**显式改两个值、看谁生效**：
     assert b._det_conf == float(S.vision.gate.det.conf)
     monkeypatch.setitem(S.vision.gate.det, "conf", 0.71)
@@ -243,7 +233,7 @@ def test_gate_backend_wires_det_conf_and_postproc(monkeypatch):
 
 # --------------------------------------------------------------------------
 # ⑧ 解码→后处理 集成（合成张量，不加载模型）
-#    形状/语义照 doc/gate_pose_decode_spec.md §2/§3：NHWC、kpt x/y 已是 cell 坐标、v 是 raw logit
+#    形状/语义照 doc/设计/gate_pose_decode_spec.md §2/§3：NHWC、kpt x/y 已是 cell 坐标、v 是 raw logit
 # --------------------------------------------------------------------------
 INPUT, G = 640, 80
 STRIDE = INPUT // G
@@ -268,7 +258,7 @@ def _put(outs, gx, gy, dist=3, score_logit=6.0, cells=None, vs=None):
 
 
 def _decode(outs, conf=0.6, vis_thr=0.5):
-    from gate.gate_decode import decode_yolo11_kpt
+    from gate.percept.gate_decode import decode_yolo11_kpt
     return decode_yolo11_kpt(outs, ["gate"], FW, FH, conf=conf, iou=0.45,
                              input_w=INPUT, input_h=INPUT, vis_thr=vis_thr)
 
@@ -285,7 +275,7 @@ def test_decode_then_postproc_keeps_legal_quad():
     assert len(kept) == 1, "四角合法 + 高 v 的实例必须留下"
     d = kept[0]
     assert pp.n_trusted(d, 0.8) == 4
-    from gate.gate_frontend import parse_kpt_mode, MODE_FULL
+    from gate.percept.gate_frontend import parse_kpt_mode, MODE_FULL
     assert parse_kpt_mode(d.kpts, d.kpt_conf, 0.8)[0] == MODE_FULL
 
 
@@ -312,7 +302,7 @@ def test_decode_low_v_corner_is_degraded_not_dropped():
     assert len(dets) == 1
     assert pp.n_trusted(dets[0], 0.8) == 2, "低 v 的两个角点不该算可信"
     assert len(pp.apply(dets, conf_thr=0.8)) == 1, "门框不全 → 降级，不是丢帧"
-    from gate.gate_frontend import parse_kpt_mode, MODE_WIDTH
+    from gate.percept.gate_frontend import parse_kpt_mode, MODE_WIDTH
     assert parse_kpt_mode(dets[0].kpts, dets[0].kpt_conf, 0.8)[0] == MODE_WIDTH
 
 

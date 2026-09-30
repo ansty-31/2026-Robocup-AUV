@@ -1,28 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """check_domain.py — 「识别方案（域）」指纹与核对（本地/板端都能跑，不入运行时）
-
 工程里同时存在**两套识别方案**，它们必须与门权重成对出现（跨域掉点）：
-
-    | 域 | 链路（`vision.image.chain`） | 门权重 | clahe_clip |
-    |---|---|---|---|
-    | A（原方案） | remap@720p → resize640 → enhance | AUV_4 `d38b803e…` | 0.5 |
-    | D（新方案） | resize640 → enhance → remap@640 | 阶段一 v3 `ca5ba84f…` | 0 |
-
-板端两个仓库的分工见 `tools/README.md` §6。本脚本回答三个问题：
-
-    python3 tools/check/check_domain.py                 # ① 我这个仓库现在是哪一域？
-    python3 tools/check/check_domain.py --frames DIR    # ② 本域权重在样本帧上的角点置信度分布
-    python3 tools/check/check_domain.py \
-        --equiv-ref bak/Adomain_ref/preprocess.py       # ③ A 域改造前后是否逐像素一致
-
-③ 的用法：`--equiv-ref` 给一份**参考实现**（例如改造前旧仓库的 `common/preprocess.py`）。
-本脚本会用**相同参数**（size/gains/clip/gamma/标定）跑"参考实现 / 本仓库 A 序 / 本仓库 D 序"，
-输出三者的逐像素差 —— 参考 vs A 序应当是 0（证明"原识别方案"没被改动），
-A vs D 的差则是**跨域差**的量级（拿它判断"两个仓库结果不可直接比较"）。
-
-退出码：0=一致/无异常；1=域指纹自相矛盾（如 chain=D 却配 AUV_4 权重）或等价性超差。
-"""
+| 域 | 链路（`vision.image.chain`） | 门权重 | clahe_clip |
+退出码：0=一致/无异常；1=域指纹自相矛盾（如 chain=D 却配 AUV_4 权重）或等价性超差。"""
 from __future__ import annotations
 
 import argparse
@@ -35,7 +16,6 @@ import numpy as np
 
 _ROOT_UP = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-
 def _project_root():
     here = os.path.dirname(os.path.abspath(__file__))
     for _ in range(4):
@@ -44,7 +24,6 @@ def _project_root():
         here = os.path.dirname(here)
     return _ROOT_UP
 
-
 _ROOT = _project_root()
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
@@ -52,7 +31,6 @@ if _ROOT not in sys.path:
 #: 代次指纹：域 ↔ 门权重 md5 前缀（改动权重文件时**必须**同步这里与 tools/README.md §6）
 DOMAIN_WEIGHTS = {
     "A": ("d38b803e", "AUV_4（原识别方案）"),
-    # ★ 2026-09-28：D 域门权重换代 stage1_v3（ca5ba84f，3,938,806 B）。
     #   上一代 `g240_i16`（ef52c18b）已退居 bak/，只在回退时才会再出现。
     "D": ("ca5ba84f", "阶段一 v3（新识别方案）"),
 }
@@ -61,7 +39,6 @@ DOMAIN_EXPECT = {
     "A": {"chain": "A", "clahe_clip": 0.5},
     "D": {"chain": "D", "clahe_clip": 0.0},
 }
-
 
 def md5_of(path):
     if not path or not os.path.exists(path):
@@ -72,17 +49,15 @@ def md5_of(path):
             h.update(chunk)
     return h.hexdigest()
 
-
 def load_module(path, name):
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
-
 def fingerprint():
     """打印本仓库的域指纹，返回 (chain, gate_path, gate_md5, 是否自相矛盾)。"""
-    import base.settings as S
+    import base.cfg.settings as S
 
     chain = str(S.get("vision.image.chain", "D")).strip().upper()
     clahe = S.vision.image.clahe_clip
@@ -123,11 +98,10 @@ def fingerprint():
         print("  ✓ 域指纹自洽（chain / clahe / 权重三代次对得上）")
     return chain, gate, gm, bool(bad)
 
-
 def measure(frames_dir, limit=None):
     """样本帧上的角点置信度（v）分布 —— 用来判断该域权重的工作点。"""
     import cv2
-    from gate.gate_detector import build_gate_backend
+    from gate.percept.gate_detector import build_gate_backend
 
     files = []
     for d in (frames_dir,) if isinstance(frames_dir, str) else frames_dir:
@@ -163,12 +137,11 @@ def measure(frames_dir, limit=None):
               % (thr, 100.0 * (a.min(axis=1) >= thr).mean()))
     return 0
 
-
 def equiv(ref_path, frames_dir, limit=4):
     """参考实现 vs 本仓库 A 序 vs 本仓库 D 序：逐像素差。"""
     import cv2
-    from common.preprocess import ModelPreprocessor
-    import base.settings as S
+    from common.vision.preprocess import ModelPreprocessor
+    import base.cfg.settings as S
 
     ref_mod = load_module(ref_path, "preprocess_ref")
     calib = S.vision.camera.front.calibration
@@ -206,7 +179,6 @@ def equiv(ref_path, frames_dir, limit=4):
     print("  → A vs D 跨域差：全帧最大差 = %d（两仓库结果不可直接逐帧比较）" % worst_ad)
     return 0 if worst_ref <= 1 else 1
 
-
 def main():
     ap = argparse.ArgumentParser(description="识别方案（域）指纹与核对")
     ap.add_argument("--frames", default=None,
@@ -231,7 +203,6 @@ def main():
     if a.frames:
         rc = max(rc, measure(a.frames, a.limit))
     return rc
-
 
 if __name__ == "__main__":
     sys.exit(main())

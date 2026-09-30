@@ -1,19 +1,11 @@
 # -*- coding: utf-8 -*-
-"""tools/analyze/analyze_heading.py — 从角点 dump 估「机身正不正」能不能测（航向估计的噪声底）。
-
+"""tools/analyze/log/analyze_heading.py — 从角点 dump 估「机身正不正」能不能测（航向估计的噪声底）。
 问题：ALIGN 里 yaw 可以用 `dxn` 驱动 —— 那是**方位控制器**
-（把门拉到光轴上 = 机头指向门），**不是航向控制器**（机身与门法向平行）。所以"yaw 到底
-有没有把机身调正"没法用 dxn 判断。
-
 理论上位姿档能测：门法向 n = R·[0,0,1]（相机系），
-    航向误差 θ_yaw = atan2(n_x, n_z)、俯仰 θ_pitch = atan2(n_y, n_z)
 **但能不能用取决于噪声**：角点 RMS 有 10~18px，平面目标的转角对像素噪声很敏感。
-本工具就是用**真实录制的角点**量出这个噪声底，再决定：
-    * 噪声 << 待修的角度（~10°）→ 可以加"航向 → yaw"通道；
-    * 噪声同量级 → 测不准 → 老老实实以 sway 为主（并把估计打进日志继续观察）。
-
-用法：python3 tools/analyze/analyze_heading.py <dump.jsonl> [...]
-"""
+* 噪声 << 待修的角度（~10°）→ 可以加"航向 → yaw"通道；
+* 噪声同量级 → 测不准 → 老老实实以 sway 为主（并把估计打进日志继续观察）。
+用法：python3 tools/analyze/log/analyze_heading.py <dump.jsonl> [...]"""
 from __future__ import annotations
 
 import json
@@ -21,20 +13,22 @@ import os
 import statistics as st
 import sys
 
-# 工程根 = tools/<类>/x.py 往上**三**级（分类重整后本脚本深了一层）
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# 工程根 = 向上第一个含 `cfg/` 的目录（**别写死层级**：脚本搬过位置，写死会静默指错）
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+while _ROOT != os.path.dirname(_ROOT) and not os.path.isdir(os.path.join(_ROOT, "cfg")):
+    _ROOT = os.path.dirname(_ROOT)
+sys.path.insert(0, _ROOT)
 
 import numpy as np                                              # noqa: E402
-import base.settings as S                                       # noqa: E402
-from gate.geometry import (object_points, gate_pose,            # noqa: E402
+import base.cfg.settings as S                                       # noqa: E402
+from gate.percept.geometry import (object_points, gate_pose,            # noqa: E402
                            plane_from_pose)
-from gate.gate_detector import board_camera                     # noqa: E402
+from gate.percept.gate_detector import board_camera                     # noqa: E402
 
 CONF_THR = float(S.get("vision.gate.keypoint.conf_thr", 0.7) or 0.7)
 REPROJ = float(S.get("vision.gate.pnp.reproj_px", 20.0) or 20.0)
 Z_MIN = float(S.get("vision.gate.pnp.z_min", 0.2) or 0.2)
 Z_MAX = float(S.get("vision.gate.pnp.z_max", 15.0) or 15.0)
-
 
 def _ema(xs, k):
     """因果 EMA（等价于一阶低通），返回滤波后的序列。"""
@@ -45,10 +39,8 @@ def _ema(xs, k):
         out.append(s)
     return out
 
-
 def _deg(v):
     return float(np.degrees(v))
-
 
 def main():
     files = sys.argv[1:]
@@ -63,8 +55,8 @@ def main():
     print("门槛：conf_thr=%.2f  reproj≤%.0fpx  z∈[%.1f,%.1f]"
           % (CONF_THR, REPROJ, Z_MIN, Z_MAX))
     print("参考：门 %.2fx%.2f m；10° 航向误差在 z=1.5m 处 = 横向 %.2f m"
-          % (float(S.get("vision.gate.geometry.frame_w", 0.7)),
-             float(S.get("vision.gate.geometry.frame_h", 0.5)),
+          % (float(S.get("vision.gate.percept.geometry.frame_w", 0.7)),
+             float(S.get("vision.gate.percept.geometry.frame_h", 0.5)),
              1.5 * np.tan(np.radians(10.0))))
 
     for path in files:
@@ -102,7 +94,7 @@ def main():
                 rolls.append(_deg(np.arctan2(R[1, 0], R[0, 0])))
                 zs.append(float(np.asarray(tv).ravel()[2]))
                 dxs.append(float(np.asarray(tv).ravel()[0]))
-                from gate.geometry import reproj_rms
+                from gate.percept.geometry import reproj_rms
                 rmss.append(reproj_rms(cam, obj3[ids], k[ids], rv, tv))
         print("\n=== %s （%d 帧有角点，%d 帧解出位姿）==="
               % (os.path.basename(path), n_frames, len(yaws)))
@@ -140,7 +132,6 @@ def main():
         print("  ⇒ 判据：噪声底 <2° 才能拿它做 yaw 闭环；3~8° 只能做『慢慢校』；"
               ">8° 等于测不出来")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

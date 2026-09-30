@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""tools/analyze/analyze_kpt_dump.py — 从 preview_detect --dump 的 JSONL 看角点可得率与 PnP 命中率。
+"""tools/analyze/log/analyze_kpt_dump.py — 从 preview_detect --dump 的 JSONL 看角点可得率与 PnP 命中率。
 
 用途：回答"放宽哪个阈值能真正提高位姿可用率"（conf_thr / vis_thr / reproj_px）。
-用法：python3 tools/analyze/analyze_kpt_dump.py <dump.jsonl> [more.jsonl ...]
+用法：python3 tools/analyze/log/analyze_kpt_dump.py <dump.jsonl> [more.jsonl ...]
 """
 from __future__ import annotations
 
@@ -12,14 +12,17 @@ import os
 import statistics as st
 import sys
 
-# 工程根 = tools/<类>/x.py 往上**三**级（分类重整后本脚本深了一层）
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# 工程根 = 向上第一个含 `cfg/` 的目录（**别写死层级**：脚本搬过位置，写死会静默指错）
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+while _ROOT != os.path.dirname(_ROOT) and not os.path.isdir(os.path.join(_ROOT, "cfg")):
+    _ROOT = os.path.dirname(_ROOT)
+sys.path.insert(0, _ROOT)
 
 import numpy as np                                              # noqa: E402
-import base.settings as S                                       # noqa: E402
-from gate.geometry import (object_points, _iter_candidates,     # noqa: E402
+import base.cfg.settings as S                                       # noqa: E402
+from gate.percept.geometry import (object_points, _iter_candidates,     # noqa: E402
                            reproj_rms, gate_pose)
-from gate.gate_detector import board_camera                     # noqa: E402
+from gate.percept.gate_detector import board_camera                     # noqa: E402
 
 
 def main():
@@ -31,8 +34,8 @@ def main():
     obj3 = object_points()
     print("相机 fx=%.1f cx=%.1f cy=%.1f  门框 %.2fx%.2f m"
           % (cam.fx, cam.cx, cam.cy,
-             float(S.get("vision.gate.geometry.frame_w", 0.7)),
-             float(S.get("vision.gate.geometry.frame_h", 0.5))))
+             float(S.get("vision.gate.percept.geometry.frame_w", 0.7)),
+             float(S.get("vision.gate.percept.geometry.frame_h", 0.5))))
     for path in files:
         if not os.path.exists(path):
             print("跳过（不存在）: %s" % path)

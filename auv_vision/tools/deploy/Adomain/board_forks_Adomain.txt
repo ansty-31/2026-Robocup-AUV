@@ -27,19 +27,19 @@ models/gate_kpt_stage1_g240_i16_bayese_640x640_nv12.bin
 # ★ 2026-09-27「A 域上游 + 新内参 PnP + 几何映射」——**目前只在板端实现**（用户定：
 #   先不影响本地项目）。下面这些文件在旧仓库里被就地改过，**必须跳过**，否则下次同步
 #   本地的最新版会把板端改动冲掉：
-#     gate/gate_decode.py   接入 common/domain_map.py（解码后把角点从检测域搬到 PnP 域）
-#     gate/gate_detector.py board_camera() 改用 calibration_pnp（新内参）做 PnP
-#     base/settings.py      _PATH_KEYS 收编 camera.front.calibration_pnp
+#     gate/percept/gate_decode.py   接入 common/domain_map.py（解码后把角点从检测域搬到 PnP 域）
+#     gate/percept/gate_detector.py board_camera() 改用 calibration_pnp（新内参）做 PnP
+#     base/cfg/settings.py      _PATH_KEYS 收编 camera.front.calibration_pnp
 #     tests/...             三条用例改成域感知（老参数 ⇒ 不同相位序列/帧预算/mode）
 #   另外这两个是**板端新增、本地还没有**的文件（不在清单里，同步不会动它们）：
 #     common/domain_map.py · tools/check/check_domain_map.py
 #   ⚠️ 等这套实验验收、决定并进本地项目时：把下面 6 行**删掉**，把两个新文件并进本地仓库，
 #      再跑一次 `bash tools/deploy/sync_Adomain_repo.sh` 让两边重新逐字节一致。
 # ============================================================================
-gate/gate_decode.py
-gate/gate_detector.py
-base/settings.py
-tests/tasks/test_gate_flow.py
-tests/tasks/test_gate_postproc.py
-tests/tasks/test_gate_vision.py
+gate/percept/gate_decode.py
+gate/percept/gate_detector.py
+base/cfg/settings.py
+tests/tasks/gate/test_gate_flow.py
+tests/tasks/gate/test_gate_postproc.py
+tests/tasks/gate/test_gate_vision.py
 tests/tooling/test_cfg_yaml_head.py

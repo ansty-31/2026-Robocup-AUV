@@ -38,7 +38,7 @@ tests/
 │                            + `HeadingAligner`（测→转→停稳→再测、迭代上限、p3p 不进滤波器、
 │                            新鲜度、丢门中止、一键关闭）
 └── tooling/              ③ 工具层（守 `tools/` 下的脚本）
-    └── test_pnp_calib.py    `tools/analyze/pnp_calib.py` 的合成往返：文件名真值解析、标尺反演
+    └── test_pnp_calib.py    `tools/analyze/calib/pnp_calib.py` 的合成往返：文件名真值解析、标尺反演
                              （故意写错门宽 20% → 必须报 a≈1.2 并建议新 `frame_w`）、t_x/t_y 尺度与符号、
                              psi≈−yaw、p3p 分类与深度偏差、CSV/报告行数
 ```

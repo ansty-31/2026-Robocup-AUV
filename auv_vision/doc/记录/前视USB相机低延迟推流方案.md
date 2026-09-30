@@ -12,7 +12,7 @@
 
 | 项 | 结论 |
 |:---|:---|
-| 延迟最低的做法 | **不做任何转码**：相机直接输出 MJPEG，原样透传（已落地到 `manual/stream.py` + `base/camera.py` + `manual.sh`） |
+| 延迟最低的做法 | **不做任何转码**：相机直接输出 MJPEG，原样透传（已落地到 `manual/stream.py` + `base/hw/camera.py` + `manual.sh`） |
 | 首选链路 | 板端 `./manual.sh`（手动模式：遥控桥+录像+推流）→ PC `python3 -m manual.stream view` / `ffplay -f mjpeg udp://@:5000` |
 | 实测端到端延迟 | 采集侧 48.8 fps（**裸 JPEG 零转码**，见 §17）；H.264 硬编约 90~130 ms（方案 B）；TROS websocket 200~500 ms（方案 D，仅调试） |
 | 实测带宽 | 本相机 720p MJPG **140 KB/帧** → 30 fps 推流约 **28~29 Mbps**（千兆系缆毫无压力；WiFi/百兆不行） |
@@ -351,7 +351,7 @@ X5 的 ENCODER API 官方支持 **H264/H265/MJPEG**，两条落地路径：
 
 ## 8. 方案 C：与识别/录像共存（**已落地**）
 
-> ✅ **已实现**：`base/camera.py` 里 `UsbCamera` 打开相机时顺带把原始 JPEG 交给推流器（`stream_server.MjpegPusher`），
+> ✅ **已实现**：`base/hw/camera.py` 里 `UsbCamera` 打开相机时顺带把原始 JPEG 交给推流器（`stream_server.MjpegPusher`），
 > 开关是 `cfg/vision.yaml` 的 `stream.enable`。因此 `main.py`（识别）与 `manual/recorder.py`（录像）**各自跑时都会自动推流**，
 > 不额外打开相机、不抢设备。板端实测：录像 150 帧落盘的同时推送 139 帧，无冲突（§17.2）。
 > 下面保留设计推导与备选实现。
@@ -640,7 +640,7 @@ ffprobe -v error -select_streams v -show_entries packet=size -of csv=p=0 probe.m
 | 测量项 | 结果 | 说明 |
 |:---|:---|:---|
 | OpenCV 默认协商（未改前） | **YUYV 1280x720 @ 9.1 fps** | `cv2.VideoCapture(0)` + 设宽高 —— 识别链路实际只有 9fps |
-| 强制 MJPG 后（`base/camera.py` 已修） | FOURCC=MJPG、`negotiated_fps=60`，读取 **48.8 fps** | `CONVERT_RGB=0` 拿原始 JPEG，识别侧再 `imdecode`（约 18.6 ms/帧） |
+| 强制 MJPG 后（`base/hw/camera.py` 已修） | FOURCC=MJPG、`negotiated_fps=60`，读取 **48.8 fps** | `CONVERT_RGB=0` 拿原始 JPEG，识别侧再 `imdecode`（约 18.6 ms/帧） |
 | ffmpeg `-c:v copy` 直通录制 | 594 帧/10s ≈ **59.4 fps** | 单帧 **中位 145 KB / 峰 148 KB**；约 **69 Mbps** |
 | 推流（30fps 限速，原始 JPEG 转发） | **24.8 fps / 28~29 Mbps**，丢积压 0 | 相机 60fps 出帧 → 每 2 帧推 1 帧 |
 | 板端 CPU（推流进程） | **≈ 11% 单核** | 零转码；系统 `sy 4.4%` 主要是 socket 发送 |
@@ -651,7 +651,7 @@ ffprobe -v error -select_streams v -show_entries packet=size -of csv=p=0 probe.m
 
 ### 17.3 已落地的实现
 
-1. **`base/camera.py`（识别/录像的取流入口，已改）**
+1. **`base/hw/camera.py`（识别/录像的取流入口，已改）**
    - 强制 `MJPG`、`CONVERT_RGB=0`（拿原始 JPEG），`read()` 仍返回 BGR（调用方无感）；
    - 首帧探测不是 JPEG 时自动回退 BGR（兼容不支持 raw 输出的相机）；
    - 每次 `read()` 顺手把原始 JPEG 交给推流器（`get_stream_pusher()`，非阻塞、只保留最新帧），
@@ -668,7 +668,7 @@ ffprobe -v error -select_streams v -show_entries packet=size -of csv=p=0 probe.m
    （`camera.py`/`settings.py`/`uart.py`/`tasks.py`/`detector.py`/`preprocess.py` 等）
    已归档到 `~/AUV/bak/flat_legacy_<日期>/`；入口脚本 `udp_server.py`、`task1_2/run_ball_reverse.sh`
    保留原位但导入改为包路径（`base.settings`/`base.uart`/`task1_2/ball.py`）；板端专属的
-   `base/settings.py`（`SIM_MODE=False`）**未改动**；
+   `base/cfg/settings.py`（`SIM_MODE=False`）**未改动**；
    整目录备份 `~/auv_workspace_backup_<日期>.tgz`。
 
 ### 17.4 用法（当前板端已可直接用）
@@ -713,4 +713,4 @@ ffplay -fflags nobuffer -flags low_delay -framedrop -f mjpeg "udp://@:5000"
 
 → 推流 + 任务 + 逐帧日志合计约 **35 ms/帧**。这就是 `stream.enable` **默认 false** 的理由
 （调任务时一般在板端直接看画面，不必推流）；要临时开：`AUV_STREAM=1 python3 main.py --task gate`
-（env 优先于该开关，见 `base/camera.py::get_stream_pusher`；`manual.sh` 走的就是 env 那条路）。
+（env 优先于该开关，见 `base/hw/camera.py::get_stream_pusher`；`manual.sh` 走的就是 env 那条路）。

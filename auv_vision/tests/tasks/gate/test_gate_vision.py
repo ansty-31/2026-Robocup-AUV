@@ -1,23 +1,23 @@
 # -*- coding: utf-8 -*-
-"""tests/tasks/test_gate_vision.py — gate 视觉侧：PnP 几何往返 / keypoint 解码约定 /
+"""tests/tasks/gate/test_gate_vision.py — gate 视觉侧：PnP 几何往返 / keypoint 解码约定 /
 非等比缩放回投 / mode 降级 / kpt_mem 开关 / GateTask(mock) 无硬件闭环。
 GateTask 相位机（MockGateBackend 无硬件闭环）。"""
 import numpy as np
 import pytest
 
-import base.settings as S
-from common.detector import Det
-from gate.gate_decode import decode_yolo11_kpt
-from gate.gate_detector import board_camera
-from gate.gate_frontend import (MODE_COARSE, MODE_FULL, MODE_P3P, MODE_WIDTH,
+import base.cfg.settings as S
+from common.vision.detector import Det
+from gate.percept.gate_decode import decode_yolo11_kpt
+from gate.percept.gate_detector import board_camera
+from gate.percept.gate_frontend import (MODE_COARSE, MODE_FULL, MODE_P3P, MODE_WIDTH,
                                 bbox_center, parse_kpt_mode, width_range_depth)
-from gate.gate_task import (PH_ALIGN, PH_APPROACH, PH_THROUGH, SUB_GOLDEN,
+from gate.motion.gate_task import (PH_ALIGN, PH_APPROACH, PH_THROUGH, SUB_GOLDEN,
                             GateTask)
-from gate.geometry import (CameraModel, backproject_to_plane, gate_pose,
+from gate.percept.geometry import (CameraModel, backproject_to_plane, gate_pose,
                            object_points, plane_from_pose, reproj_rms)
-from gate.kpt_memory import (ENV_ENABLE, KptMemory, build_kpt_memory,
+from gate.percept.kpt_memory import (ENV_ENABLE, KptMemory, build_kpt_memory,
                              kpt_mem_enabled)
-from gate.mock import MockGateBackend
+from gate.percept.mock import MockGateBackend
 
 
 def test_pnp_roundtrip_recovers_injected_pose():
@@ -103,7 +103,6 @@ def test_kpt_memory_switch_precedence_and_smoothing(monkeypatch):
     monkeypatch.setenv(ENV_ENABLE, "0")                     # force 压过 env
     assert isinstance(build_kpt_memory({"enable": False}, force=True), KptMemory)
 
-    # 工程真实配置：**kpt_mem 默认真关掉**（enable=false，2026-09-18 用户定）→ 返回 None
     monkeypatch.delenv(ENV_ENABLE, raising=False)
     assert build_kpt_memory(S.vision.gate.kpt_mem) is None, \
         "cfg/vision.yaml 里 kpt_mem.enable 应该是 false（用户现场决定）"
@@ -154,8 +153,10 @@ class _GateHub(object):
         return self.backend.detect(frame)
 
 
-def test_gate_task_mock_reaches_through_and_counts_pass(fake_uart):
+def test_gate_task_mock_reaches_through_and_counts_pass(fake_uart, monkeypatch):
     """GateTask 相位机：mock 进近 → ALIGN(GOLDEN) → APPROACH → THROUGH → pass。"""
+    # 本用例守的是**单门**行为（正航向 / 近距判过门 / mock 全流程）；
+    monkeypatch.setitem(S.comm.gate, "pass_target", 1)
     cam = board_camera()
     backend = MockGateBackend(cam)
     task = GateTask(fake_uart, _GateHub(backend), cam.width, cam.height)
@@ -200,10 +201,7 @@ LABELS = ["gate"]
 
 def _blank_outputs(g=G, nc=1, kpt_dim=KPT_DIM, reg_max=REG_MAX):
     """一个尺度的空输出：{通道数: [1,g,g,C]}。
-
-    cls 初值给 -10（sigmoid≈4.5e-5）而不是 0：sigmoid(0)=0.5 会全部越过 conf 阈值，
-    合成用例里必须显式把背景压下去，否则解出几千个空框。
-    """
+    cls 初值给 -10（sigmoid≈4.5e-5）而不是 0：sigmoid(0)=0.5 会全部越过 conf 阈值，"""
     cls = np.full((1, g, g, nc), -10.0, np.float32)
     return {64: np.zeros((1, g, g, 4 * reg_max), np.float32),
             nc: cls,
@@ -217,12 +215,7 @@ def _set_dfl(out, gx, gy, dist=3):
 def _set_score(out, gx, gy, logit=6.0):
     out[1][0, gy, gx, 0] = logit                 # sigmoid(6) ≈ 0.9975
 def _set_kpt_cell(out, gx, gy, i, cell_x, cell_y, v_logit=6.0):
-    """把第 i 个角点放在 **cell 坐标 (cell_x, cell_y)**。
-
-    注意：ONNX 输出的 kpt x/y **已经是 cell 坐标**（= `raw*2 + 网格索引`，
-    见 scripts/3_export/modify_ultralytics.py 的 POSE_FORWARD），
-    所以这里直接写 cell 坐标；板端只做 `×stride`。
-    """
+    """把第 i 个角点放在 **cell 坐标 (cell_x, cell_y)**。"""
     a = out[KPT_DIM * 3][0, gy, gx]
     a[3 * i + 0] = cell_x
     a[3 * i + 1] = cell_y
@@ -287,7 +280,7 @@ def test_box_decode_is_dfl_times_stride_around_grid_center():
     d = decode_yolo11_kpt(out, LABELS, INPUT, INPUT,
                           conf=0.25, iou=0.45, input_w=INPUT, input_h=INPUT)[0]
     cx, cy = (gx + 0.5) * STRIDE, (gy + 0.5) * STRIDE
-    # Det.x/y/w/h 是 int（见 common/detector.py:34），所以用 w/h 反推中心并放宽 1px
+    # Det.x/y/w/h 是 int（见 common/vision/detector.py:34），所以用 w/h 反推中心并放宽 1px
     got_cx = d.x + d.w / 2.0
     got_cy = d.y + d.h / 2.0
     assert abs(got_cx - cx) <= 1.0 and abs(got_cy - cy) <= 1.0

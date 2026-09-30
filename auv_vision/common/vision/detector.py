@@ -21,8 +21,8 @@ import os
 
 import numpy as np
 
-import base.settings as S
-from common.preprocess import ModelPreprocessor
+import base.cfg.settings as S
+from common.vision.preprocess import ModelPreprocessor
 
 
 class Det(object):
@@ -82,11 +82,7 @@ def bgr_to_packed_nv12(bgr, out_w, out_h):
 
 
 def bgr_to_packed_nv12_fast(bgr, out_w, out_h):
-    """BGR→packed NV12（cv2 版：快 ~30x，色度为标准 BT.601）。
-
-    ⚠️ 与 numpy 版 bgr_to_packed_nv12 的色度**不同**（numpy 版把 2x2 求和当平均，
-    色度偏差被放大 4 倍）。切换会改变模型输入，请上机 A/B 验证后再定。
-    """
+    """BGR→packed NV12（cv2 版：快 ~30x，色度为标准 BT.601）。"""
     if bgr.shape[1] != out_w or bgr.shape[0] != out_h:
         raise RuntimeError("分辨率不符：需 %dx%d" % (out_w, out_h))
     import cv2

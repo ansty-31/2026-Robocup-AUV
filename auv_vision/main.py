@@ -5,11 +5,9 @@
 
 任务分工（按目录分区）：
   - 任务一 撞球          task1_2/ball.py（BallTask）—— 前视相机
-  - 任务三 过门          gate/（keypoint 四角 + PnP，相位机见 gate/gate_task.py）
+  - 任务三 过门          gate/（keypoint 四角 + PnP，相位机见 gate/motion/gate_task.py）
 
 用法：
-    python3 main.py --task all          # 按 comm.yaml tasks.enabled 顺序执行
-    python3 main.py --task gate         # 本次只执行过门（ball 同理）
 """
 import argparse
 import json
@@ -19,36 +17,28 @@ import numpy as np
 import sys
 import time
 
-import base.settings as S
+import base.cfg.settings as S
 
 try:
     import cv2
     HAS_CV2 = True
 except ImportError:
     HAS_CV2 = False
-from base.camera import create_camera
-from base.uart import UartController, install_signal_handlers, _D_MIN_DEPTH_M
-from common.detector import DetectorHub
+from base.hw.camera import create_camera
+from base.hw.uart import UartController, install_signal_handlers, _D_MIN_DEPTH_M
+from common.vision.detector import DetectorHub
 from task1_2.ball import BallTask
-from gate.gate_task import GateTask
-from gate.gate_detector import build_gate_backend
+from gate.motion.gate_task import GateTask
+from gate.percept.gate_detector import build_gate_backend
 
 TASK_CLASS = {"ball": BallTask, "gate": GateTask}
 TASK_CAM = {"ball": "front", "gate": "front"}
 STATE_TASK = {S.STATE_BALL: "ball", S.STATE_GATE: "gate"}
 TASK_STATE = {"ball": S.STATE_BALL, "gate": S.STATE_GATE}
 
-
 def psi_line(info, tol_deg=8.0):
     """HUD 的「偏转角」一行（**纯函数**，便于用例）。返回 `(文本, BGR 颜色)`。
-
-    `psi`（`last_info["hdg"]`）= **门法向相对光轴的夹角**：0 = 机身正对门；
-    `+` ⇒ 该**左转**、`-` ⇒ 该**右转**（2026-09-27 现场定，方向依据见
-    doc/_注释历史_fragments/base_tests.md）。只有 `full` 帧测得出来。
-
-    · 没有测量时显示 `--`（**别显示 0** —— 0 会被现场误读成"已经正了"）；
-    · `|psi| ≤ tol` → 绿（已收敛）；否则黄（还要转）；`hdg_skip` 有值 → 橙（这一趟跳过了正航向）。
-    """
+    `psi`（`last_info["hdg"]`）= **门法向相对光轴的夹角**：0 = 机身正对门；"""
     psi = info.get("hdg")
     st = info.get("hdg_state") or ""
     it = info.get("hdg_i")
@@ -66,7 +56,6 @@ def psi_line(info, tol_deg=8.0):
         txt += "   | SKIP: %s" % skip
         col = (0, 140, 255)
     return txt, col
-
 
 class AppController(object):
     def __init__(self, tasks=None):
@@ -94,7 +83,7 @@ class AppController(object):
         self._log_t = time.time()
         self._video_on = self._init_video()
         # 任务逐帧日志（AUV_TASK_LOG=<path>）：把 last_info 每帧存一行 JSON，
-        # 供 tools/analyze/analyze_task_log.py 离线判读（phase/action/z/dx/dy/kpt/ratio/pass…）；
+        # 供 tools/analyze/log/analyze_task_log.py 离线判读（phase/action/z/dx/dy/kpt/ratio/pass…）；
         # 默认不开，不影响运行。
         self._task_log_path = os.environ.get("AUV_TASK_LOG")
         self._task_log_fh = None
@@ -123,7 +112,6 @@ class AppController(object):
                   "AUV_FORCE_SHOW=1）")
             return False
         # 板端 cv2 是 Qt 构建：X 不可用时 namedWindow **直接 abort 进程**（不是异常，
-        # try/except 拦不住）→ 先自己确认本地 X socket 存在，别让浮窗把整船任务搞崩
         if disp and not os.environ.get("AUV_FORCE_SHOW"):
             n = disp.split(":")[-1].split(".")[0]
             if not os.path.exists("/tmp/.X11-unix/X%s" % n):
@@ -140,12 +128,10 @@ class AppController(object):
     def _uart_status(self):
         """画面监控行：下位机深度遥测 + 限深保护（无遥测显示 n/a）。
 
-        深度来自下位机 14B 遥测帧（base/telemetry.py）；`guard` 用 comm.depth_guard：
-        开启且当前深度 ≤ min_depth_m 时禁止上浮（base/uart.py::_apply_depth_guard）。
+        深度来自下位机 14B 遥测帧（base/hw/telemetry.py）；`guard` 用 comm.depth_guard：
+        开启且当前深度 ≤ min_depth_m 时禁止上浮（base/hw/uart.py::_apply_depth_guard）。
         """
         d = getattr(self.uart, "depth_m", None)
-        # 兜底用 base/uart.py 里那个**与 cfg 同值**的常量（别再写 0.3：那会让画面
-        # 显示的限深阈值与真正生效的保护阈值不一致，现场会被自己的叠加骗）
         lim = float(S.get("comm.depth_guard.min_depth_m", _D_MIN_DEPTH_M) or 0.0)
         on = bool(S.get("comm.depth_guard.enable", True))
         return ("depth=%s guard=%s min=%.2fm%s"
@@ -156,10 +142,7 @@ class AppController(object):
 
     def _draw(self, frame, dets):
         """叠加 识别框/角点/中心线 + 状态信息 后显示。
-
-        dets 用**当前任务本帧已算出的检测结果**（见各 task.last_dets），
-        不再调 hub.detect_all：否则 gate 任务会额外跑一遍 ball 权重，帧率腰斩。
-        """
+        dets 用**当前任务本帧已算出的检测结果**（见各 task.last_dets），"""
         img = frame.copy()
         h, w = img.shape[:2]
         fs = max(0.45, w / 900.0)
@@ -202,11 +185,9 @@ class AppController(object):
                            "heave", "surge", "phase", "substate", "mode", "z",
                            "pass", "kpt", "kpt_raw",
                            # yaw 恒 0 是**正常**（居中只用 sway）；它只由正航向 ALIGN.HDG 产生
-                           # → hdg/hdg_i 一起显示便于现场核对
                            "yaw", "hdg", "hdg_i", "hdg_state", "reason")]
             lines.append(" ".join(parts))
             if name == "gate":
-                # 偏转角单独一行、字号更大、带颜色 —— 现场最常盯的就是它
                 psi_row = psi_line(
                     info, float(S.get("comm.gate.hdg.tol_deg", 8.0) or 8.0))
         lines.append(self._uart_status())
@@ -337,7 +318,7 @@ class AppController(object):
                 pass
             self._task_log_fh = None
         try:
-            from base.camera import get_stream_pusher
+            from base.hw.camera import get_stream_pusher
             pusher = get_stream_pusher()
             if pusher is not None:
                 pusher.close()
@@ -398,7 +379,6 @@ class AppController(object):
             self.close()
             print("[MAIN] 已停止")
 
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -421,7 +401,6 @@ def main():
         ctrl.close()
         sys.exit(3)
     ctrl.run()
-
 
 if __name__ == "__main__":
     main()

@@ -1,17 +1,12 @@
 # -*- coding: utf-8 -*-
 """feature_coverage.py — 从逐帧任务日志整理「哪些功能在最近的下水测试里根本没被用到」。
-
 用途：下水几轮之后，回答「我调的那些开关/分支，到底跑过没跑过」。
-用法：python3 tools/analyze/feature_coverage.py log/*.jsonl [--json]
-
+用法：python3 tools/analyze/log/feature_coverage.py log/*.jsonl [--json]
 判定分三类（**只看日志与配置，不做推测**）：
-  · 用到了   = 日志里出现了该分支特有的字段取值（phase/substate/action/mode/命令非零…）
-  · 没用到   = 该轮日志里**一次都没出现**
-  · 未部署   = 代码/配置里存在，但该轮日志时间之后才加（由 --after-ms 或人工判断）
-
-注意：本工具只统计「日志能证明的东西」。像「深度保护是否真的压掉了上浮」这类
-需要下位机告警行/遥测细节的，标记为「需控制台日志」，不在这里下结论。
-"""
+· 用到了   = 日志里出现了该分支特有的字段取值（phase/substate/action/mode/命令非零…）
+· 没用到   = 该轮日志里**一次都没出现**
+· 未部署   = 代码/配置里存在，但该轮日志时间之后才加（由 --after-ms 或人工判断）
+需要下位机告警行/遥测细节的，标记为「需控制台日志」，不在这里下结论。"""
 from __future__ import annotations
 
 import argparse
@@ -21,8 +16,11 @@ import json
 import os
 import sys
 
-# 工程根 = tools/<类>/x.py 往上**三**级（分类重整后本脚本深了一层）
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# 工程根 = 向上第一个含 `cfg/` 的目录（**别写死层级**：脚本搬过位置，写死会静默指错）
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+while _ROOT != os.path.dirname(_ROOT) and not os.path.isdir(os.path.join(_ROOT, "cfg")):
+    _ROOT = os.path.dirname(_ROOT)
+sys.path.insert(0, _ROOT)
 
 
 def _f(r, k, d=0.0):
@@ -55,7 +53,6 @@ def scan(path):
         "z_max": max(_f(r, "z") for r in rows),
         "t_span": _f(rows[-1], "t") - _f(rows[0], "t"),
     }
-    # SEARCH 的横移波形（2026-09-20 起 SEARCH = 左右平移扫视，不许旋转）
     se = [r for r in rows if str(r.get("action")) == "search"
           or str(r.get("phase")) == "SEARCH"]
     ev["search_n"] = len(se)

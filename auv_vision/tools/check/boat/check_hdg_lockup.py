@@ -1,17 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """板端自检：**转完反向平移（post_sway）会不会把 HDG 永久锁死**。
-
-故障形态：消费 post_sway 窗口的方法只有「不是我刚丢的门 ⇒ return」，没有「窗口过期 ⇒ 收手」
-路径 ⇒ 居中 / 正航向 / 丢失处理全被跳过 ⇒ HDG 永久锁死（船乱漂，而串口打印的 yaw 一直是中位）。
-
-本脚本**只读**，不修改任何文件。用法（在板端工程根）：
-
-    python3 tools/check/check_hdg_lockup.py            # 检查 gate/ 与 cfg/
-    python3 tools/check/check_hdg_lockup.py --root /home/sunrise/AUV
-
-退出码 0 = 全部通过；1 = 有 FAIL（终端里会打印要改的那一行）。
-"""
+python3 tools/check/boat/check_hdg_lockup.py --root /home/sunrise/AUV
+退出码 0 = 全部通过；1 = 有 FAIL（终端里会打印要改的那一行）。"""
 import argparse
 import os
 import re
@@ -55,10 +46,7 @@ _CONSUMERS = ("_step", "_on_pose", "_on_width", "_on_coarse", "_tick_lost", "_ti
 
 
 def check_expiry(task_src):
-    """① 每个**消费** post_sway 窗口的方法都必须有「过期 ⇒ 收手」的路径。
-
-    ⚠️ 别省掉这条：窗口过期后「不是我刚丢的门」每帧照样成立，HDG 会被永久锁死。
-    """
+    """① 每个**消费** post_sway 窗口的方法都必须有「过期 ⇒ 收手」的路径。"""
     n_guard = n_ok = 0
     for name, ln, body in _methods(task_src):
         if name not in _CONSUMERS or "_post_sway_until_ms is not None" not in body:
@@ -128,7 +116,7 @@ def check_cap_wired(task_src, align_src):
     if "_hdg_turns_full" in task_src and "_hdg_turns_full()" not in task_src.split("def _hdg_turns_full")[0]:
         FAIL.append("`_hdg_turns_full()` 没有被调用（只在定义处出现 ⇒ 上限没接到起转判据上）")
     if align_src is not None and "max_turns" not in align_src:
-        FAIL.append("gate/heading_align.py 的 `_D_HDG` 里没有 `max_turns` ⇒ "
+        FAIL.append("gate/motion/heading_align.py 的 `_D_HDG` 里没有 `max_turns` ⇒ "
                     "`hdg_cfg()` 会把 cfg 里的 `max_turns` **静默丢掉**（cfg 看起来生效、其实没读）")
     elif align_src is not None:
         OK.append("heading_align._D_HDG 里有 max_turns（cfg 的键真的会被读到）")
@@ -144,7 +132,7 @@ def main():
     align = _read(os.path.join(root, "gate", "heading_align.py"))
     cfg = _read(os.path.join(root, "cfg", "comm.yaml"))
     if task is None:
-        print("❌ 读不到 %s/gate/gate_task.py" % root)
+        print("❌ 读不到 %s/gate/motion/gate_task.py" % root)
         return 1
 
     check_expiry(task)
@@ -166,8 +154,8 @@ def main():
           % ("通过" if not FAIL else "**有必须修的问题**", len(OK), len(WARN), len(FAIL)))
     if FAIL:
         print("""
-提示：本机（开发机）已修好的版本在 auv_vision/gate/gate_task.py 与 gate/heading_align.py，
-      `gate/gate_task.py`、`gate/heading_align.py` **不在** tools/deploy/board_forks_Adomain.txt
+提示：本机（开发机）已修好的版本在 auv_vision/gate/motion/gate_task.py 与 gate/motion/heading_align.py，
+      `gate/motion/gate_task.py`、`gate/motion/heading_align.py` **不在** tools/deploy/board_forks_Adomain.txt
       的跳过清单里 ⇒ 按项目既有同步约定，它们本来就该与开发机一致，可直接覆盖过去。""")
     return 1 if FAIL else 0
 

@@ -16,9 +16,9 @@
 | 几何标尺 | **老** `frame_w 0.70 / frame_h 0.50` | 新 `0.77 / 0.56`（卷尺实测外缘） |
 | 过门阈值 | **老**：`timeout 180s` / `align 4/0.20/0.25` / `z.cross 0.7` / `near_lost 1.0 / 0.60` | 新：`300s` / `2/0.10/0.15` / `0.65` / `0.6 / 0.75` |
 
-**代码两边相同**：过门的解码约束（`gate/gate_decode.py` + `gate/gate_postproc.py`）、
-视觉信号处理（`gate/kpt_memory.py` / `gate/geometry.py`）、运动逻辑（`gate/gate_task.py` /
-`gate/heading_align.py` / `common/turn_deg.py`）都用最新那份。
+**代码两边相同**：过门的解码约束（`gate/percept/gate_decode.py` + `gate/percept/gate_postproc.py`）、
+视觉信号处理（`gate/percept/kpt_memory.py` / `gate/percept/geometry.py`）、运动逻辑（`gate/motion/gate_task.py` /
+`gate/motion/heading_align.py` / `common/motion/turn_deg.py`）都用最新那份。
 唯一的例外是上表那些**老功能的老参数**，以及下面 §2 说明的两个新功能自己的键。
 
 ## 2. 旧仓库只保留老参数 + 两个新功能（2026-09-27 用户定）
@@ -27,8 +27,8 @@ A 域那套**老功能的参数一个都不改**（含内参与阈值），只�
 
 | 新功能 | 代码 | 它带来的新键（取**新**值） |
 |---|---|---|
-| ① **转角度**（额定转角闭环 + 正航向） | `common/turn_deg.py`、`gate/heading_align.py`、`gate/gate_task.py` 的 `_turn_inner_loop`/`_hdg_*` | `gate.hdg.*`、`gate.through.require_align_deg`、`motion.turn_pid.{kd,out_max,div_deg,period}` |
-| ② **解码后约束** | `gate/gate_postproc.py` + `gate_decode.detect` 接入 | `gate.postproc.{edge_tol,min_edges,geom_check}` |
+| ① **转角度**（额定转角闭环 + 正航向） | `common/motion/turn_deg.py`、`gate/motion/heading_align.py`、`gate/motion/gate_task.py` 的 `_turn_inner_loop`/`_hdg_*` | `gate.hdg.*`、`gate.through.require_align_deg`、`motion.turn_pid.{kd,out_max,div_deg,period}` |
+| ② **解码后约束** | `gate/percept/gate_postproc.py` + `gate_decode.detect` 接入 | `gate.postproc.{edge_tol,min_edges,geom_check}` |
 
 - `motion.turn_pid` 的 `kd` **必须 0**、`out_max` **0.30**：这是新转角度内层循环（20 Hz、
   误差按 `norm_deg` 归一）的硬要求 —— `kd=0.05` 的 D 项会超过 `out_max` ⇒ 出力每帧正负反转、
@@ -48,11 +48,11 @@ A 域那套**老功能的参数一个都不改**（含内参与阈值），只�
 
 ```bash
 # 在板端旧仓库里跑（会打印域指纹、A 序与参考实现逐像素对比、AUV_4 角点分布）
-python3 tools/check/check_domain.py \
+python3 tools/check/pipeline/check_domain.py \
   --equiv-ref tools/deploy/Adomain_cfg/preprocess_A_ref_20260917.py \
   --equiv-frames log/frames --limit 4 --frames log/frames --limit 4
 ```
 
-- `preprocess_A_ref_20260917.py` 是**移植前旧仓库的 `common/preprocess.py` 逐字节副本**
+- `preprocess_A_ref_20260917.py` 是**移植前旧仓库的 `common/vision/preprocess.py` 逐字节副本**
   （md5 `7eb0dae93bd4d927c0e7a800b447cdd7`），只用于证明"新代码的 A 链序 == 老 A 实现"。
 - 域指纹必须自洽：`chain A` + `clahe 0.5` + 门权重 md5 前缀 `d38b803e`。

@@ -1,29 +1,23 @@
 # -*- coding: utf-8 -*-
-"""gate/kpt_memory.py — 门角点"逐点软融合"（抗水面倒影：小漂移/短消失/偶发鬼点）
-
+"""gate/percept/kpt_memory.py — 门角点"逐点软融合"（抗水面倒影：小漂移/短消失/偶发鬼点）
 **设计原则**（按使用要求收敛）：
-  * **不硬判无效**：每个角点始终输出"融合后的状态"（位置 + 连续置信度），
-    把"信不信这一帧"变成权重的连续变化，而不是"有效/无效"的二值切换 ——
-    这样状态机不会因为单点抖动而翻来覆去（少掉 full↔p3p↔coarse 的抖动），
-    也不至于把信息量本来就不多的 4 个点滤没了。
-  * **逐点自身信息融合**：各角点独立维护 位置/速度/置信度/残差尺度，
-    只利用该点自己的历史（不动识别后的 mode/PnP 判定逻辑）。
-  * **范围圆半径来自该点历史分布**：R_i = clip(k_sigma × σ_i, r_min, r_max)，
-    σ_i 是该点残差分布的尺度（残差慢跟踪，会自适应：点安静→半径小；
-    门在快速逼近、帧间位移变大→半径自动放大；世界真变了→σ 慢慢变大从而跟上）。
-  * **软几何权重**：w_geo = 1 / (1 + (d/R)²)（柯西权重，越小越不可信，连续无跳变）；
-    一帧鬼点（d ≫ R）权重≈0 → 对融合几乎无影响，但**该点仍然有效**、状态不丢。
-  * **不影响速度**：α-β 时间加权平均带匀速补偿（稳态滞后≈0），不做窗口算术平均，
-    不引入额外确认延迟。
-  * **短消失回忆 / 长丢失衰减**：短时没打到 → 用融合状态外推并保持 recall_conf；
-    连续缺失超限或超 valid_ms → 置信度按 conf_decay 衰减，最终自然低于 keypoint.conf_thr，
-    让 mode 照常降级（不瞎编）。
-
+* **不硬判无效**：每个角点始终输出"融合后的状态"（位置 + 连续置信度），
+把"信不信这一帧"变成权重的连续变化，而不是"有效/无效"的二值切换 ——
+这样状态机不会因为单点抖动而翻来覆去（少掉 full↔p3p↔coarse 的抖动），
+也不至于把信息量本来就不多的 4 个点滤没了。
+* **逐点自身信息融合**：各角点独立维护 位置/速度/置信度/残差尺度，
+σ_i 是该点残差分布的尺度（残差慢跟踪，会自适应：点安静→半径小；
+* **软几何权重**：w_geo = 1 / (1 + (d/R)²)（柯西权重，越小越不可信，连续无跳变）；
+一帧鬼点（d ≫ R）权重≈0 → 对融合几乎无影响，但**该点仍然有效**、状态不丢。
+* **不影响速度**：α-β 时间加权平均带匀速补偿（稳态滞后≈0），不做窗口算术平均，
+不引入额外确认延迟。
+* **短消失回忆 / 长丢失衰减**：短时没打到 → 用融合状态外推并保持 recall_conf；
+连续缺失超限或超 valid_ms → 置信度按 conf_decay 衰减，最终自然低于 keypoint.conf_thr，
+让 mode 照常降级（不瞎编）。
 全部参数可调（`vision.yaml → gate.kpt_mem`）。**本功能是可选开关，默认开启**（= 周一 09-14 原行为）：
 `enable=true`（默认）或 `AUV_GATE_KPT_MEM=1` = 打开融合；
 `enable=false` 或 `AUV_GATE_KPT_MEM=0` = 角点单帧直用，与没集成本功能时逐字节同行为。
-开关判定见 `kpt_mem_enabled()`，构造统一走 `build_kpt_memory()`（关闭时返回 None）。
-"""
+开关判定见 `kpt_mem_enabled()`，构造统一走 `build_kpt_memory()`（关闭时返回 None）。"""
 from __future__ import annotations
 
 import os
@@ -39,14 +33,12 @@ DEFAULTS = dict(alpha=0.4, beta=0.1, valid_ms=800.0, k_sigma=3.0,
                 conf_floor=0.05, recall_conf=0.45, conf_decay=0.35,
                 max_missing_frames=5, min_frames=2)
 
-
 def _env_flag(name):
     """读环境变量开关：未设/空 → None；1/true/on/yes/enable → True；其余非空 → False。"""
     v = os.environ.get(name)
     if v is None or not str(v).strip():
         return None
     return str(v).strip().lower() in ("1", "true", "yes", "on", "enable", "enabled", "y")
-
 
 def kpt_mem_enabled(cfg=None, force=False):
     """kpt_mem 是可选功能：这里决定本进程要不要用它。
@@ -63,7 +55,6 @@ def kpt_mem_enabled(cfg=None, force=False):
         return env
     return bool((cfg or {}).get("enable", False))
 
-
 def enable_source(cfg=None):
     """给日志用：说明这次的开关是"谁"定的（现场排查"为什么没生效/怎么关不掉"）。"""
     if _env_flag(ENV_ENABLE) is not None:
@@ -71,7 +62,6 @@ def enable_source(cfg=None):
     if (cfg or {}).get("enable", None) is not None:
         return "vision.gate.kpt_mem.enable=%s" % (cfg or {}).get("enable")
     return "cfg 没写 enable → 兜底 false"
-
 
 def build_kpt_memory(cfg=None, n_kpt=4, force=False):
     """按 cfg 构造 KptMemory；未启用 / 参数不可用 → None（调用方按"单帧直用"处理）。
@@ -89,7 +79,6 @@ def build_kpt_memory(cfg=None, n_kpt=4, force=False):
         print("[GATE] ⚠️ kpt_mem 参数不可用(%s)；本次按关闭处理（角点单帧直用）" % e)
         return None
 
-
 def _as_kpts(kpts, n_kpt):
     if kpts is None:
         return None
@@ -97,7 +86,6 @@ def _as_kpts(kpts, n_kpt):
     if a.ndim != 2 or a.shape[0] < n_kpt or a.shape[1] < 2:
         return None
     return a[:n_kpt, :2]
-
 
 class KptMemory(object):
     """逐点软融合：置信度加权 + 历史分布定半径 + α-β 平均（零滞后）。"""
@@ -165,7 +153,6 @@ class KptMemory(object):
         """当帧 (kpts, kpt_conf) → 融合后的 (kpts, kpt_conf)。
 
         始终返回 4 个点的融合状态；置信度是连续的（低到一定程度后由
-        parse_kpt_mode 的 conf_thr 自然剔除，不需要这里硬判）。
         """
         cur = _as_kpts(kpts, self.n)
         cconf = np.zeros(self.n, np.float64)
@@ -200,7 +187,6 @@ class KptMemory(object):
             seen = cur is not None and cconf[i] >= self.conf_floor
             r = self._radius(i)
             d = float(np.linalg.norm(cur[i] - pred)) if seen else 0.0
-            # 软几何权重：越偏离"该点历史/预测位置"越不可信（连续、无跳变）
             w_geo = 1.0 if not np.isfinite(r) else 1.0 / (1.0 + (d / r) ** 2)
             w = float(np.clip(cconf[i] * w_geo, 0.0, 1.0)) if seen else 0.0
             if self.w_min > 0 and w < self.w_min:

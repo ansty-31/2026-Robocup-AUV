@@ -1,23 +1,15 @@
 # -*- coding: utf-8 -*-
 """camera.py — 相机：前视 / 下视分离，各自可 sim 或真机，真机失败可软回退 sim
-
 配置：cfg/vision.yaml camera.front / camera.down（各自 type/device/宽高/fps/标定）。
 调用：create_camera("front" | "down")；返回对象仅实现 read()。
-
 **视频回放**（离线复现/回归；默认行为不变，只在设了环境变量时生效）：
-    AUV_SIM_MODE=1 AUV_CAM_VIDEO=/path/clip.mp4 [AUV_CAM_VIDEO_FPS=30] \
-        AUV_TASK_LOG=log/replay.jsonl python3 main.py --task gate
-  · `AUV_CAM_VIDEO`：把前视相机源换成该视频文件（cfg 一个字段都不动）；
-  · **必须**同时 `AUV_SIM_MODE=1`（只打印、不发串口），否则回放会真的驱动船；
-  · 主循环没有帧率节流 ⇒ 回放按视频原生 fps（或 AUV_CAM_VIDEO_FPS）自己节拍，
-    保证时间基与真机一致（HDG 的 PID/超时都按真实时间算）。
-"""
+保证时间基与真机一致（HDG 的 PID/超时都按真实时间算）。"""
 import os
 import time
 
 import numpy as np
 
-import base.settings as S
+import base.cfg.settings as S
 
 try:
     import cv2
@@ -43,12 +35,8 @@ class Camera(object):
 # ---------------------------------------------------------------------------
 class VideoFileCamera(Camera):
     """把视频文件当相机用（见模块头「视频回放」）。**只用于离线复现/回归**。
-
     要点：
-      · 打开视频**不指定后端**（`cv2.VideoCapture(path)`）⇒ 文件与设备都能开；
-      · 主循环没有节流 ⇒ 这里按 `play_fps` 自己睡，避免"以解码速度飞快跑完"导致时间基被压缩；
-      · 读完返回 None（只打印一次），主循环空转直到任务自身超时/过门结束。
-    """
+    · 读完返回 None（只打印一次），主循环空转直到任务自身超时/过门结束。"""
 
     def __init__(self, cfg, path, fps=None):
         if not HAS_CV2:
@@ -72,11 +60,7 @@ class VideoFileCamera(Camera):
               % (self.path, native, self.play_fps))
 
     def read(self):
-        """**Real-time 语义**（与真机相机一致）：消费者慢 ⇒ 丢帧给你最新的一帧；消费者快 ⇒ 等到该帧的时刻。
-
-        为什么必须这样：主循环是"读一帧→处理一帧"，真机上处理慢就自然丢帧（时间基仍是真实时间）。
-        若顺序回放不丢帧，19.8s 的片子会被拉成几十秒 ⇒ HDG 的 PID/超时/循环全变味，复现就失真了。
-        """
+        """**Real-time 语义**（与真机相机一致）：消费者慢 ⇒ 丢帧给你最新的一帧；消费者快 ⇒ 等到该帧的时刻。"""
         if self._t0 is None:
             self._t0 = time.monotonic()
         elapsed = time.monotonic() - self._t0

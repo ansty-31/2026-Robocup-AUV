@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """telemetry.py — 下位机**遥测上行**帧（14B：0xAA55 + 5×int16 + 校验和）
 
-下位机(STM32)按下面的格式持续回传**深度**等状态；`base/uart.py` 在每次发帧时顺带
+下位机(STM32)按下面的格式持续回传**深度**等状态；`base/hw/uart.py` 在每次发帧时顺带
 读空串口接收缓冲，把最新深度交给"不得浮出水面"的限深保护（`comm.depth_guard`）。
 
 帧格式（与下位机固件、`manual/udp_server.py` 的旧解析保持一致，**小端**）：
@@ -101,12 +101,9 @@ def parse_telemetry_frames(buf, stats=None):
 
 class TelPlayback(object):
     """把一段**录制的遥测**（task jsonl 里的 `tdep/tyaw/trol/tpit`）按**真实时间**回放。
-
     用途（离线复现闭环）：视觉来自视频（`AUV_CAM_VIDEO=<clip>`），航向/深度来自**当时的真实遥测**
-    ⇒ HDG 的闭环（PID/超时/方向自证）与深度保护才有机会复现当时的行为。
     启用：`AUV_SIM_TEL_JSONL=<当时的 task.jsonl>` + `AUV_SIM_MODE=1`。
-    时间轴：以 jsonl 第一条的 `t` 为 0 点，按真实经过时间线性插值；超出末尾就夹在末值。
-    """
+    时间轴：以 jsonl 第一条的 `t` 为 0 点，按真实经过时间线性插值；超出末尾就夹在末值。"""
 
     def __init__(self, path):
         self.path = str(path)
@@ -189,13 +186,10 @@ class TelemetryReceiver(object):
         stats = {"ok": 0, "bad": 0}
         rows = parse_telemetry_frames(self.buf, stats)
         # 姿态符号归一（`comm.telemetry.yaw_sign`，默认 +1 = 不改行为）。
-        # ⚠️ 别把 yaw_sign 留在错的一侧：探向只能测到"命令符号→物理转向"与
         #   "物理转向→遥测符号"之积 g·s；g·s=-1 时闭环**仍然稳定**（都收敛在遥测上），
-        #   但 `heading_align` 驱动的是镜像量，船会**朝反方向转**（现场现象：左转后机身
         #   反而不平行）。归一后探向应报 `imag_sign=+1`、`[HDG] 转向后 |psi| 应变小`。
-        #   （2026-09-23 板端实测依据见 doc/_注释历史_fragments/base_tests.md）
         try:
-            import base.settings as _S
+            import base.cfg.settings as _S
             sign = float(_S.get("comm.telemetry.yaw_sign", 1.0) or 1.0)
         except Exception:
             sign = 1.0

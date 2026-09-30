@@ -2,10 +2,8 @@
 """PID.py — 任务公用小件（PID 等）
 
 供任务一(ball)/gate 共用（早期由 root tasks.py 迁移至此）。
-逻辑与迁移前逐字一致，仅调整位置。
 """
 from __future__ import annotations
-
 
 class PID(object):
     """位置式 PID（视觉居中用：死区清零积分、限幅防 windup）。"""

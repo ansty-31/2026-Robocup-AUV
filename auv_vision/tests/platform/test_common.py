@@ -4,13 +4,13 @@ cfgnode 配置读取（含 ball·gate 共用的 comm.motion 参数）。"""
 import numpy as np
 import pytest
 
-import base.settings as S
-from common.PID import PID
-from common.detector import Det, pick_target
-from common.cfgnode import (MOTION_DEFAULTS, flag, merge, motion_num, motion_pid,
+import base.cfg.settings as S
+from common.motion.PID import PID
+from common.vision.detector import Det, pick_target
+from common.cfg.cfgnode import (MOTION_DEFAULTS, flag, merge, motion_num, motion_pid,
                             num, nums, pid_kw, sub)
-from common.detector import bgr_to_packed_nv12, bgr_to_packed_nv12_fast
-from common.preprocess import ModelPreprocessor, enhance
+from common.vision.detector import bgr_to_packed_nv12, bgr_to_packed_nv12_fast
+from common.vision.preprocess import ModelPreprocessor, enhance
 
 
 def test_pid_deadzone_clamp_and_derivative():
@@ -72,12 +72,9 @@ def test_preprocess_enhance_shape_dtype_and_gamma():
 
 def test_preprocess_chain_domain_switch():
     """识别链路域开关（`vision.image.chain`）：A/D 两序、必须与权重同域。
-
     不变量：
-      1. 去畸变关闭时 A/D **必须逐像素相同**（两序唯一的差别就是 remap 的先后）；
-      2. 默认域 = 配置值（本仓库 D）；
-      3. 非法值要**当场报错**，不能静默退回某个域 —— 静默退回 = 拿错域的图喂权重。
-    """
+    1. 去畸变关闭时 A/D **必须逐像素相同**（两序唯一的差别就是 remap 的先后）；
+    2. 默认域 = 配置值（本仓库 D）；"""
     rng = np.random.default_rng(20260927)
     raw = rng.integers(0, 256, (48, 96, 3), dtype=np.uint8)
 
@@ -93,7 +90,6 @@ def test_preprocess_chain_domain_switch():
         str(S.get("vision.image.chain", "D")).strip().upper()
     assert ModelPreprocessor(undistort=False, chain=" a ").chain == "A"
 
-    # 非法域：直接报错（别静默回退）
     import pytest
     with pytest.raises(ValueError):
         ModelPreprocessor(undistort=False, chain="B")
@@ -152,11 +148,7 @@ def _nv12_to_bgr(packed):
 
 def test_selected_nv12_path_is_color_faithful():
     """**当前配置选中的**那条 NV12 路径必须是色度忠实的。
-
-    `vision.model.fast_nv12=false` 会切到 numpy 版，而那一版的色度被放大 4 倍
-    （实测往返误差 ~15 灰阶、最大 161）。BPU 用这批 NV12 反解 RGB 喂网络，
-    模型看到的颜色会整体偏 —— 不报错，只掉精度。这条断言把取舍摆到测试里。
-    """
+    `vision.model.fast_nv12=false` 会切到 numpy 版，而那一版的色度被放大 4 倍"""
     fast = bool(S.vision.model.fast_nv12)
     packer = bgr_to_packed_nv12_fast if fast else bgr_to_packed_nv12
     img = _test_frame()
@@ -185,8 +177,6 @@ def test_cfgnode_node_readers(monkeypatch):
     assert num({}, "x", 9.0) == 9.0                            # 缺键 → 默认值
     assert nums({"kp": 4.0}, {"kp": 1.0, "ki": 0.0}) == {"kp": 4.0, "ki": 0.0}
 
-    # ⚠️ 必须按字符串语义解析：bool("false") 是 True —— 拼写错的值会被当成"开"
-    #    （板端踩过，见 doc/_注释历史_fragments/base_tests.md），这条断言守的就是那个坑
     assert flag({"e": False}, "e", True) is False
     assert flag({"e": "false"}, "e", True) is False
     assert flag({"e": "0"}, "e", True) is False

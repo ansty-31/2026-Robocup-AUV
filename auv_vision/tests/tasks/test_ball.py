@@ -5,13 +5,12 @@
 """
 import numpy as np
 
-import base.settings as S
-from common.detector import Det
+import base.cfg.settings as S
+from common.vision.detector import Det
 from task1_2.ball import (PH_APPROACH, PH_CENTER, PH_DASH, PH_SEARCH, PH_STOP,
                           BallTask)
 
 W, H = 640, 480
-
 
 class _BallHub(object):
     """脚本化 ball 后端：frame_fn(n) -> Det 或 None，n = 已调用帧号。"""
@@ -31,25 +30,20 @@ class _BallHub(object):
     def detect_all(self, frame):
         return []
 
-
 # 故意偏右 40px（dx≈0.125 < center_eps 0.25）：CENTER 必须真的收敛进死区才转进近，
 # 而不是因为目标恰好压在画面中心而"白拿"确认。
 _DX_PX = 40
-
 
 def _growing_ball(n):
     """前 3 帧无目标，之后边长 60→ 递增的球，**封顶 240px**（面积占比最高约 0.19）。
 
     封顶是为了"会咬"：不封顶时边长会涨到框比整幅画面还大（占比 >6，物理上不可能），
-    于是 `dash_ratio` 怎么调都能满足 —— 那个阈值等于没被测。240px@640×480 占比 0.19，
-    刚过 dash_ratio(0.15) 一点：既真实，又让阈值必须真的被读。
     """
     if n < 3:
         return None
     s = min(60 + 8 * (n - 3), 240)
     cx = W // 2 + _DX_PX
     return Det("blue_ball", 0.9, cx - s // 2, H // 2 - s // 2, s, s)
-
 
 def test_ball_growing_detection_hits(fake_uart):
     """SEARCH→CENTER→APPROACH→DASH→STOP→DONE(hit)，且各段 DOF 约束成立。"""
@@ -92,7 +86,6 @@ def test_ball_growing_detection_hits(fake_uart):
     assert set(dash_surges) == {S.comm.motion.surge_fast}
     # 命中后明确回中位
     assert fake_uart.neutral_calls >= 1
-
 
 def test_ball_without_detections_times_out(fake_uart):
     """全程无目标：SEARCH 保持，跑满 comm.ball.timeout_ms 后 DONE(timeout)。"""

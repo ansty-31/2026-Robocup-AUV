@@ -1,10 +1,6 @@
 # -*- coding: utf-8 -*-
-"""tests/tooling/test_tape_ticks.py — 卷尺刻度周期测焦距（`tools/analyze/tape_ticks.py`）的校验。
-
-为什么这样测：这条方法是**唯一不依赖点击**的标尺测量（几十个刻度一起估计周期，
-精度 ~0.5%），所以核心用例是**合成往返**：按已知 `f` 画一条带厘米刻度的卷尺 →
-工具测出的 `f` 必须对得上。另加"透视梯度"用例（靶面没正对时，光轴处的局部比例才对）。
-"""
+"""tests/tooling/test_tape_ticks.py — 卷尺刻度周期测焦距（`tools/analyze/calib/tape_ticks.py`）的校验。
+工具测出的 `f` 必须对得上。另加"透视梯度"用例（靶面没正对时，光轴处的局部比例才对）。"""
 from __future__ import annotations
 
 import os
@@ -17,7 +13,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from tools.analyze import tape_ticks as TT                          # noqa: E402
+from tools.analyze.calib import tape_ticks as TT# noqa: E402
 
 
 # ------------------------------------------------------------------ 合成
@@ -139,7 +135,7 @@ def test_main_writes_records_and_reports(tmp_path, capsys):
 def test_ticks_output_feeds_ruler_calib(tmp_path):
     """刻度法产出的记录必须能被 `ruler_calib` 直接吃（端到端闭环）。"""
     import json
-    from tools.analyze import ruler_calib as RC
+    from tools.analyze.calib import ruler_calib as RC
     for z in (1.0, 3.0):
         d = tmp_path / ("z%d" % int(z * 100))
         d.mkdir()

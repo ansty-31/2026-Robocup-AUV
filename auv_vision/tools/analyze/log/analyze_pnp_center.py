@@ -1,21 +1,13 @@
 # -*- coding: utf-8 -*-
-"""tools/analyze/analyze_pnp_center.py — 位姿档"居中误差"到底可不可信？（p3p vs full）
+"""tools/analyze/log/analyze_pnp_center.py — 位姿档"居中误差"到底可不可信？（p3p vs full）
 
 动机：位姿档的横向误差 `dxn` 是**把门原点(0,0,0)用解出的位姿投影回图像**算的
-（`gate_task._on_pose`）。若 3 角(p3p)时这个投影退化/有偏，控制器就在**消一个错的误差**
-→ 表现为"怎么调都不动 / 越调越歪"。
 
 本工具用真实录制的角点 dump 对比两套横向误差：
-    dxn_pose = 投影门原点（位姿档真正用的）
-    dxn_bbox = 检测框中心（coarse 档用的）
-并对 4 角(full) / 3 角(p3p) 分别统计：偏差(pose-bbox) 的中位数、离散度、以及
-"两者符号相反"的比例（符号相反 = 控制器把船往错的方向开）。
 
 判据：
-    |中位偏差| 小 且 符号相反比例低  → 位姿档的居中误差可信
-    偏差大 / 符号常相反            → p3p 的投影不可信 → 该档不该用位姿误差做居中
 
-用法：python3 tools/analyze/analyze_pnp_center.py <dump.jsonl> [...]
+用法：python3 tools/analyze/log/analyze_pnp_center.py <dump.jsonl> [...]
 """
 from __future__ import annotations
 
@@ -23,24 +15,25 @@ import json
 import os
 import sys
 
-# 工程根 = tools/<类>/x.py 往上**三**级（分类重整后本脚本深了一层）
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# 工程根 = 向上第一个含 `cfg/` 的目录（**别写死层级**：脚本搬过位置，写死会静默指错）
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+while _ROOT != os.path.dirname(_ROOT) and not os.path.isdir(os.path.join(_ROOT, "cfg")):
+    _ROOT = os.path.dirname(_ROOT)
+sys.path.insert(0, _ROOT)
 
 import numpy as np                                              # noqa: E402
-import base.settings as S                                       # noqa: E402
-from gate.geometry import (object_points, gate_pose,            # noqa: E402
+import base.cfg.settings as S                                       # noqa: E402
+from gate.percept.geometry import (object_points, gate_pose,            # noqa: E402
                            reproj_rms, gate_normal_angles_deg)
-from gate.gate_detector import board_camera                     # noqa: E402
+from gate.percept.gate_detector import board_camera                     # noqa: E402
 
 CONF_THR = float(S.get("vision.gate.keypoint.conf_thr", 0.7) or 0.7)
 REPROJ = float(S.get("vision.gate.pnp.reproj_px", 20.0) or 20.0)
 Z_MIN = float(S.get("vision.gate.pnp.z_min", 0.2) or 0.2)
 Z_MAX = float(S.get("vision.gate.pnp.z_max", 15.0) or 15.0)
 
-
 def _pct(v, p):
     return float(np.percentile(v, p)) if len(v) else float("nan")
-
 
 def main():
     files = sys.argv[1:]
@@ -107,7 +100,6 @@ def main():
                      _pct(b["rms"], 90), float(np.median(b["hdg"])),
                      float(np.std(b["hdg"]))))
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())
