@@ -5,7 +5,7 @@
 
 任务分工（按目录分区）：
   - 任务一 撞球          task1_2/ball.py（BallTask）—— 前视相机
-  - 任务三 过门          gate/（keypoint 四角 + PnP，相位机见 gate/motion/gate_task.py）
+  - 任务三 过门          gate/（keypoint 四角 + PnP，相位机见 gate/gate_task.py（总调度））
 
 用法：
 """
@@ -28,7 +28,7 @@ from base.hw.camera import create_camera
 from base.hw.uart import UartController, install_signal_handlers, _D_MIN_DEPTH_M
 from common.vision.detector import DetectorHub
 from task1_2.ball import BallTask
-from gate.motion.gate_task import GateTask
+from gate.gate_task import GateTask
 from gate.percept.gate_detector import build_gate_backend
 
 TASK_CLASS = {"ball": BallTask, "gate": GateTask}

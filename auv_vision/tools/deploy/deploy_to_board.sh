@@ -38,6 +38,9 @@ done
 
 # 板端已废弃、需要删掉的文件（先备份到 bak/deploy_<stamp>/）
 DELETED=(
+  # 2026-09-30 gate_task 上移 + hdg/heading_align 合并：旧路径在板端要删
+  gate/motion/gate_task.py
+  gate/motion/heading_align.py
   task1_2/ball_forward.py
   task1_2/run_ball_forward.sh
   tests/test_ball_forward.py
@@ -176,13 +179,6 @@ DELETED=(
   tools/check/check_domain.py
   tools/check/check_paths.py
   tools/check/check_pipeline_identity.py
-  tools/deploy/sync_Adomain_repo.sh
-  tools/deploy/Adomain_cfg/README.md
-  tools/deploy/Adomain_cfg/comm.yaml
-  tools/deploy/Adomain_cfg/vision.yaml
-  tools/deploy/Adomain_cfg/front_camera.yaml
-  tools/deploy/Adomain_cfg/preprocess_A_ref_20260917.py
-  tools/deploy/board_forks_Adomain.txt
   tests/test_base.py
   tests/test_common.py
   tests/test_paths.py
@@ -263,7 +259,7 @@ n_same=0; n_new=0; n_diff=0; n_miss_local=0; n_skip=0
 #      （那些现场值没有任何本地副本）。
 #   ⚠️ 清单的**唯一来源是 tools/deploy/board_forks.txt**（check_board_parity.sh 读同一个文件）。
 #     别改回"只在这个脚本里写数组"：那边不知道分叉，--board 检查会永远红着。
-#   换目标仓库时（如给旧仓库 /home/sunrise/AUV 同步）用 AUV_FORKS_FILE 指向另一个文件：
+#   换目标仓库时可用 AUV_FORKS_FILE 指向另一个分叉清单（A 域那份已随 A 域退役归档）：
 #     那个仓库的"故意分叉"和本仓库无关（它的 base/cfg/settings.py 也要跟着传）。
 #   cfg/comm.yaml 曾按"统一为本地值"处理，现在已不在分叉清单里。
 FORK_FILE="${AUV_FORKS_FILE:-$TOOLS_DIR/board_forks.txt}"
@@ -331,7 +327,7 @@ step "废弃文件处理完成"
 # ---- 5) 板端自检 ----
 {
   echo "cd $BOARD"
-  echo "python3 -m py_compile main.py preview_detect.py base/cfg/settings.py base/hw/camera.py base/hw/uart.py base/hw/telemetry.py common/vision/detector.py common/motion/PID.py common/vision/preprocess.py common/motion/turn_deg.py manual/recorder.py manual/stream.py manual/udp_server.py task1_2/ball.py gate/__init__.py gate/motion/gate_task.py gate/percept/gate_postproc.py gate/percept/gate_detector.py gate/percept/gate_decode.py gate/percept/gate_frontend.py gate/percept/geometry.py gate/motion/heading_align.py gate/percept/kpt_memory.py gate/percept/mock.py && echo COMPILE-OK"
+  echo "python3 -m py_compile main.py preview_detect.py base/cfg/settings.py base/hw/camera.py base/hw/uart.py base/hw/telemetry.py common/vision/detector.py common/motion/PID.py common/vision/preprocess.py common/motion/turn_deg.py manual/recorder.py manual/stream.py manual/udp_server.py task1_2/ball.py gate/__init__.py gate/gate_task.py gate/percept/gate_postproc.py gate/percept/gate_detector.py gate/percept/gate_decode.py gate/percept/gate_frontend.py gate/percept/geometry.py gate/motion/hdg.py gate/percept/kpt_memory.py gate/percept/mock.py gate/motion/params.py gate/motion/modes.py gate/motion/channels.py gate/motion/hdg.py gate/motion/exits.py && echo COMPILE-OK"
   [ "$NO_TEST" = "1" ] || echo "echo '--- 全量 pytest ---'; timeout 600 python3 -m pytest tests/ -q > /tmp/auv_pytest.log 2>&1; tail -3 /tmp/auv_pytest.log; if grep -qE '[0-9]+ passed' /tmp/auv_pytest.log && ! grep -qE '[0-9]+ (failed|error)' /tmp/auv_pytest.log; then echo PYTEST-OK; else echo PYTEST-FAIL; fi"
   cat <<'PYEOF'
 echo '--- 配置快照 ---'

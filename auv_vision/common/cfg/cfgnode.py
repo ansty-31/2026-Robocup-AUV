@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""cfgnode.py — 配置节点读取的公共件（gate_task / heading_align / turn_deg 共用）。
+"""cfgnode.py — 配置节点读取的公共件（gate_task / hdg / turn_deg 共用）。
 cfg 是 YAML → dict，读参数的规矩只有一条：
 **缺键 / 类型不对时用"等于当前 cfg 的默认值"兜底，绝不抛异常**
 （允许 `AUV_CFG_DIR` 指向缺新键的旧配置，也允许用例在内存里改 cfg）。
@@ -86,7 +86,7 @@ def pid_kw(node, defaults):
 # 任务段只放本任务特有的旋钮；确需单独一套时才在自己的段里写覆盖键（如 gate.pid_sway）。
 MOTION_DEFAULTS = dict(
     # 共用 PID（同一船/同一推进器；量纲都是"归一化偏差 ±1"）
-    pid_sway=dict(kp=8.0, ki=0.01, kd=0.05, out_max=0.45, deadzone=0.05),
+    pid_sway=dict(kp=8.0, ki=0.01, kd=0.05, out_max=0.55, deadzone=0.05),
     pid_heave=dict(kp=1.0, ki=0.0, kd=0.15, out_max=1.0, deadzone=0.04),
     surge_fast=0.35,
     surge_slow=0.15,

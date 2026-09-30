@@ -21,26 +21,31 @@ tools/
 │   └── tidy_board_bak.sh         #   整理**板端** bak/：按时间归档压缩 + 留几个可回滚快照
 │
 ├── check/                        # ② 自检（上板前 / 离线跑一次看结论；只读，不动船）
-│   ├── check_kpt_decode.py       #   keypoint 解码约定自检（-0.5 陷阱、通道布局）——**上板前必跑**
-│   ├── check_gate_pose.py        #   PnP 位姿自检：为什么位姿被拒（角点/候选 RMS/tz）
-│   ├── check_pipeline_identity.py#   训练/推理**同域**自证（去畸变↔回投↔解码同一条链，勿改图像链路）
-│   ├── check_paths.py            #   路径/配置落点自检
-│   ├── auv_kpt_meter.py          #   只读相机、不碰串口：实时看门框 + 4 角点 + 置信度
-│   └── check_dof_sign.py         #   **DOF 通道物理符号自检**（2026-09-23）：用**视觉**当独立真值定
-│                                 #   `dof_map.{yaw,sway}.sign`；**必须显式 --go 才发推力**，任何退出路径补发中性帧
+│   ├── vision/                   #   视觉
+│   │   ├── check_kpt_decode.py   #     keypoint 解码约定自检（-0.5 陷阱、通道布局）——**上板前必跑**
+│   │   ├── check_gate_pose.py    #     PnP 位姿自检：为什么位姿被拒（角点/候选 RMS/tz）
+│   │   └── auv_kpt_meter.py      #     只读相机、不碰串口：实时看门框 + 4 角点 + 置信度
+│   ├── boat/                     #   船体与执行器
+│   │   ├── check_dof_sign.py     #     **DOF 通道物理符号自检**：用**视觉**当独立真值定
+│   │   │                         #     `dof_map.{yaw,sway}.sign`；**必须显式 --go 才发推力**，退出前补发中性帧
+│   │   └── check_hdg_lockup.py   #     正航向"转不动 / 无效自转"的仿真复现（`hdg.max_turns` 的由来）
+│   └── pipeline/                 #   工程链路
+│       ├── check_pipeline_identity.py  # 训练/推理**同域**自证（去畸变↔回投↔解码同一条链，勿改图像链路）
+│       ├── check_domain.py       #     本仓是哪个"代次"（D 链序 + wb 增益 + CLAHE + 权重 md5 指纹）
+│       └── check_paths.py        #     路径/配置落点自检
 │
 └── analyze/                      # ③ 离线判读与标定（吃日志/dump/录制数据，出结论与参数建议）
-    ├── analyze_task_log.py       #   逐帧日志判读 ①~⑧（相位/出口/水平通道能动力/进 THROUGH 偏了多少）
-    │                             #   ⚠️ 2026-09-23 新增的 `img_sign/hdg_susp/hdg_probe/hdg_rate/tyaw` 等
-    │                             #     字段它还没纳入（要看这几个用手工 python 或看 stdout）
-    ├── feature_coverage.py       #   **这轮哪些功能没被用到**（相位/子状态/档位/动作 + ✔✘ 清单）
-    ├── analyze_kpt_dump.py       #   preview --dump 的角点可得率 / PnP 命中率（标定 conf_thr/vis_thr/reproj_px）
-    ├── analyze_heading.py        #   PnP 安装角（bias）与航向噪声底（静态 dump）
-    ├── analyze_pnp_center.py     #   位姿中心 vs bbox 中心的偏差证据
-    ├── label_corners.py          #   手工标 4 角 → 同格式 dump（检测器不响应时的岸上路线）
-    ├── ruler_calib.py            #   靶子读数 → 等效焦距 fx/fy 与距离口径 c（--gate 与门框联立）
-    ├── tape_ticks.py             #   刻度周期法：卷尺自带 1cm 刻度测像素比例
-    └── pnp_calib.py              #   **PnP 位姿/深度标定**：真值 dump → 误差表 + 门框尺寸反演 + cfg 建议
+    ├── log/                      #   判读日志
+    │   ├── analyze_task_log.py   #     逐帧日志判读 ①~⑧（相位/出口/水平通道能动力/进 THROUGH 偏了多少）
+    │   ├── feature_coverage.py   #     **这轮哪些功能没被用到**（相位/子状态/档位/动作 + ✔✘ 清单）
+    │   ├── analyze_kpt_dump.py   #     preview --dump 的角点可得率 / PnP 命中率（标定 conf_thr/vis_thr/reproj_px）
+    │   ├── analyze_heading.py    #     PnP 安装角（bias）与航向噪声底（静态 dump）
+    │   └── analyze_pnp_center.py #     位姿中心 vs bbox 中心的偏差证据
+    └── calib/                    #   标定
+        ├── label_corners.py      #     手工标 4 角 → 同格式 dump（检测器不响应时的岸上路线）
+        ├── ruler_calib.py        #     靶子读数 → 等效焦距 fx/fy 与距离口径 c（--gate 与门框联立）
+        ├── tape_ticks.py         #     刻度周期法：卷尺自带 1cm 刻度测像素比例
+        └── pnp_calib.py          #     **PnP 位姿/深度标定**：真值 dump → 误差表 + 门框尺寸反演 + cfg 建议
 ```
 
 > `tools/` 现在是一个 **Python 包**（`tools/__init__.py` + 三个子目录的 `__init__.py`），
@@ -73,7 +78,7 @@ tools/
 > PnP/深度标定的完整实验流程（怎么摆、录多久、判据、记录表、报告模板）见
 > `doc/记录/实验待测-runbook.md`；`pnp_calib.py` 只负责「把 dump + 真值变成误差表和参数建议」。
 
-> **过门**：当前在用的是 `gate/` **扁平 v1.2 版**（9 个文件，含 `heading_align.py`），
+> **过门**：当前在用的是 `gate/` **扁平 v1.2 版**（`gate/` 下 1 个总调度 + `gate/percept/`、`gate/motion/` 若干模块），
 > `kpt_memory` 是**可选开关、2026-09-18 起默认关闭**
 > （`cfg/vision.yaml → vision.gate.kpt_mem.enable: false`；开启用 `enable: true` 或 `AUV_GATE_KPT_MEM=1`，
 > 优先级 `AUV_GATE_KPT_MEM` > `enable` > 兜底 `false`。板端曾因拼写错 `flase` 被 `bool('flase')=True`
@@ -190,7 +195,7 @@ KEEP=5 BIG_FILES=20 bash tools/deploy/tidy_board_bak.sh   # 多留几个回滚�
 
 ```bash
 # 改完代码（本地）
-python3 -m pytest tests/ -q                    # 本地全绿（80 例，约 8s）
+python3 -m pytest tests/ -q                    # 本地全绿（216 例，约 15s）
 python3 -m pytest tests/_bite_probe.py -q      # 改过 cfg 相关逻辑时：确认用例还会"咬"
 bash tools/deploy/check_board_parity.sh        # 先确认"本地 == 清单"（并看有没有"新文件未入清单"）
 bash tools/deploy/deploy_to_board.sh --dry-run # 看它打算传/删哪些（**新文件不在清单里就不会被传**）
@@ -214,16 +219,13 @@ bash tools/deploy/tidy_board_bak.sh            # 可选：板端备份堆多了�
 | `models/*.bin` | `/home/sunrise/Desktop/AUV_New/models/`（权重单独管理，**不随代码同步**，见下） |
 | `<板端>/bak/` | 板上备份区：`rollback/`（可直接回滚）+ `archive/`（按时间归档），由 `tidy_board_bak.sh` 维护 |
 
-> **板端另有一份旧工程 `/home/sunrise/AUV/`（09-17 的树，不在任何清单里、部署脚本也不管它）**。
-> 它不是权威副本，只在"故意跑旧一代权重"时才会用到；改动它属于**手工运维**，
-> 不会反映到本地，也不会被 `check_board_parity.sh` 看见。
-> 2026-09-27 手工换过它门权重（见下"权重分发"），当时发现的两个坑：
-> ① 它的 `cfg/vision.yaml` 里 `model.path` / `task_models.gate.path` 都是**绝对路径**，
->    而旧代码 `gate/percept/gate_detector.py::build_gate_backend` 用 `os.path.exists(path)` **直接判存在、
->    不解析相对路径** ⇒ 改这份 cfg 必须写绝对路径；
-> ② 它的 `models/` 里有个 `gate_kpt_bayese_640x640_nv12.bin.`（**名字尾部多一个点**），
->    而 cfg 指的是不带点的名字 ⇒ 权重一直"缺失"、gate 被静默跳过。
->    换权重时顺手对一遍 `ls -lab models/`，尾点、`.bak` 后缀这类改名都会让配置落空。
+> **A 域（板端旧工程 `/home/sunrise/AUV/`，09-17 的树）已于 2026-10-01 退役**：
+> 用户定「现在只用 **D+wb** 域」⇒ 它的同步通道与 canonical cfg 整体归档到
+> `bak/retired/Adomain_20261001/`（含 `sync_Adomain_repo.sh`、`Adomain_cfg/`、`board_forks_Adomain.txt`、
+> A 域老内参 `front_camera_AUV1_water_fx782.yaml`），`deploy` / `check_board_parity` 都不再管它。
+> 当年手工运维它踩过的两个坑**仍然通用**（改任何板端 cfg 都要过一遍）：
+> ① 旧代码 `build_gate_backend` 用 `os.path.exists(path)` 直接判存在、**不解析相对路径** ⇒ 手改 cfg 要写绝对路径；
+> ② 文件名尾部多一个点（`….bin.`）会让 cfg 指的名字「缺失」、gate 被**静默跳过** ⇒ 换权重后 `ls -lab models/` 对一遍。
 
 ### 6.1 权重分发（`models/*.bin` 不走部署脚本）
 
@@ -254,7 +256,7 @@ print('det =', d)          # 角点应是 TL→TR→BR→BL 的四边形，不�
 PY"
 ```
 
-**2026-09-27 实测记录（旧副本 `/home/sunrise/AUV` 换门权重）**：把
+**2026-09-27 实测记录（旧副本 `/home/sunrise/AUV` 换门权重）—— ⚠️ A 域已于 2026-10-01 退役，以下仅存史**：把
 `RDKX5-YOLOv11n-/output/weights/gate_kpt_auv4_bayese_640x640_nv12.bin`
 （md5 `d38b803e5823b35696f5711ecd1c30b4`，3,942,297 B）scp 到该目录 `models/`，
 并把 `cfg/vision.yaml` 的 `task_models.gate.path` 指到它（绝对路径）；
@@ -295,7 +297,7 @@ diff -u cfg/comm.yaml "$b"        # 逐键看清差异 → 把板端现场值合
 ### 陷阱 2：**新文件不在清单里 = 永远传不上板**
 `deploy_to_board.sh` 只遍历 `board_parity.md5` 里的条目；清单由
 `check_board_parity.sh --board --write` 用 `find` 重新生成（会收录新增的 `*.py/*.sh/*.md/*.yaml`）。
-所以**新增源文件/新目录后必须先刷清单**，否则板端会出现"新 `gate_task.py` + 缺 `heading_align.py`"
+所以**新增源文件/新目录后必须先刷清单**，否则板端会出现"新 `gate/gate_task.py` + 缺 `gate/motion/hdg.py`"
 这种半套状态 → 板端一 import 就崩。
 
 ```bash

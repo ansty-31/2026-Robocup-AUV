@@ -1,6 +1,7 @@
 #
 # 2026-09-30：目录两层分级后路径已更新；**搬过目录的条目去掉方括号**（板端还在旧路径，等 --board 核对后再补）。旧路径见 tools/deploy/deploy_to_board.sh 的 DELETED。
-[ f1e3a2a33dd5e37c6de4769138a2fa22  README.md ]
+#
+0bc7c0e1d0530c93644726faa98c29e8  README.md
 [ 5cd1d8b7a7777a4dd23414ed50790c53  base/__init__.py ]
 d87d7c9dcc02ebe8c97f57d69105f16c  base/cfg/__init__.py
 6c75ade31bd23144ff9b1c0ebb409ab5  base/cfg/settings.py
@@ -10,11 +11,10 @@ b9a4cfe740f2be2d8c23deda7d31e787  base/hw/telemetry.py
 0435282937da5b19b4d33dca8618bbd6  base/hw/uart.py
 e618329c8387366d4fa54b12782614af  base/log/__init__.py
 f2a54c4927236fd79e380b3aae283857  base/log/turn_log.py
-[ 21a25280e51063f305f08a21191b4bf6  cfg/backup/front_camera_AUV1_water_fx782.yaml ]
-[ c0dbe83f7fb982cd1abed47d959448eb  cfg/comm.yaml ]
+8426b90b57792d46cc4fc937f1bac924  cfg/comm.yaml
 [ cb757ca6a8b3aadec0f007af547bcd27  cfg/front_camera.yaml ]
 [ 5e9c040d53ed6818f09ef55acc8e9026  cfg/front_camera_air.yaml ]
-[ e5d2416cc1dfd27fa5b708f5647867bc  cfg/vision.yaml ]
+9f8eb9e3777bf9631609f15e9f5b5608  cfg/vision.yaml
 [ b632fee694cd4166265b1aeda927dbac  common/__init__.py ]
 d50c27941758d3caba231476a440800f  common/cfg/__init__.py
 31fb75e14217adf60d1b378283967604  common/cfg/cfgnode.py
@@ -23,9 +23,9 @@ b910d7a25e53a0b17c5bd394e8973d50  common/motion/__init__.py
 6f0e7cea96e5daf84a0d2601ad576b72  common/motion/turn_deg.py
 764e7f9c6f9194c701e5c9f683db4a65  common/vision/__init__.py
 58dfcca5f25424d20e117a4b5d1bac18  common/vision/detector.py
-13b611907a90ff8cd587038aeb0617a6  common/vision/preprocess.py
+d109a75faade2796481befa7409cd9de  common/vision/preprocess.py
 0a9e31a7da2ad34485687a1630d10eef  doc/README.md
-[ f6cd5b8039a9bb08fb1aabb677a6ac92  doc/注释历史.md ]
+b83280cfe93332c600d99b647d39cfb6  doc/注释历史.md
 7b0930eb418222aa5fd1d7ff783de154  doc/现场/待研究-缺角位姿先验（三维信息复用）.md
 bb695e1d11b6f7d47dc5ebfd71479424  doc/现场/现场卡-靶子法.md
 [ 00ec5c4e383b31cd928c92783624d3f3  doc/记录/2026-09-22-改动记录-review.md ]
@@ -41,9 +41,13 @@ e14fc41ec0e2bc32c40ac1280ed660dd  doc/记录/算法说明-gate-角点逐点融�
 72d0885d7df8814550fce137506ddfed  doc/设计/gate_pose_decode_spec.md
 2f8503022ce439663f135556860c8886  doc/设计/算法说明.md
 [ d875126922153e11c75cd10db0f96ba1  gate/__init__.py ]
+cce73d41a94376bd808309c78113c248  gate/gate_task.py
 e0328cf97b1c53ecf2410865243e9b03  gate/motion/__init__.py
-1135530b2aa86f4e615345d46a22f55d  gate/motion/gate_task.py
-893f9551b4a09c1a5a534b0f91169978  gate/motion/heading_align.py
+51e03cbfedf43977257c57c349f25f41  gate/motion/channels.py
+7e87f7d016b499668268846c38577fa4  gate/motion/exits.py
+84e08a0fa232d6fcd12db6134a46aac2  gate/motion/hdg.py
+ba9c3ba3172b74a5ef6b93064490e911  gate/motion/modes.py
+a3499d2ec802433a7d620983581f7cc7  gate/motion/params.py
 8743531d19e52e242b3d7daaaa9876e2  gate/percept/__init__.py
 91217bac7e86ac7d815fc09337e41ece  gate/percept/gate_decode.py
 87e47531d0b4574ef2a14fbdc03090c7  gate/percept/gate_detector.py
@@ -52,7 +56,7 @@ e0328cf97b1c53ecf2410865243e9b03  gate/motion/__init__.py
 2169e6b91760775822014008c8e30c9d  gate/percept/geometry.py
 f8cee57d64ab6fba36906d56ead59426  gate/percept/kpt_memory.py
 b787c80cab7014c5a61d0d7169020337  gate/percept/mock.py
-[ d69740d8bb04635f20a62308ba54cea2  main.py ]
+4686467a594f6dac12c623244e630156  main.py
 [ 87fddfa544fc2fcbd040b7817a5f7fca  manual.sh ]
 [ 34e4bdc7cebcd525742ef328ba32591a  manual/__init__.py ]
 [ 18c82011f1202c0622b3a5e3a8caae1d  manual/recorder.py ]
@@ -67,16 +71,16 @@ b787c80cab7014c5a61d0d7169020337  gate/percept/mock.py
 [ 444e880ed96a38f108639f8a4d9db792  task1_2/run_gate.sh ]
 [ b7f47a1e4cecb7972ab1f5d74853e2a6  tests/README.md ]
 [ 4c068b6611ad27e9423cc96634ec84c1  tests/__init__.py ]
-[ 7003c776590ae08a55999b1d8eca00f7  tests/_bite_probe.py ]
+b8213e4241392afcd22c6bd64bf16181  tests/_bite_probe.py
 [ 0a92cfedf4247cdd8d50a650ec1bab54  tests/conftest.py ]
 [ 05b85d7317c05bbde0c3930c3c9ef1df  tests/platform/__init__.py ]
 [ 1c52bc36073e223eae5d261410f1ece5  tests/platform/test_base.py ]
-[ 8ab0656ef43178117f27d567fdc331eb  tests/platform/test_common.py ]
+6b869ea933515d8d936c8b4af47edac9  tests/platform/test_common.py
 [ 4f59d799b330c14b707cccef34f7cb1c  tests/platform/test_hud.py ]
 [ 661db151c33a6e008080ae7aac557924  tests/platform/test_paths.py ]
 [ c6cd59b32d4dda8935b7acfb2a1396fa  tests/tasks/__init__.py ]
 e92fd12d3cfca1886404006d47399bcc  tests/tasks/gate/__init__.py
-c77b2622503a0e35665893aba5974e09  tests/tasks/gate/test_gate_flow.py
+538a97d065d469cbec347be208a731fa  tests/tasks/gate/test_gate_flow.py
 556d9a0f7d91bb3581c6c6d6cedbea9b  tests/tasks/gate/test_gate_postproc.py
 9ca260b2d502299df322ecfc80247bcd  tests/tasks/gate/test_gate_vision.py
 fbdf6ac226b8880d3a9a797876d67830  tests/tasks/test_ball.py
@@ -87,7 +91,7 @@ fbdf6ac226b8880d3a9a797876d67830  tests/tasks/test_ball.py
 [ 7b7a66c8e6403366d88b649eff9d0e03  tests/tooling/test_pnp_calib.py ]
 [ 082c17a12e8ea2bcd93f96eb9d83b879  tests/tooling/test_ruler_calib.py ]
 [ f6e6c6fcba74a223c6b4cc1c1ad324a3  tests/tooling/test_tape_ticks.py ]
-[ 11e90920dd4eed8e6b36084a91bdc650  tools/README.md ]
+65df9880b3a44a0f60d3ea3e42d26e04  tools/README.md
 [ a5756436e46199292608db3824a030b3  tools/__init__.py ]
 [ 17558c18e49a677a743fc747244bfc87  tools/analyze/__init__.py ]
 c213fa7c91af9ffd3d4c4152ea2dca19  tools/analyze/calib/__init__.py
@@ -104,22 +108,18 @@ a75b0f625a574e52cecfbe0a9f0a769b  tools/analyze/log/feature_coverage.py
 [ aee4e5cd413024139261a227e58c08da  tools/check/__init__.py ]
 b0df4b391d4b940d5eacee14c7de6512  tools/check/boat/__init__.py
 71b0d52a13917fa9b9de778ab53e4895  tools/check/boat/check_dof_sign.py
-c83acbbedae58c9b674a2ebca16980ca  tools/check/boat/check_hdg_lockup.py
+49d49b0936d22847f2dce17152a1ff2a  tools/check/boat/check_hdg_lockup.py
 aa9c52242f7426b098c1f0e8b07ebc4e  tools/check/pipeline/__init__.py
-0c996fd4ed7a97713ecaf9d6eab35033  tools/check/pipeline/check_domain.py
+e3758053c2dc7165ef0b619fb4a5191b  tools/check/pipeline/check_domain.py
 97686efda0e28518bf7b355b537672e5  tools/check/pipeline/check_paths.py
 bae354d7a2e6f23060a93f42e39e82d4  tools/check/pipeline/check_pipeline_identity.py
 b5965ea6bd935c3ad0599719c24a1f66  tools/check/vision/__init__.py
 7e928818fb0d9c8064750d581b899161  tools/check/vision/auv_kpt_meter.py
 536ff7bdb595e68df166dfb041baedb9  tools/check/vision/check_gate_pose.py
 9de6c72866abd850e7eb328111191333  tools/check/vision/check_kpt_decode.py
-a6c14cf0fa2aa78913a0534a9b892979  tools/deploy/Adomain/Adomain_cfg/README.md
-078de05783fc3abc338534961efb68c6  tools/deploy/Adomain/Adomain_cfg/comm.yaml
-1600c1a2838e75a42a7ffc3089d74d57  tools/deploy/Adomain/Adomain_cfg/front_camera.yaml
-7eb0dae93bd4d927c0e7a800b447cdd7  tools/deploy/Adomain/Adomain_cfg/preprocess_A_ref_20260917.py
-9195d8d60c31773e9b027224396d5cc1  tools/deploy/Adomain/Adomain_cfg/vision.yaml
-12b4b90da16b185819a90a2c6a0d8356  tools/deploy/Adomain/board_forks_Adomain.txt
-13676c520e11c83447d7253160ff7d82  tools/deploy/Adomain/sync_Adomain_repo.sh
 [ dccb6a3c23ca6bc07ad1d8cea9f0aa07  tools/deploy/__init__.py ]
 [ 85f8784979483a966eee3571f3b450ac  tools/deploy/archive_baks.sh ]
 d7d586fe99f2369bced150f5de5d153b  tools/deploy/board_forks.txt
+149b902ee0440b4b6924495ae4acd8f0  doc/设计/过门逻辑树.md
+bf91e161528d95fca5152f36f46285bf  tools/deploy/deploy_to_board.sh
+ab4ce3023be2d6793149d64d9c2f2c14  tools/deploy/check_board_parity.sh

@@ -16,7 +16,7 @@ sys.path.insert(0, _ROOT)
 
 import base.cfg.settings as S                                          # noqa: E402
 from common.motion.turn_deg import TurnCore, turn, turn_cfg, wrap180, yaw_sign             # noqa: E402
-from gate.motion.heading_align import (ABORTED, DONE, GIVEUP, TURN,             # noqa: E402
+from gate.motion.hdg import (ABORTED, DONE, GIVEUP, TURN,             # noqa: E402
                                 HeadingAligner, hdg_cfg)
 
 # 真机极性：+yaw 命令 → 遥测 yaw 减小（σ = -1）
@@ -198,7 +198,7 @@ def test_divergence_guard_stops_the_turn():
 
 
 # ======================================================================
-# 正航向（gate/motion/heading_align.py）：PnP 目标角 → 转一次 → 结束
+# 正航向（gate/motion/hdg.py）：PnP 目标角 → 转一次 → 结束
 # ======================================================================
 class _World(object):
     """假船 + 假门：h=机身转角(正=右)，**psi=psi0−h**（2026-09-28 实船改正：右转使 psi **变小**），
@@ -250,7 +250,7 @@ def _run_hd(aligner, world, frames=1200, lost_after=None, telemetry=True, cfg_ov
     return states, logs, now
 
 def test_converges_with_one_turn():
-    """psi=+20° → **右转 20°** → 结束（2026-09-28 实船改正；见 heading_align.start 的注释）。
+    """psi=+20° → **右转 20°** → 结束（2026-09-28 实船改正；见 hdg.HeadingAligner.start 的注释）。
 
     一次到位：目标角在起转那一刻冻结，转完就是 DONE，**只转一次**。
     """
@@ -380,7 +380,7 @@ def test_p3p_frames_do_not_feed_the_filter():
     import cv2
     from common.vision.detector import Det
     from gate.percept.gate_detector import board_camera
-    from gate.motion.gate_task import GateTask
+    from gate.gate_task import GateTask
     from gate.percept.geometry import object_points
     from tests.tasks.gate.test_gate_flow import _Hub, _Uart
 

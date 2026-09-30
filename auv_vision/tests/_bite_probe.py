@@ -51,11 +51,32 @@ def test_bite__ball_dash_ratio_is_used(monkeypatch):
     with pytest.raises(AssertionError):
         target(FakeUart())
 
-def test_bite__hdg_fresh_window_is_used(monkeypatch):
-    """改 comm.gate.hdg.fresh_ms → 航向测量新鲜度用例必须红。"""
+def test_bite__hdg_measure_needs_trusted_full_frame(monkeypatch):
+    """改 `vision.gate.keypoint.conf_thr` → "psi 只来自被采信的 full 帧"用例必须红。
+
+    （原探针改的是 `hdg.fresh_ms`；那个旋钮 2026-09-30 已随"航向优先"一起删除，
+      现在的"新鲜度"机制是"转向之后必须有一次新的 ψ 测量"，由 turn 计数/时刻驱动。）
+    """
     from tests.tasks.test_motion import test_p3p_frames_do_not_feed_the_filter as target
-    monkeypatch.setitem(S.comm.gate, "hdg",
-                        S.Y(dict(S.comm.gate.hdg, fresh_ms=-1.0)))   # 任何测量都算过期
+    monkeypatch.setitem(S.vision.gate["keypoint"], "conf_thr", 0.99)   # 高于用例里 full 帧的 0.95
+    with pytest.raises(AssertionError):
+        target()
+
+
+def test_bite__per_gate_turn_cap_is_used(monkeypatch):
+    """改 `comm.gate.hdg.max_turns` → 逐小步收敛用例必须红（它要转 ≥2 次）。"""
+    from tests.tasks.gate.test_gate_flow import (
+        test_small_steps_converge_toward_the_target_after_the_once_per_gate_removal as target)
+    monkeypatch.setitem(S.comm.gate["hdg"], "max_turns", 1)            # 只许转一次
+    with pytest.raises(AssertionError):
+        target()
+
+
+def test_bite__post_sway_kpt_min_is_used(monkeypatch):
+    """改 `comm.gate.hdg.post_sway_kpt_min` → postsway 角点数用例必须红。"""
+    from tests.tasks.gate.test_gate_flow import (
+        test_post_sway_exits_as_soon_as_the_configured_keypoints_appear as target)
+    monkeypatch.setitem(S.comm.gate["hdg"], "post_sway_kpt_min", 99)   # 永远看不到这么多
     with pytest.raises(AssertionError):
         target()
 

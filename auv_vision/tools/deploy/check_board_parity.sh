@@ -124,8 +124,6 @@ done < <(find . -type f \( -name '*.py' -o -name '*.sh' -o -name '*.md' -o -name
     -not -path './models/*' -not -path '*/__pycache__/*' -not -name '*.pyc' \
     -not -name 'check_board_parity.sh' -not -name 'board_parity.md5' \
     -not -name 'deploy_to_board.sh' -not -name 'tidy_board_bak.sh' -not -name 'board_forks.txt' \
-      -not -name 'board_forks_Adomain.txt' -not -name 'sync_Adomain_repo.sh' \
-      -not -path './tools/deploy/Adomain_cfg/*' \
     -not -name 'ssh_x5*.sh' -not -name 'askpass*.sh' \
     -not -name '.*' | sed 's|^\./||' | sort)
 new_cnt=0
@@ -220,8 +218,6 @@ if [ "$BOARD" = "1" ]; then
       -not -path './models/*' -not -path '*/__pycache__/*' -not -name '*.pyc' \
       -not -name 'check_board_parity.sh' -not -name 'board_parity.md5' \
       -not -name 'deploy_to_board.sh' -not -name 'tidy_board_bak.sh' -not -name 'board_forks.txt' \
-      -not -name 'board_forks_Adomain.txt' -not -name 'sync_Adomain_repo.sh' \
-      -not -path './tools/deploy/Adomain_cfg/*' \
       -not -name 'ssh_x5*.sh' -not -name 'askpass*.sh' \
       -not -name '.*' | sed 's|^\./||' >> "$LIST"
     sort -u "$LIST" -o "$LIST"
@@ -234,7 +230,7 @@ if [ "$BOARD" = "1" ]; then
       echo "#"
       echo "# 格式：[ md5  文件 ] = 已与板端逐字节核对一致（板端实测证据）；无方括号 = 仅本地记录"
       echo "# 注意：tools/deploy/ 下的 check_board_parity.sh / deploy_to_board.sh / board_parity.md5 /"
-      echo "#       tidy_board_bak.sh / board_forks*.txt / Adomain_cfg/ 是\"本地驱动\"工件，不入清单；"
+      echo "#       tidy_board_bak.sh / board_forks*.txt 是\"本地驱动\"工件，不入清单；"
       echo "#       tools/deploy/archive_baks.sh 入清单（板端维护用 → 板端 <根>/tools/deploy/archive_baks.sh）"
       echo "# 故意分叉（本地≠板端）的文件见 tools/deploy/board_forks.txt：deploy 不上传、本检查不报错；"
       echo "#   这类条目在本清单里是**无方括号**的（记本地值，板端不是这份字节）—— 属正常，不是漏核对"

@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
-"""preprocess.py — 目标识别前的图像预处理（推理链路）
-D 域（默认，`vision.image.chain: D`）：
+"""preprocess.py — 目标识别前的图像预处理（推理链路，**单域 D+wb**）
 raw → 缩放到模型方形输入（默认 640x640）→ 画面补偿 enhance(WB→CLAHE→gamma)
-→ 640 上去畸变 remap（可选，需标定 yaml；与训练链路 prepare_frames.py 一致，
-A 域（`vision.image.chain: A`，原识别方案，配 AUV_4 权重）：
-raw → 原始分辨率去畸变 remap@720p → 缩放 640 → 画面补偿（+ clahe_clip 0.5）
+→ 640 上去畸变 remap（可选，需标定 yaml；与训练链路 prepare_frames.py 一致）
+（A 域那条链 `remap@720p → resize640 → enhance` 已于 2026-10-01 退役归档，见 bak/retired/Adomain_20261001/）
 （训练数据集制作在 PC 工程 RDKX5-YOLOv11n- 中完成，不在本工程范围）
 参数源：cfg/vision.yaml（image.* / camera.*_calibration / model.input_size）"""
 import os
@@ -132,54 +130,24 @@ class ModelPreprocessor(object):
     """推理链路预处理对象（缓存去畸变映射）。"""
 
     def __init__(self, undistort=None, gains=None, clip=None, gamma=None,
-                 size=None, calib_path=None, chain=None):
+                 size=None, calib_path=None):
         self.undistort = S.vision.image.undistort if undistort is None else undistort
         self.gains = S.vision.image.white_balance_bgr if gains is None else list(gains)
         self.clip = S.vision.image.clahe_clip if clip is None else clip
         self.gamma = S.vision.image.gamma if gamma is None else gamma
         self.size = S.vision.model.input_size if size is None else int(size)
         self.calib_path = calib_path
-        # 识别链路域（`vision.image.chain`，A 域=原方案 / D 域=新方案）：
-        #   **必须与所用权重同域**，见 `process()` 与 `doc/记录/过门-状态机与参数.md` §9.5 代次表。
-        self.chain = str(S.get("vision.image.chain", "D")
-                         if chain is None else chain).strip().upper()
-        if self.chain not in ("A", "D"):
-            raise ValueError("vision.image.chain 只能是 A|D（当前 %r）" % self.chain)
         self._maps = {}                # {(w,h): remap 映射}，按分辨率缓存
 
-    def _maps_for(self, w, h):
-        if not self.undistort or not self.calib_path:
-            return None
-        key = (w, h)
-        if key not in self._maps:
-            if not os.path.exists(self.calib_path):
-                raise FileNotFoundError("undistort=true 但标定文件缺失: %s"
-                                        % self.calib_path)
-            self._maps[key] = calibration_maps(self.calib_path, w, h)
-        return self._maps[key]
 
     def process(self, frame_bgr):
-        """raw(BGR,任意尺寸) → [去畸变] → 缩放 → 画面补偿，顺序由 `chain` 决定。
-        `vision.image.chain` 两个值就是"两套识别方案"，**必须与权重成对使用**：
-        | chain | 链路 | 权重（门） | clahe_clip |
-        |---|---|---|---|
-        ② enhance 本来就在 640 上做；③ 与训练链路一致
-        （`RDKX5-YOLOv11n-/scripts/1_prepare/prepare_frames.py` 现在只产 D 域）。
-        几何：A/D 两序**等价**（nk640 = S·nk720，见 `calibration_maps_640`），
-        kpt 回缩放后都落在**去畸变 720p** 空间，相机模型一律 `rectified=True` 的 nk720，
-        **不要**改成 raw K/D。"""
+        """raw(BGR,任意尺寸) → 缩放 → 画面补偿 → 去畸变(640 域)，即 **D 链**（单域，2026-10-01 起）。
+        顺序有讲究：enhance 本来就在 640 上做（与训练链路一致，PC 工程只产 D+wb）。
+        几何：kpt 回缩放后落在**去畸变 720p** 空间，相机模型一律 `rectified=True` 的 nk720，
+        **不要**改成 raw K/D。（改链路前先看 doc/设计/gate_pose_decode_spec.md 与权重代次。）"""
         cv2 = _cv2()
         h, w = frame_bgr.shape[:2]
         f = frame_bgr
-        if self.chain == "A":
-            # 原识别方案：先在原始分辨率上去畸变，再缩放，最后在 640 上做补偿
-            maps = self._maps_for(w, h)
-            if maps is not None:
-                f = cv2.remap(f, maps[0], maps[1], cv2.INTER_LINEAR)
-            if (w, h) != (self.size, self.size):
-                f = cv2.resize(f, (self.size, self.size),
-                               interpolation=cv2.INTER_LINEAR)
-            return enhance(f, self.gains, self.clip, self.gamma)
         if (w, h) != (self.size, self.size):
             f = cv2.resize(f, (self.size, self.size),
                            interpolation=cv2.INTER_LINEAR)

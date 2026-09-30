@@ -4,7 +4,7 @@
 与 `AUV_STREAM=0`（绝不新建推流 socket）。**秒级跑完，不需要板子/相机/水池。**
 
 ```bash
-python3 -m pytest tests/ -q                     # 全部（80 例）
+python3 -m pytest tests/ -q                     # 全部（216 例）
 python3 -m pytest tests/platform -q             # 只跑平台与公共件
 python3 -m pytest tests/tasks -q                # 只跑任务层
 python3 -m pytest tests/tooling -q              # 只跑工具层
@@ -22,25 +22,35 @@ tests/
 │   ├── test_base.py         settings 真实取值 + **限深下限 0.55 不变量**、11B 下发帧布局/极性、
 │   │                        DOF→轴字节、**真串口(pty)** 收发、0xAA55 14B 遥测解析与错位重同步、
 │   │                        深度不足禁上浮/下潜照旧/超时放行、stop_hard 与急停真的停住
-│   └── test_common.py       PID（死区/限幅/微分/抗 windup）、图像链路（NV12 打包色度保真、
-│                            **squish 而非 letterbox**）、Det 助手与按类挑选、cfgnode（缺键兜底、
-│                            字符串布尔坑、**共用 comm.motion 参数的唯一来源**）
+│   ├── test_common.py       PID（死区/限幅/微分/抗 windup）、图像链路（NV12 打包色度保真、
+│   │                        **squish 而非 letterbox**、**D 链序唯一**）、Det 助手与按类挑选、
+│   │                        cfgnode（缺键兜底、字符串布尔坑、**共用 comm.motion 参数的唯一来源**）
+│   ├── test_paths.py        路径落点（部署脚本默认目录、cfg 绝对路径、标定 yaml 文件头）
+│   └── test_hud.py          叠加层（画什么/不画什么）
 ├── tasks/                ② 任务与运动原语
 │   ├── test_ball.py         撞球：SEARCH→CENTER→APPROACH→DASH→STOP→DONE(hit)；CENTER 不前进；
 │   │                        APPROACH 只 sway；无目标跑满时限
-│   ├── test_gate_vision.py  过门视觉：PnP 合成往返（含反投影闭环）、keypoint 解码约定
-│   │                        （网格项 +索引 的 −0.5 陷阱、通道布局、DFL/框心、squish 回投、NMS）、
-│   │                        mode 降级表、kpt_mem 开关优先级与平滑、mock 后端整链路
-│   ├── test_gate_flow.py    过门相位机：coarse 只有未对准才后退、水平只有 sway、yaw 只在 ALIGN.HDG、
-│   │                        SEARCH 是平移扫视、近距丢门判过门、loiter 门口兜底、THROUGH 按时长、
-│   │                        陈旧 z 不误判；**配置守卫**（兜底==cfg、共用值只在 motion）
-│   └── test_motion.py       运动原语：`TurnCore`（遥测闭环/超时/**无遥测拒转**/盲转角速率/探向）
-│                            + `HeadingAligner`（测→转→停稳→再测、迭代上限、p3p 不进滤波器、
-│                            新鲜度、丢门中止、一键关闭）
+│   ├── gate/                过门（按主题成组）
+│   │   ├── test_gate_vision.py   PnP 合成往返（含反投影闭环）、keypoint 解码约定
+│   │   │                         （网格项 +索引 的 −0.5 陷阱、通道布局、DFL/框心、squish 回投、NMS）、
+│   │   │                         mode 降级表、kpt_mem 开关优先级与平滑、mock 后端整链路
+│   │   ├── test_gate_flow.py     相位机仲裁：coarse 只有未对准才后退、水平只有 sway、
+│   │   │                         yaw 只在 ALIGN.HDG、SEARCH 是平移扫视、**丢门回 SEARCH（不再直冲）**、
+│   │   │                         loiter 门口兜底、THROUGH 按时长、陈旧 z 不误判、
+│   │   │                         正航向 + SWAY_BACK 全套（自包含转向/硬停/让位/角点门限/转向上限）、
+│   │   │                         **配置守卫**（兜底==cfg、共用值只在 motion）
+│   │   └── test_gate_postproc.py 后处理四条（L/R 归一/几何合法/去重/选门键）+ 兜底==cfg
+│   └── test_motion.py       运动原语：`TurnCore`（遥测闭环/超时/**无遥测拒转**/满舵无进展自停/
+│                            方向自证/超转容差；探向与盲转已删）+ `HeadingAligner`（冻结 ψ 转一步、
+│                            `turn_scale`+`max_step_deg`、转向上限、p3p 不进滤波器、一键关闭）
 └── tooling/              ③ 工具层（守 `tools/` 下的脚本）
-    └── test_pnp_calib.py    `tools/analyze/calib/pnp_calib.py` 的合成往返：文件名真值解析、标尺反演
-                             （故意写错门宽 20% → 必须报 a≈1.2 并建议新 `frame_w`）、t_x/t_y 尺度与符号、
-                             psi≈−yaw、p3p 分类与深度偏差、CSV/报告行数
+    ├── test_pnp_calib.py    `tools/analyze/calib/pnp_calib.py` 的合成往返：文件名真值解析、标尺反演
+    │                        （故意写错门宽 20% → 必须报 a≈1.2 并建议新 `frame_w`）、t_x/t_y 尺度与符号、
+    │                        psi≈−yaw、p3p 分类与深度偏差、CSV/报告行数
+    ├── test_ruler_calib.py  卷尺靶子：跨度/斜视诊断 + (fx,c) 合成往返 + 混合轴向
+    ├── test_label_corners.py 手工标注：吸附/坐标域/schema/端到端喂通 pnp_calib
+    ├── test_tape_ticks.py   刻度周期法：亚像素/透视梯度/谐波/交叉校验门
+    └── test_cfg_yaml_head.py yaml 文件头（cfg 注释瘦身不破坏解析）
 ```
 
 **分层依据**：改动影响面。`platform` 挂了全项目都得停（限深保护/串口帧）；`tasks` 挂了只影响那个任务；
@@ -52,7 +62,7 @@ tests/
 pytest 默认不收集），需要时显式跑：
 
 ```bash
-python3 -m pytest tests/_bite_probe.py -q        # 8 passed = 7 条真的会咬 + 1 条反向对照
+python3 -m pytest tests/_bite_probe.py -q        # 10 passed = 9 条真的会咬 + 1 条反向对照
 ```
 
 - 改 `comm.gate.loiter.timeout_ms` → 门口兜底用例必须红；
@@ -60,7 +70,9 @@ python3 -m pytest tests/_bite_probe.py -q        # 8 passed = 7 条真的会咬 
   → 配置守卫用例必须红（这类"数值"由守卫钉，波形用例只验形状）；
 - 改 `comm.depth_guard.min_depth_m` → **0.55 不变量**用例必须红；
 - 改 `comm.ball.dash_ratio` → 撞球命中用例必须红；
-- 改 `comm.gate.hdg.fresh_ms` → 航向新鲜度用例必须红；
+- 改 `vision.gate.keypoint.conf_thr` → "正航向只吃可信 full 帧"用例必须红；
+- 改 `comm.gate.hdg.max_turns` / `comm.gate.hdg.post_sway_kpt_min`
+  → 转向上限 / SWAY_BACK 退出角点门限用例必须红；
 - 反向对照：把 `min_depth_m` 改成 0.40 时，**限深行为用例仍应通过**（它按 cfg 相对判定，
   这是对的，不是假红）。
 
@@ -70,5 +82,5 @@ python3 -m pytest tests/_bite_probe.py -q        # 8 passed = 7 条真的会咬 
 
 - 测试**不复制源码逻辑自证**（别把源码公式抄进断言）；
 - 装置复用写进 `conftest.py` 或同层模块，跨层复用用绝对导入 `from tests.<层>.<模块> import …`；
-- 断言"配置缺键/旧配置仍能跑"的地方，用代码兜底值（`gate_task._D_*`、`cfgnode.MOTION_DEFAULTS`），
+- 断言"配置缺键/旧配置仍能跑"的地方，用代码兜底值（`gate/motion/params.py::_D_*`、`cfgnode.MOTION_DEFAULTS`），
   别在测试里再抄一份数字。

@@ -3,12 +3,13 @@
 > **当前状态（20260926）** —— 当天全部改动/未验证/回退见 **`doc/记录/2026-09-26-改动记录-review.md`**
 > - **门 pose 权重再次换代 → 阶段一 `g240_i16` 版**：
 >   `models/gate_kpt_stage1_g240_i16_bayese_640x640_nv12.bin`（md5 **`ef52c18b…`**，3,938,787 B）；
->   上一代在 `bak/bakup_auv5/`（`9ac61773…`，09-24 采用版）。**契约与后处理规则见
+>   上一代在 `bak/weights/bakup_auv5/`（`9ac61773…`，09-24 采用版）。**契约与后处理规则见
 >   `doc/设计/gate_pose_decode_spec.md`**（输入 NV12/640/**squish**、输出 **9 张量 float NHWC**、
 >   `x_px = x_cell × stride`、`v` 要自己 sigmoid）。上一代 auv5（`945fdd01…`）在训练工程已删除，
 >   可能只剩板端一份 —— 回退前先核实。
 > - **规范 §4 的"解码后处理"已落进本项目**（🆕 `gate/percept/gate_postproc.py` + 三个新配置段）：
->   ① 候选阈值 `gate.det.conf: 0.6`（**只作用于 gate**，不动 ball/gate 共用的 `model.score_threshold`）；
+>   ① 候选阈值 `gate.det.conf: 0.5`（**只作用于 gate**，不动 ball/gate 共用的 `model.score_threshold`；
+>      规范 §6 的评测工作点是 0.6 —— 现值以 `cfg/vision.yaml` 为准）；
 >   ② 角点可信下限 `V_MIN = gate.keypoint.conf_thr: 0.8`（原 0.9；0.8 是阶段一权重的评测工作点）；
 >   ③ 几何合法（四角顺序 + 不自交）与**重复框去重**（小框 conf 更低 **且** ≥2 条边重合 → 丢小框，
 >   **判据不是包含关系**）；④ 选门改成**近距离优先** `gate.select.mode: near`（框宽当测距代理；
@@ -29,11 +30,11 @@
 >   ⚠️ **这条链路尚未在真实水域跑通过**（最新一趟板端日志里 `mode == full` 出现 0 次 ⇒ psi 一次都没测到），
 >   诊断与下一步见 review 文档 §5。
 > - **角点阈值（2026-09-26，随新权重换代）**：`keypoint: {conf_thr: 0.8, vis_thr: 0.5}` + 代码兜底
->   `gate_task._D_KPT` 同值。0.8 = 规范 `doc/设计/gate_pose_decode_spec.md` §6 的 `V_MIN`（旧值 0.9/0.7 是给
+>   `gate/motion/params.py::_D_KPT`（`gate_task` 再导出）同值。0.8 = 规范 `doc/设计/gate_pose_decode_spec.md` §6 的 `V_MIN`（旧值 0.9/0.7 是给
 >   **上一代**权重现场试出来的）；`vis_thr` 刻意更低，只为让低 v 角点留在画面/日志里做诊断 ——
 >   它进不了 mode/PnP。**cfg 不要整份推板端**（`comm.yaml` 仍有 4 处台架分叉）。
-> - **任务三 过门（gate）= 扁平 v1.2 版**（`gate/*.py`，**10 个文件**；来自 `bak/gate_before_enhance_20260915_182038/`
->   的 v1.2 原版 + 2026-09-18 新增 `heading_align.py` + 2026-09-26 新增 `gate_postproc.py`），
+> - **任务三 过门（gate）= 扁平 v1.2 版**（`gate/` 两层结构；源自 v1.2 原版 + 2026-09-18 新增正航向 + 2026-09-26 新增后处理，
+>   2026-09-30 把相位机按方法簇拆分、`gate_task.py` 提到 `gate/` 作总调度），
 >   这是**定版方案**，不再有分层结构。
 > - `kpt_memory`（门角点逐点软融合）是**可选开关、2026-09-18 起默认关闭**：
 >   `cfg/vision.yaml → vision.gate.kpt_mem.enable: false`（板端曾因拼写错 `flase` 被
@@ -44,7 +45,7 @@
 > - **过门的两条横向/转向约定（2026-09-20 用户定）**：
 >   **① 居中只有 sway 平移**（`align_yaw.{enable,in_px,in_pose}` 与其 PID **已整体删除**）；
 >   **② SEARCH 是左右平移扫视，不旋转**（原旋转脉冲已删除，`gate.search.{sweep_s,pause_s,sway}`）。
->   gate 里**唯一的 yaw 来源**是 ALIGN.HDG 正航向（`gate/motion/heading_align.py` +
+>   gate 里**唯一的 yaw 来源**是 ALIGN.HDG 正航向（`gate/motion/hdg.py` +
 >   `common/motion/turn_deg.py`，增益 `comm.motion.turn_pid`）。
 > - **限深保护（默认开启）**：下位机回传 14B 遥测帧（`0xAA55`+深度/姿态+校验和，
 >   `base/hw/telemetry.py`）→ 深度 ≤ `comm.depth_guard.min_depth_m`（**现场定死 0.55 m，不准改**）时
@@ -66,7 +67,7 @@ RoboCup AUV 赛事视觉代码。平台：**RDK X5（3.5.0）**，前视 USB + �
 识别：YOLO 蓝/红球 + gate（**keypoint 四角 + PnP** 新前端）；串口 11B 帧向 STM32 下发 DOF，
 STM32 回传 14B 遥测帧（深度/姿态 → 限深保护）。
 
-> 先读：`README.md`（用法）→ `doc/设计/算法说明.md`（总体）→ `doc/记录/过门-状态机与参数.md`（**状态/运动/参数/逻辑树速查；§9 是现场实测记录汇总**）→ `doc/设计/gate_pose_decode_spec.md`（**门 pose 模型的解码契约 + 后处理规则，换 bin 必读**）→ `doc/记录/算法说明-gate-PnP移植方案.md`（gate 设计与移植）→ `doc/记录/算法说明-gate-角点逐点融合滤波.md`（角点逐点数据处理）→ `doc/记录/实验待测-runbook.md`（**下水前后的实测阶梯与判据**）→ `doc/记录/2026-09-2X-改动记录-review.md`（**逐日全记录：改了什么 / 未验证 / 怎么回退**）。
+> 先读：`README.md`（用法）→ `doc/设计/算法说明.md`（总体）→ **`doc/设计/过门逻辑树.md`（过门逻辑的唯一入口：相位/档位/动作的逻辑图 + 异常应对 + 代码冲突清单）** → `doc/记录/过门-状态机与参数.md`（**历史逐状态导读；§9 是现场实测记录汇总**，描述 2026-09-30 重构前的结构，逻辑以逻辑树为准）→ `doc/设计/gate_pose_decode_spec.md`（**门 pose 模型的解码契约 + 后处理规则，换 bin 必读**）→ `doc/记录/算法说明-gate-PnP移植方案.md`（gate 设计与移植）→ `doc/记录/算法说明-gate-角点逐点融合滤波.md`（角点逐点数据处理）→ `doc/记录/实验待测-runbook.md`（**下水前后的实测阶梯与判据**）→ `doc/记录/2026-09-2X-改动记录-review.md`（**逐日全记录：改了什么 / 未验证 / 怎么回退**）。
 > 参数怎么改：`cfg/*.yaml` 注释只写"是什么 + 当前值 + 调它的后果"；**数值是怎么来的、现场发生过什么，都在 `doc/记录/过门-状态机与参数.md` §9**。
 
 ## 目录分区（英文分区命名）
@@ -95,13 +96,20 @@ auv_vision/
 │   ├── percept/         #   gate_decode.py(keypoint 解码) · gate_detector.py(组合根) · gate_frontend.py(mode 判定)
 │   │                    #   gate_postproc.py(后处理：可信角点/几何合法/去重/选门) · geometry.py(CameraModel/PnP/反投影)
 │   │                    #   kpt_memory.py(角点逐点软融合，**默认关**) · mock.py(仿真后端)
-│   └── motion/          #   gate_task.py(相位机骨架，唯一入口) · heading_align.py(ALIGN.HDG 正航向)
+│   └── motion/          #   **相位机按方法簇拆分**（2026-09-30）：gate_task.py 只剩编排（~330 行）
+│                        #     params.py 常量与缺键兜底表 ｜ channels.py 通道与小件（唯一执行出口 `_set_info`）
+│                        #     hdg.py 正航向与转向 ｜ modes.py 各档位（位姿/width/coarse/重取） ｜ exits.py 出口与终局
+│                        #     hdg.py = ALIGN.HDG（**算法核心 + 任务侧胶水**，2026-09-30 由 heading_align.py 合并而来）：
+#              流程 **先居中 → 再转向 → 反向平移+缓慢后退**，直到当前门出现 N 个可信角点
+#              （`comm.gate.hdg.post_sway_kpt_min`，默认 2）即认为"对齐光轴"完成、交回视觉；
+#              **没有"航向优先"**（旧 `entry_psi_first` 已删）
+│                        #   另有一个更粗的变体 B（4 文件）与对比：`bash bak/migration/_gate_split/switch.sh A|B`、bak/migration/SPLIT-AB.md
 │                        #   （gate 的**逐状态导读**在 doc/记录/过门-状态机与参数.md；改 gate 前先看）
-├── bak/                 # 归档（gitignored，不上板）：历次整包快照 + gate v1.2 原版树（见 bak/README.md）
+├── bak/                 # 归档（gitignored，不上板）：**按用途分 8 类**（snapshots/ weights/ trees/ retired/\n│                        #   trials/ files/ migration/ + README.md 索引与旧→新映射表）
 ├── tools/               # 工具（**按用途分三类**；除注明外都是本机驱动、不传板端，见 tools/README.md）
 │   ├── deploy/          #   部署与一致性：deploy_to_board.sh(烧录) · check_board_parity.sh + board_parity.md5(清单)
 │   │                    #   archive_baks.sh(归档 *.bak*，**会随部署上板**) · tidy_board_bak.sh(板端 bak/ 整理)
-│   │   └── Adomain/     #   **A 域分叉**（板端旧仓库）：sync_Adomain_repo.sh + Adomain_cfg/(canonical 参数) + forks 清单
+#   （A 域分叉 sync/cfg 已于 2026-10-01 退役 → bak/retired/Adomain_20261001/）
 │   ├── check/vision/    #   自检·视觉：check_kpt_decode.py(解码约定) · check_gate_pose.py(位姿为何被拒) · auv_kpt_meter.py
 │   ├── check/boat/      #   自检·船体：check_dof_sign.py(舵向) · check_hdg_lockup.py(航向锁死)
 │   ├── check/pipeline/  #   自检·工程：check_domain.py(两域隔离) · check_paths.py(路径) · check_pipeline_identity.py(同域自证)
@@ -117,6 +125,9 @@ auv_vision/
 │                        #   任务段只放各自特有的旋钮；共用值不在两处各写一份
 ├── doc/                 # 文档分三层（见 doc/README.md）
 │   ├── 设计/            #   参考型：算法说明.md · gate_pose_decode_spec.md（门 pose 解码契约，换 bin 必读）
+│   │                    #   **过门逻辑树.md（过门相位/档位/动作的逻辑图：总图 + 普通流程 + 异常应对）**
+│   │                    #   **过门流程树-percept识别.svg/.pdf（对外展示：识别流程树，含 mode 释义 + cfg 判据带）**
+│   │                    #   **过门流程图.svg/.pdf（对外展示：设计层面的过门流程——找门→对准→转正→进近→冲门→计数）**
 │   ├── 现场/            #   现场与待办：现场卡-靶子法.md · 待研究-缺角位姿先验（三维信息复用）.md
 │   ├── 记录/            #   记录与归档（**不改写历史**，见 记录/README.md）：
 │   │                    #     2026-09-2X-改动记录-review.md（逐日全记录）· 过门-状态机与参数.md（逐状态导读 + §9 实测）
@@ -124,13 +135,16 @@ auv_vision/
 │   │                    #     算法说明-gate-角点逐点融合滤波.md · 前视USB相机低延迟推流方案.md · psi测量步骤_20260923.txt
 │   └── 注释历史.md      #   按文件/按键的历史索引：**实测数字 / 试错 / 参数沿革 / 注意事项**
 ├── models/ · tests/     # 权重(.bin) · 无硬件测试套件（**按层分子目录**，见 tests/README.md）
-│                        #   tests/：**215 例**（以 `pytest tests/ -q` 输出为准）
+│                        #   tests/：**216 例**（以 `pytest tests/ -q` 输出为准）
 │                        #     platform/  test_base   平台：settings/11B 帧/遥测/限深保护/硬停
 │                        #                test_common 公共件：PID/图像链路(NV12·squish)/Det/cfgnode
+│                        #                test_paths 路径落点 · test_hud 叠加层
 │                        #     tasks/     test_ball        撞球相位机
-│                        #                test_gate_vision 解码约定/PnP 往返/角点记忆/mode 降级
-│                        #                test_gate_flow   档位仲裁/出口兜底/正航向接入/配置守卫
-│                        #                test_motion      额定转角 + 离散正航向
+│                        #                gate/            **(过门用例按主题成组)**
+│                        #                  test_gate_vision  解码约定/PnP 往返/角点记忆/mode 降级
+│                        #                  test_gate_flow    档位仲裁/出口兜底/正航向与 SWAY_BACK/配置守卫
+│                        #                  test_gate_postproc 后处理：L/R 归一/几何合法/去重/选门键
+│                        #                test_motion      运动原语：额定转角 + 正航向
 │                        #     tooling/   test_pnp_calib   **PnP/深度标定工具**的合成往返（反演标尺/符号/CSV/报告）
 │                        #                test_label_corners 手工标注：吸附/坐标域/schema/端到端喂通 pnp_calib
 │                        #                test_ruler_calib   卷尺靶子：跨度/斜视诊断 + (fx,c) 合成往返 + 混合轴向
@@ -146,7 +160,7 @@ auv_vision/
 ## 快速开始（本机，无硬件）
 
 ```bash
-python3 -m pytest tests/ -q              # 无硬件测试（**191 例**，2026-09-26 实测；base/common/ball/gate/标定与标注工具）
+python3 -m pytest tests/ -q              # 无硬件测试（**216 例**，2026-10-01 实测；platform/tasks/tooling 三层）
 python3 main.py --task ball              # 只跑撞球（SIM/mock）
 python3 main.py --task gate              # 试跑过门（cfg model.mode: mock）
 python3 preview_detect.py --gate-kpt     # 下水前：门框 + 4 角点 + 置信度（船不动）
@@ -191,14 +205,19 @@ python3 preview_detect.py --gate-kpt         # 下水前：门框 + 4 角点 + �
   总时限 `comm.ball.timeout_ms`）；
 - **撞球之后**（`task1_2/run_ball_reverse.sh`）：**定时直线倒车**（开环、不依赖视觉）→ 前进 2s
   → **按角度左转 90°**（`common/motion/turn_deg.py`，遥测 yaw 闭环 + 转完硬停）→ 过门任务；
-- **任务三 过门**（`gate/motion/gate_task.py` 骨架；**扁平 v1.2，当前定版**，细则/参数见 `doc/记录/算法说明-gate-PnP移植方案.md`）：
+- **任务三 过门**（`gate/gate_task.py` 只有编排；**两层结构** `gate/percept/` 感知 + `gate/motion/` 决策，
+  2026-09-30 按方法簇拆分；**逻辑图见 `doc/设计/过门逻辑树.md`**，细则/参数见 `doc/记录/算法说明-gate-PnP移植方案.md`）：
   keypoint 四角 → IPPE 6-DoF，深度 `Z=tvec.z`；
-  RANGE_ALIGN 子状态 GOLDEN/**HDG(离散正航向)**/CREEP/HOLD/REACQUIRE → APPROACH → THROUGH（机身过门判据）。
+  ALIGN 子状态 GOLDEN/**HDG(正航向)**/**SWAY_BACK(转后回找)**/CREEP/HOLD/REACQUIRE → APPROACH → THROUGH（机身过门判据）。
   门 = 闭合矩形框(红 PVC，**实测外缘 0.77×0.56 m**，管外径 5cm，悬空，对称无朝向要求)。
-  **直冲出口三条**：① `Z≤z.cross` 连续确认帧（实测有效，勿动）；② 近距(`Z≤z.near_lost_m` 且 z 新鲜
-  **或** 框占比 ≥ `z.near_lost_ratio`) 丢失判过门（ALIGN 与 APPROACH 都生效）；③ 在门口超时兜底
-  `loiter.*`（门口 + 安全带内停留超时 → 自己拍板直冲）。
-  ⚠️ 原「③ width/④ coarse 对准就直冲」**已整体删除**（2026-09-18 用户定）。
+  **直冲出口两条**（任一成立即进 THROUGH，且都要先过 `through.require_align_deg` 航向闸门）：
+  ① `Z≤z.cross` 连续 `z.cross_confirm_frames` 帧（实测有效，勿动）；② 在门口超时兜底
+  `loiter.*`（框占比 ≥ 阈值 + 在安全带内持续超时 → 自己拍板直冲）。
+  ⚠️ **原「近距丢门判过门」这条出口已按用户要求移除**：驱动相位的代码先摘掉，2026-10-01 再把残留的
+  死代码（`_near_lost` / `_fresh_z` / `_z_ms`）与失效 cfg 键（`z.near_lost_m` / `z.z_stale_ms`）一并删掉；
+  `z.near_lost_ratio` 仍被 loiter 的 `near_ratio` 引用。
+  现在 ALIGN/APPROACH 丢门是「防抖 hold → 超 `pose_hold_frames` 回 SEARCH」，**不判过门、不直冲**。
+  ⚠️ 原「width/coarse 对准就直冲」**已整体删除**（2026-09-18 用户定）。
   **SEARCH 是左右平移扫视**（`gate.search.{sweep_s,pause_s,sway}`，对称来回）——2026-09-20 用户定
   「过门过程中不允许旋转搜索」；**居中只有 sway**（`align_yaw` 已随其 PID 一起删除），
   gate 里唯一的 yaw 来源是 ALIGN.HDG 正航向（增益 `comm.motion.turn_pid`）。
@@ -283,7 +302,7 @@ cd ../pc
   17 帧拿到 4 个 ≥0.7 的角点，却一帧都没解出位姿；口径 = 当时板端 `conf_thr`，22:03 快照为 0.7）⇒ psi 测不到 ⇒ HDG 整趟没被触发。
   已实测排除 `pnp.reproj_px=20`（板端 20 帧里 13/14 通过）⇒ 先给逐帧日志补"位姿拒因 + 四点 conf + 重投影 RMS"
   字段，再带录像跑一趟（判据与命令见 `doc/记录/2026-09-23-改动记录-review.md` §5）。**换权重后要重测**；
-- 🔴 **新阈值/后处理参数要用实测复核**：`det.conf 0.6`、`keypoint.{conf_thr 0.8, vis_thr 0.5}`、
+- 🔴 **新阈值/后处理参数要用实测复核**：`det.conf 0.5`、`keypoint.{conf_thr 0.8, vis_thr 0.5}`、
   `postproc.{edge_tol 0.10, min_edges 2}`、`select.mode near` —— 全部来自规范 §4/§6 的 PC 侧工作点，
   **板端/水里一次都没标定过**。手段：`preview_detect.py --gate-kpt`（不建串口、船不动）看
   `kpt_conf` 分布与实例数（`--conf` 可覆盖候选阈值）；

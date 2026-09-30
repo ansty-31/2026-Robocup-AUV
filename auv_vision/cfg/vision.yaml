@@ -26,7 +26,6 @@ stream:
   pkt: 8000  # UDP 切片大小
 
 image:
-  chain: D
   undistort: true  # true: cv2.remap 去畸变
   white_balance_bgr: [1.0, 1.05, 1.15]  # 白平衡通道增益
   clahe_clip: 0  # 关掉可省 ~8 ms/帧

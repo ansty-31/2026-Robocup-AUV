@@ -11,7 +11,7 @@ from gate.percept.gate_decode import decode_yolo11_kpt
 from gate.percept.gate_detector import board_camera
 from gate.percept.gate_frontend import (MODE_COARSE, MODE_FULL, MODE_P3P, MODE_WIDTH,
                                 bbox_center, parse_kpt_mode, width_range_depth)
-from gate.motion.gate_task import (PH_ALIGN, PH_APPROACH, PH_THROUGH, SUB_GOLDEN,
+from gate.gate_task import (PH_ALIGN, PH_APPROACH, PH_THROUGH, SUB_GOLDEN,
                             GateTask)
 from gate.percept.geometry import (CameraModel, backproject_to_plane, gate_pose,
                            object_points, plane_from_pose, reproj_rms)

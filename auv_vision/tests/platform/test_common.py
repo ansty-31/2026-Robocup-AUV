@@ -70,29 +70,40 @@ def test_preprocess_enhance_shape_dtype_and_gamma():
     assert ModelPreprocessor(undistort=False).size == S.vision.model.input_size
 
 
-def test_preprocess_chain_domain_switch():
-    """识别链路域开关（`vision.image.chain`）：A/D 两序、必须与权重同域。
-    不变量：
-    1. 去畸变关闭时 A/D **必须逐像素相同**（两序唯一的差别就是 remap 的先后）；
-    2. 默认域 = 配置值（本仓库 D）；"""
-    rng = np.random.default_rng(20260927)
-    raw = rng.integers(0, 256, (48, 96, 3), dtype=np.uint8)
+def test_preprocess_is_d_chain_only():
+    """识别链路**只剩 D 链**（A 域/`chain: A` 于 2026-10-01 退役归档，见 bak/retired/Adomain_20261001/）。
 
-    a = ModelPreprocessor(undistort=False, size=64, chain="A")
-    d = ModelPreprocessor(undistort=False, size=64, chain="D")
-    assert a.chain == "A" and d.chain == "D"
-    out_a, out_d = a.process(raw), d.process(raw)
-    assert out_a.shape == out_d.shape == (64, 64, 3)
-    assert np.array_equal(out_a, out_d), "去畸变关闭时 A/D 两序必须等价"
+    咬两件事：
+    ① **旧开关不许复活**：`ModelPreprocessor(chain=...)` 必须直接 `TypeError`
+       —— 谁把 A 链或"域开关"加回来，这条立刻红（防止两套链路又悄悄并存）；
+    ② **链序真是 D**（缩放 → 画面补偿 → 640 去畸变）：与手工按该顺序拼出来的结果**逐像素相同**
+       —— 顺序被倒成老 A 序（先 remap 再缩放/补偿）就会红。
+    """
+    import os
+    import cv2
+    from common.vision.preprocess import calibration_maps_640
 
-    # 默认取配置；大小写/空白容忍
-    assert ModelPreprocessor(undistort=False).chain == \
-        str(S.get("vision.image.chain", "D")).strip().upper()
-    assert ModelPreprocessor(undistort=False, chain=" a ").chain == "A"
+    rng = np.random.default_rng(20261001)
+    raw = rng.integers(0, 256, (48, 96, 3), dtype=np.uint8)      # 非方形 → 一定会走缩放
 
-    import pytest
-    with pytest.raises(ValueError):
-        ModelPreprocessor(undistort=False, chain="B")
+    with pytest.raises(TypeError):
+        ModelPreprocessor(undistort=False, size=64, chain="D")
+
+    # ② 无去畸变：resize → enhance
+    pre = ModelPreprocessor(undistort=False, size=64)
+    manual = enhance(cv2.resize(raw, (64, 64), interpolation=cv2.INTER_LINEAR),
+                     pre.gains, pre.clip, pre.gamma)
+    assert np.array_equal(pre.process(raw), manual), "D 链序应为 resize → enhance"
+
+    # ③ 有去畸变（用仓库里的前视标定）：resize → enhance → remap@640（顺序不能倒）
+    calib = S.vision.camera.front.calibration
+    assert os.path.exists(calib), "本用例需要 %s" % calib
+    pre2 = ModelPreprocessor(calib_path=calib, size=64)
+    assert pre2.size == 64 and pre2.undistort
+    mx, my = calibration_maps_640(calib, 64)
+    manual2 = cv2.remap(manual, mx, my, cv2.INTER_LINEAR)
+    assert np.array_equal(pre2.process(raw), manual2), \
+        "D 链序应为 resize → enhance → remap@640（老 A 序是先 remap 再缩放/补偿）"
 
 
 def test_det_helpers_and_pick_target():

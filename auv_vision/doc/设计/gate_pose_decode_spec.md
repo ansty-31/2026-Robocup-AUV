@@ -14,6 +14,11 @@
 > | 校准集 | `calibration_data_gate240_stage1_rgb/`（240 张：阶段一训练集有门帧 160 + 中水 80） |
 >
 > ⚠️ 旧版（auv5/auv4）bin 的 `output/gate_kpt_*` 不在本文件范围内；**换 bin 必须同时确认本节指纹**。
+>
+> ⚠️ **代次提醒（2026-10-01）**：上表是**上一代** `g240_i16` 的指纹。`cfg/vision.yaml` **当前用的是
+> `models/gate_kpt_stage1_v3_bayese_640x640_nv12.bin`（md5 `ca5ba84f…`，3,938,806 B，2026-09-28 换代）**。
+> 本文的**契约与解码/后处理规则**（NV12 / 640 / squish / 9 张量 / `x_cell×stride` / `v` 自己 sigmoid /
+> 后处理四条）是照 `g240_i16` 逐张量核对的，**对 v3 尚未逐张量复核 ⇒ 换 v3 后必须按 §9 重新自检**。
 
 ---
 
@@ -118,7 +123,7 @@ v    = sigmoid(k[i, 2])                   # v 是 raw logit，必须自行 sigmo
 
 ### 4.1 `v` 必须先 sigmoid 再比阈值（**已知不一致，需修**）
 
-模型输出的第 3 个通道是 **raw logit**，板端 `gate_decode.py` 是 `sigmoid(v) ≥ V_MIN` 才可信。
+模型输出的第 3 个通道是 **raw logit**，板端 `gate/percept/gate_decode.py` 是 `sigmoid(v) ≥ V_MIN` 才可信。
 但本仓库 PC 侧 `scripts/2_train/eval_benchmark.py::instance_quality` 直接拿 **raw logit 和 0.8 比** ——
 raw 0.8 ⟺ sigmoid **0.69**，**PC 口径比板端松一档**。AUV5 上 raw 普遍 ≥5（两者都过，看不出差别），
 AUV6 上就致命：同一批 400 张，PC 口径"四角齐"102 帧，**板端口径 0 帧**（角点 sigmoid 上限只有 0.73）。
