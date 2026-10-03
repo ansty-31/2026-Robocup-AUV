@@ -382,11 +382,39 @@ class Stats(object):
                    self.max_gap * 1000))
 
 
+class CamToggle(object):
+    """PC 端按 Tab 键 → 往板端遥控桥（udp_server.py 的 UDP 9000）发 `cam` 切换相机。
+
+    板端收到 `cam` 就切换主视/下视（见 manual/cam_switch.py::parse_camera_packet）。
+    0.3s 防抖：Tab 长按/连按也只切一次。
+    """
+
+    def __init__(self, host, port=9000):
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._addr = (str(host), int(port))
+        self._last = 0.0
+
+    def send(self):
+        now = time.time()
+        if now - self._last < 0.3:
+            return
+        self._last = now
+        self._sock.sendto(b"cam", self._addr)
+        print("[VIEW] 已发 cam(切换相机) → %s:%d" % self._addr)
+
+    def close(self):
+        try:
+            self._sock.close()
+        except Exception:
+            pass
+
+
 class Sink(object):
     """显示/录制端：永远只用最新帧，来不及就丢。"""
 
     def __init__(self, show=True, scale=1.0, save=None, save_fps=0.0, probe_frames=60,
-                 save_raw=None):
+                 save_raw=None, on_tab=None):
+        self.on_tab = on_tab
         if cv2 is None and (show or save):
             raise RuntimeError("接收端需要 opencv-python/numpy")
         self.show = show
@@ -432,9 +460,12 @@ class Sink(object):
         stats.add(len(jpg))
         if self.show:
             disp = img if self.scale == 1.0 else cv2.resize(img, None, fx=self.scale, fy=self.scale)
-            cv2.imshow("AUV front camera", disp)
-            if cv2.waitKey(1) & 0xFF in (27, ord("q")):
+            cv2.imshow("AUV camera", disp)
+            key = cv2.waitKey(1) & 0xFF
+            if key in (27, ord("q")):            # Esc / q 退出
                 raise KeyboardInterrupt
+            if key == 9 and self.on_tab is not None:   # Tab 键 → 切换主视/下视
+                self.on_tab()
         if not self.save_path:
             return
         if self.writer is not None:
@@ -667,6 +698,10 @@ def _cli_view(argv):
     ap.add_argument("--duration", type=float, default=0.0)
     ap.add_argument("--max-frames", type=int, default=0)
     ap.add_argument("--stats-interval", type=float, default=2.0)
+    ap.add_argument("--ctrl-host", default=None,
+                    help="板端 IP：按 Tab 键切换主视/下视（发到板端遥控桥 UDP 9000）")
+    ap.add_argument("--ctrl-port", type=int, default=9000,
+                    help="板端遥控桥 UDP 端口（默认 9000）")
     a = ap.parse_args(argv)
     if cv2 is None:
         print("需要 opencv-python/numpy；或用 ffplay：\n"
@@ -682,9 +717,12 @@ def _cli_view(argv):
             save_raw = os.path.join(a.out_dir, "auv_%s.mjpeg" % ts)
         else:
             save_path = os.path.join(a.out_dir, "auv_%s.mp4" % ts)
+    toggle = CamToggle(a.ctrl_host, a.ctrl_port) if a.ctrl_host else None
+    if toggle:
+        print("[VIEW] Tab 键 = 切换主视/下视（→ %s:%d）" % (a.ctrl_host, a.ctrl_port))
     stats = Stats()
     sink = Sink(show=not a.no_display, scale=a.scale, save=save_path, save_fps=a.save_fps,
-                save_raw=save_raw)
+                save_raw=save_raw, on_tab=toggle.send if toggle else None)
     try:
         if a.http:
             HttpReceiver(a.http).run(sink, stats, a.duration, a.max_frames, a.stats_interval)
@@ -694,6 +732,8 @@ def _cli_view(argv):
         print("\n[VIEW] 手动停止")
     finally:
         sink.close()
+        if toggle is not None:
+            toggle.close()
     print("[VIEW] 结束：%s | 解码失败 %d" % (stats.report(), stats.decode_fail))
     return 0
 
@@ -705,7 +745,7 @@ def main(argv=None):
         print("用法:\n"
               "  python3 -m manual.stream push --host <PC_IP> [--port 5000] [--http 8080]\n"
               "  python3 -m manual.stream view [--port 5000] [--http URL] [--no-display]\n"
-              "      [--record | --record-raw] [--out-dir record]\n"
+              "      [--record | --record-raw] [--out-dir record] [--ctrl-host <板IP>]\n"
               "（手动模式请直接用根目录 manual.sh）")
         return 0
     cmd, rest = argv[0], argv[1:]

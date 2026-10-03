@@ -15,6 +15,7 @@ import os
 
 import numpy as np
 import sys
+import threading
 import time
 
 import base.cfg.settings as S
@@ -35,6 +36,66 @@ TASK_CLASS = {"ball": BallTask, "gate": GateTask}
 TASK_CAM = {"ball": "front", "gate": "front"}
 STATE_TASK = {S.STATE_BALL: "ball", S.STATE_GATE: "gate"}
 TASK_STATE = {"ball": S.STATE_BALL, "gate": S.STATE_GATE}
+
+class DownCamFeeder(threading.Thread):
+    """后台读下视相机、只存**最新一帧**；主循环绝不阻塞在下视 read 上。
+
+    —— 下视 USB read 可能 50~120ms，若放进主循环会把前视(主视)显示一起拖卡/冻死。
+    """
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self._lock = threading.Lock()
+        self._frame = None
+        self._want = False
+        self._cam = None
+        self._stop = False
+
+    def set_want(self, want):
+        self._want = bool(want)
+
+    def latest(self):
+        with self._lock:
+            return self._frame
+
+    def run(self):
+        while not self._stop:
+            if not self._want:
+                if self._cam is not None:
+                    try:
+                        self._cam.close()
+                    except Exception:
+                        pass
+                    self._cam = None
+                with self._lock:
+                    self._frame = None
+                time.sleep(0.1)
+                continue
+            if self._cam is None:
+                try:
+                    self._cam = create_camera("down", stream=False)   # 下视不推流，只做主视的辅助
+                except Exception:
+                    self._cam = None
+                if self._cam is None:
+                    time.sleep(0.5)
+                    continue
+            try:
+                f = self._cam.read()
+            except Exception:
+                f = None
+            if f is not None:
+                with self._lock:
+                    self._frame = f
+            time.sleep(0.005)
+
+    def stop(self):
+        self._stop = True
+        if self._cam is not None:
+            try:
+                self._cam.close()
+            except Exception:
+                pass
+
 
 def psi_line(info, tol_deg=8.0):
     """HUD 的「偏转角」一行（**纯函数**，便于用例）。返回 `(文本, BGR 颜色)`。
@@ -70,6 +131,9 @@ class AppController(object):
                     print("[MAIN] ⚠️ gate 后端不可用：权重缺失/路径不对")
                     print("       先跑 python3 preview_detect.py --gate-kpt 自检权重")
         self.cams = {"front": create_camera("front")}
+        self._down_feeder = DownCamFeeder() if "gate" in tasks else None
+        if self._down_feeder is not None:
+            self._down_feeder.start()
         self.tasks = {}
         for name in tasks:
             cam = self.cams[TASK_CAM[name]]
@@ -124,6 +188,18 @@ class AppController(object):
         except Exception as e:
             print("[MAIN] 画面窗口不可用：%s" % e)
             return False
+
+    def _feed_down(self, task):
+        """gate 需要下视时（coarse/width）才让后台 feeder 开/读下视；不需要就释放。
+
+        —— 主循环只取**最新帧**（非阻塞），绝不被下视相机 read 拖卡，不碰前视(主视)显示。
+        """
+        if not (hasattr(task, "set_down_frame") and hasattr(task, "wants_down")):
+            return
+        if self._down_feeder is None:
+            return
+        self._down_feeder.set_want(task.wants_down())
+        task.set_down_frame(self._down_feeder.latest())
 
     def _uart_status(self):
         """画面监控行：下位机深度遥测 + 限深保护（无遥测显示 n/a）。
@@ -244,6 +320,7 @@ class AppController(object):
                 frame = self.cams[TASK_CAM[STATE_TASK[self.state]]].read()
                 if frame is not None:
                     self._frame_seq += 1          # 采集序号（只用于日志/叠加）
+                    self._feed_down(task)
                     task.process(frame, now_ms)
                     self._log_task_frame(task, now_ms)
                     if self._video_on:

@@ -9,11 +9,10 @@ serial:
 frame:  # 11B 定长帧
   header: 165  # 0xA5
   axis_count: 7
-  btn_count: 3
   axis_mid: 128
   axis_range: 127
   aux_axis: {4: 165, 5: 1, 6: 1}  # axis4=滚轮静止/中值, axis5/6=tri 中位
-  btn_values: [0, 0, 0]  # 当前下位机固件未使用
+  btn_values: [0, 0, 0]  # byte8/9用于相对转角/取消；byte10为旋转编号，普通帧均为0
 
 dof_map:  # DOF→轴字节真值表
   surge: {axis: 1, sign: 1}  # 前后←LY、左右平移←RY、升降←RX、旋转←LX
@@ -51,27 +50,12 @@ dof_comp:  # **底层共用**：单独调"下潜"这一路动力
 motion:  # **ball / gate 共用的底层运动参数**
   pid_sway:  {kp: 8.0, ki: 0.01, kd: 0.05, out_max: 0.55, deadzone: 0.05}
   pid_heave: {kp: 1.0, ki: 0.0,  kd: 0.15, out_max: 1.0,  deadzone: 0.04}
-  turn_pid: {kp: 0.2, ki: 0.0, kd: 0.0, out_max: 0.30, deadzone_deg: 6.0, norm_deg: 15.0,
-             div_deg: 15.0,
-             sat_max_s: 2.0, sat_progress_deg: 5.0,
-             overshoot_tol_deg: 10.0,
-             period: 0.05}
   surge_fast: 0.35  # 快档：ball 分级最高速/冲刺、gate 远距进近
   surge_slow: 0.15  # 慢档：ball 接近段减速、gate 近距进近
   loss_inertia_surge: 0.25  # 目标短时丢失时的低速惯性
   search_yaw: 0.3  # 无目标时原地旋转搜索
-  presets:  # 手动模式/急停用的 DOF 预设
+  presets:  # 手动模式/急停用的 DOF 预设（**只留生产真正用得到的**：main.py 收口发 stop）
     stop:         [0.0, 0.0, 0.0, 0.0]
-    forward_fast: [1.0, 0.0, 0.0, 0.0]
-    forward_slow: [0.35, 0.0, 0.0, 0.0]
-    backward:     [-0.5, 0.0, 0.0, 0.0]
-    left:         [0.0, -1.0, 0.0, 0.0]
-    right:        [0.0, 1.0, 0.0, 0.0]
-    up:           [0.0, 0.0, 1.0, 0.0]
-    down:         [0.0, 0.0, -1.0, 0.0]
-    turn_left:    [0.0, 0.0, 0.0, -0.4]
-    turn_right:   [0.0, 0.0, 0.0, 0.4]
-    search:       [0.0, 0.0, 0.0, 0.3]  # 右转
 
 tasks:
   enabled: [ball]  # 任务一
@@ -106,24 +90,25 @@ ball:  # 任务一 撞球：运动链 SEARCH→CENTER→APPROACH→DASH→STOP
 gate:  # 过门
   timeout_ms: 180000  # 任务级兜底
   pass_target: 4  # 完成计数目标：单门 1
-  align: {confirm_frames: 2, px_x: 0.20, px_y: 0.25}  # 现用值
+  align: {confirm_frames: 3, px_x: 0.20, px_y: 0.25}  # 现用值
   hdg: {enable: true, tol_deg: 8.0, max_step_deg: 15.0, turn_scale: 0.8, timeout_ms: 30000,
         turn_timeout_s: 8.0,         post_sway_ms: 600.0, post_sway: 0.20,
         post_sway_back: 0.15, post_sway_kpt_min: 2,
-        stop_hard: true,
+          #   turn_period=等"下位机完成反馈"时的轮询节拍(s)：上位机自己的循环 pace，与下位机无关
+          turn_period: 0.05, stop_hard: true,
         # max_turns：本门转向上限（到顶就不再起转、带残余航向进近；防「转向无效时自转」）
         max_turns: 5}
-  loiter: {enable: true, near_ratio: 0.60, timeout_ms: 3000, dx_max: 0.14, dy_max: 0.20}
-  z: {align_max: 4.0, fast_max: 3.0, slow_max: 1.3, cross: 1.2,  # 2026-09-28：0.7→0.9；2026-09-30：→1.2（与 near_lost_m 同值）
+  loiter: {enable: true, near_ratio: 0.50, timeout_ms: 6000, dx_max: 0.25, dy_max: 0.30, pose_hist_ms: 1500.0, pose_hist_min: 3}
+  z: {align_max: 4.0, fast_max: 3.0, slow_max: 1.2, cross: 1.2,  # 2026-09-28：0.7→0.9；2026-09-30：→1.2（与 near_lost_m 同值）
       cross_confirm_frames: 2,  # 连续 z≤cross 帧数才判过门(防单帧 PnP 错解冲出去)
       # ★ 与 cross 同值：近了就进 THROUGH，不会因为太近而长时间 search/back_slow
       relock_far_ratio: 0.7,  # 重锁保护的**占比退路**（门回来但占比小于它 × 参照 ⇒ 继续重锁）：
                               #   z 拿不到时用 框占比 ≥ 0.7×丢门前占比 判"还是同一个门"。
-      relock_z_jump_m: 0.5,  # 丢门后重新锁门的**同一个门**判据：重锁位姿 z 与丢失前的 z
-                             #   相差超过它 ⇒ 判成**另一个门**（多半是后面那一个）→ 拒收该帧位姿、
-                             #   原地 hold，避免误锁第二个门而越过当前门。0=关闭。暂时 0.5。
-      near_lost_ratio: 0.50,  # ★ 现用 0.50
-      }  # `_z_last` 的"保鲜期"(ms)：超过它未更新 → 不许参与穿门判定
+      relock_z_jump_m: 0.5,  # ★ z 跳变保护：**只挡向上跳**（同一扇门不可能突然远 0.5m；向下/更近正常）。
+                             #   比较对象 = 当前在追的 z（_z_last）或丢门前的参照；命中 ⇒ 拒收该帧位姿、原地 hold。
+      relock_away_m: 1.8,  # ★ 丢门重锁时 z 超过它 ⇒ 判为「下一个门」（当前门丢了/测不到距，不能被远处能测距的门骗过去）。只对有丢门参照生效，首见不拦。
+      near_lost_ratio: 0.50,
+      }
   surge: {creep: 0.20, lost_backward: 0.20, reacquire: 0.25, through: 0.6}
   width:  # width 档
     z_max: 1.5  # 粗测距 z ≤ 它 = 够近了，此时只允许 creep 靠近
@@ -134,7 +119,8 @@ gate:  # 过门
               stop_ratio: 0.75,  # 闭环后退: 框占比退到进入时的 75% 就停
               reset_after_ms: 3000}  # 距上次后退超过这么久 → 重新允许 max_times 次后退
   through: {confirm_ms: 3000, confirm_frames: 8, require_align_deg: 8.0}
-  search: {sweep_s: 2.0, sweep_max_s: 32.0, pause_s: 1.0, sway: 0.6}
+  creep_through: {creep_ms: 5000}  # 门口过门：coarse/width 门口超时后慢速 creep 冲门时长(ms)
+  search: {sweep_s: 2.0, sweep_max_s: 32.0, pause_s: 1.0, sway: 0.6, max_ms: 2000}
   pose_hold_frames: 10  # 帧间防抖：丢姿态时的保持帧数
 
 debug:  # 通信调试

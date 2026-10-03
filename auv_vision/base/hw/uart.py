@@ -2,7 +2,7 @@
 """uart.py — 串口 v2：11B 帧(0xA5+7轴+3键)；上层 DOF 目标→DOF_MAP 真值表→轴字节(速度平滑)，
 模拟遥控输出；心跳 ≥20Hz；急停=连发中性帧。帧语义见 README 与 docs/CUP_AUV。
 
-上行（下位机 → 上位机）：`base/hw/telemetry.py` 的 14B 遥测帧（0xAA55 + 深度/姿态 + 校验和），
+上行（下位机 → 上位机）：`base/hw/telemetry.py` 的 15B 遥测帧（0xAA55 + 深度/姿态 + 校验和），
 每次发帧时顺带读空接收缓冲 → `self.telemetry.depth_m`；`comm.depth_guard` 据此**禁止上浮**
 （深度 ≤ min_depth_m 时把 heave 清零、heave 轴立刻回中），保证机身不冒出水面。
 """
@@ -111,12 +111,39 @@ def neutral_axis_bytes():
 
 def build_frame_from_dof(surge=0.0, sway=0.0, heave=0.0, yaw=0.0):
     axes = dof_to_axis_bytes(surge, sway, heave, yaw)
-    return bytes([S.comm.frame.header] + axes + list(S.comm.frame.btn_values))
+    return bytes([S.comm.frame.header] + axes + [0, 0, S.comm.frame.btn_values[2]])
+
+
+def encode_turn_angle(angle_deg):
+    """相对转角：负=左、正=右；[-180,180] → [0,32767]，四舍五入。"""
+    angle = float(angle_deg)
+    if not math.isfinite(angle) or not -180.0 <= angle <= 180.0:
+        raise ValueError("相对转角必须在 [-180, 180] 度内")
+    return int(math.floor((angle + 180.0) * 32767.0 / 360.0 + 0.5))
+
+
+def build_turn_frame(angle_deg, turn_id=1):
+    """带编号的可重发执行帧；四个手动运动轴回中。"""
+    if not 1 <= turn_id <= 255:
+        raise ValueError("旋转编号必须在 1～255")
+    code = encode_turn_angle(angle_deg)
+    frame = bytearray(build_neutral_frame())
+    frame[8] = 0x80 | ((code >> 8) & 0x7f)
+    frame[9] = code & 0xff
+    frame[10] = turn_id
+    return bytes(frame)
 
 
 def build_neutral_frame():
     return bytes([S.comm.frame.header] + neutral_axis_bytes() +
-                 list(S.comm.frame.btn_values))
+                 [0, 0, S.comm.frame.btn_values[2]])
+
+
+def build_turn_cancel_frame(turn_id=0):
+    """执行位0、角度低字节1：取消指定编号；编号0为同步并取消。"""
+    frame = bytearray(build_neutral_frame())
+    frame[9], frame[10] = 1, turn_id
+    return bytes(frame)
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +156,14 @@ class UartController(object):
         self.sim = sim if sim is not None else S.SIM_MODE
         self._ser = None
         self._estop = False
+        self._turn_frame = None
+        self._cancel_turn_id = None
+        self._turn_phase = None
+        self._turn_counter = 0
+        self._turn_id = None
+        self._turn_retry_at = 0.0
+        self._sync_frames = 0
+        self._sync_sent = False
         self._axes = neutral_axis_bytes()        # 当前输出轴（平滑后）
         self._dof_target = (0.0, 0.0, 0.0, 0.0)  # 期望 DOF（上层原始请求）
         self._dof_out = (0.0, 0.0, 0.0, 0.0)     # 实际下发 DOF（限深 + 下潜补偿后）
@@ -210,7 +245,7 @@ class UartController(object):
     # ---------------- 帧/发送 ----------------
     def _current_frame(self):
         return bytes([S.comm.frame.header] + self._axes +
-                     list(S.comm.frame.btn_values))
+                     [0, 0, S.comm.frame.btn_values[2]])
 
     def _ramp_step(self):
         """轴字节级平滑（模拟摇杆手感）：
@@ -264,7 +299,7 @@ class UartController(object):
         return self.feed_telemetry(data)
 
     def feed_telemetry(self, data, now_ms=None):
-        """喂入下位机上行字节（14B 遥测帧，可任意切分）→ 更新深度等。
+        """喂入下位机上行字节（15B 遥测帧，可任意切分）→ 更新深度等。
 
         真串口由 `_drain_rx` 调用；测试/台架模拟下位机可直接调它。返回有效帧数。
         """
@@ -389,6 +424,12 @@ class UartController(object):
         self._dof_log_f.flush()
 
     def _write(self, frame, force=False):
+        frame = bytearray(frame)
+        if self._estop:
+            frame = bytearray(build_turn_cancel_frame(0))
+        elif self._cancel_turn_id is not None and not (frame[8] & 128):
+            frame[8:11] = bytes([0, 1, self._cancel_turn_id])
+        frame = bytes(frame)
         now = _now_ms()
         if not force and (now - self.last_send_ms) < S.comm.heartbeat.interval_ms:
             return False
@@ -399,7 +440,9 @@ class UartController(object):
             return True
         try:
             with self._tx_lock:                # 看门狗线程可能同时写（硬停），必须串行化
-                self._ser.write(frame)
+                written = self._ser.write(frame)
+                if written != len(frame):
+                    raise IOError("串口写入不完整: %s/%s" % (written, len(frame)))
             self._drain_rx()
             return True
         except Exception as e:
@@ -440,6 +483,63 @@ class UartController(object):
         self.last_motion = "dof"
         return self.send_motion(name="dof", force=force)
 
+    def request_turn(self, angle_deg):
+        """先同步，再按100ms重发同一编号；写失败保留请求供重试。"""
+        encode_turn_angle(angle_deg)
+        if self._estop or self._turn_phase is not None:
+            return False
+        self._drain_rx()
+        self.telemetry.buf.clear()
+        self._cancel_turn_id = None
+        self._turn_counter = self._turn_counter % 255 + 1
+        self._turn_id = self._turn_counter
+        self._turn_frame = build_turn_frame(angle_deg, self._turn_id)
+        self._turn_phase = "sync"
+        self._sync_frames = self.telemetry.frames
+        self._sync_sent = False
+        self.telemetry.begin_turn(self._turn_id)
+        self._dof_target = self._dof_out = (0.0, 0.0, 0.0, 0.0)
+        self._axes = neutral_axis_bytes()
+        self._turn_retry_at = 0.0
+        self.poll_turn_complete()
+        return True
+
+    def poll_turn_complete(self):
+        self._drain_rx()
+        if self._estop or self._turn_phase is None:
+            return self.telemetry.turn_complete
+        if (self._turn_phase == "sync" and self._sync_sent and
+                self.telemetry.frames > self._sync_frames and
+                self.telemetry.turn_id == 0 and self.telemetry.turn_done is False):
+            self._turn_phase = "run"
+            self.telemetry.begin_turn(self._turn_id)
+            self._turn_retry_at = 0.0
+        if self._turn_phase == "run" and self.telemetry.turn_complete:
+            self._turn_phase = None
+            self._turn_frame = None
+            return True
+        now = time.monotonic()
+        if now >= self._turn_retry_at:
+            self._turn_retry_at = now + 0.1
+            if self._turn_phase == "sync":
+                self._sync_sent = True
+                self._write(build_turn_cancel_frame(0), force=True)
+            else:
+                self._write(self._turn_frame, force=True)
+        return False
+
+    def cancel_turn(self):
+        """取消本次自动转向，后续普通帧继续携带取消直到新任务。"""
+        if self._turn_phase is None:
+            return
+        cancel_id = 0 if self._turn_phase == "sync" else self._turn_id
+        self._turn_phase = None
+        self._turn_frame = None
+        self.telemetry._turn_waiting = False
+        self.telemetry.turn_complete = False
+        self._cancel_turn_id = cancel_id
+        self._write(build_turn_cancel_frame(cancel_id), force=True)
+
     def neutral(self):
         """回中性并强发一帧。"""
         self._dof_target = (0.0, 0.0, 0.0, 0.0)
@@ -457,6 +557,7 @@ class UartController(object):
         Returns:
         True  = 已回到中位（遥测确认停了；**无遥测时返回 True 但会打印"未验证"**）
         False = 遥测显示仍在转（推进器/水流顶着，或下位机没跟上）"""
+        self.cancel_turn()
         mid = int(S.comm.frame.axis_mid)
         spd = float(S.comm.ramp.speed_per_s or 0.0)
         # 最大偏离（±127 字节）走完需要多少帧，再留 2 帧余量
@@ -512,6 +613,7 @@ class UartController(object):
         if self._estop:
             return
         self._estop = True
+        self.cancel_turn()
         print("[UART] E-STOP 触发，连发中性帧")
         for _ in range(5):
             self._write(build_neutral_frame(), force=True)
@@ -533,6 +635,7 @@ class UartController(object):
     # ---------------- 收尾 ----------------
     def close(self):
         """关闭 DOF 轨迹日志与串口（可重复调用）。"""
+        self.cancel_turn()
         mid = int(S.comm.frame.axis_mid)
         if any(int(a) != mid for a in self._axes[:4]):
             try:

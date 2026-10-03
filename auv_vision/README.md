@@ -26,7 +26,7 @@
 >   符号在代码里定死（`dof_map.yaw.sign: +1` + `motion.turn_pid.imag_sign: +1`，**不再探向**），
 >   转向下传与 `task1_2/run_ball_reverse.sh` 同形；顺序固定为"先居中 → 达标且本帧是 full → 才起转"
 >   （`gate.hdg.entry_stale_ok: false`）；转向期间由 `gate_task._turn_inner_loop` 按
->   `motion.turn_pid.period = 0.05 s`（**20 Hz**）推进，与 `.sh` 路径同节拍（原先跟着 8 Hz 相机帧 ⇒ 过冲）。
+>   `comm.gate.hdg.turn_period = 0.05 s`（**20 Hz**）轮询"下位机完成反馈"。
 >   ⚠️ **这条链路尚未在真实水域跑通过**（最新一趟板端日志里 `mode == full` 出现 0 次 ⇒ psi 一次都没测到），
 >   诊断与下一步见 review 文档 §5。
 > - **角点阈值（2026-09-26，随新权重换代）**：`keypoint: {conf_thr: 0.8, vis_thr: 0.5}` + 代码兜底
@@ -46,7 +46,7 @@
 >   **① 居中只有 sway 平移**（`align_yaw.{enable,in_px,in_pose}` 与其 PID **已整体删除**）；
 >   **② SEARCH 是左右平移扫视，不旋转**（原旋转脉冲已删除，`gate.search.{sweep_s,pause_s,sway}`）。
 >   gate 里**唯一的 yaw 来源**是 ALIGN.HDG 正航向（`gate/motion/hdg.py` +
->   `common/motion/turn_deg.py`，增益 `comm.motion.turn_pid`）。
+>   `common/motion/turn_deg.py`；**只给角度**，执行在下位机）。
 > - **限深保护（默认开启）**：下位机回传 14B 遥测帧（`0xAA55`+深度/姿态+校验和，
 >   `base/hw/telemetry.py`）→ 深度 ≤ `comm.depth_guard.min_depth_m`（**现场定死 0.55 m，不准改**）时
 >   **禁止上浮**（只压 heave，surge/sway/yaw 不动），机身顶不出水面。详见下文「限深保护」一节。
@@ -121,7 +121,7 @@ auv_vision/
 │                        #   **tape_ticks.py（刻度周期法：不点鼠标，用卷尺自带 1cm 刻度测像素比例）**
 ├── cfg/                 # vision.yaml · comm.yaml · front_camera.yaml（参数唯一来源）
 │                        #   comm.yaml 的 **motion:** 段 = ball/gate **共用**的底层运动参数
-│                        #   （两套 PID / surge_fast·surge_slow / loss_inertia_surge / turn_pid），
+│                        #   （sway/heave 两套 PID / surge_fast·surge_slow / loss_inertia_surge），
 │                        #   任务段只放各自特有的旋钮；共用值不在两处各写一份
 ├── doc/                 # 文档分三层（见 doc/README.md）
 │   ├── 设计/            #   参考型：算法说明.md · gate_pose_decode_spec.md（门 pose 解码契约，换 bin 必读）
@@ -220,7 +220,7 @@ python3 preview_detect.py --gate-kpt         # 下水前：门框 + 4 角点 + �
   ⚠️ 原「width/coarse 对准就直冲」**已整体删除**（2026-09-18 用户定）。
   **SEARCH 是左右平移扫视**（`gate.search.{sweep_s,pause_s,sway}`，对称来回）——2026-09-20 用户定
   「过门过程中不允许旋转搜索」；**居中只有 sway**（`align_yaw` 已随其 PID 一起删除），
-  gate 里唯一的 yaw 来源是 ALIGN.HDG 正航向（增益 `comm.motion.turn_pid`）。
+  gate 里唯一的转向来源是 ALIGN.HDG 正航向（**相对角交下位机执行**，上位机不再跑 PID）。
   coarse 仲裁原则：**只有未对准才 HOLD/后退**。
   角点逐点融合 `gate/percept/kpt_memory.py` 为**可选功能、2026-09-18 起默认关闭**（板端曾因拼写错 `flase` 实际开着）：
   开启用 `vision.gate.kpt_mem.enable: true` 或 `AUV_GATE_KPT_MEM=1`；关闭时角点单帧直用。
@@ -229,7 +229,7 @@ python3 preview_detect.py --gate-kpt         # 下水前：门框 + 4 角点 + �
 `vision.yaml`：camera(front/down)、`image.*`（**ball/gate 共用图像链路，勿改**）、`model.*`
 （含 `task_models.gate`）、`gate.*`（几何/keypoint/PnP/kpt_mem 开关）、`stream.*`；
 `comm.yaml`：serial/dof_map/心跳/急停/ramp/**depth_guard(限深保护)**/**motion（ball/gate 共用的
-底层运动：两套 PID + 速度档 + turn_pid）**/tasks.enabled（默认 `[ball]`；gate 需后端或 mock）/ball/gate 任务参数。
+底层运动：sway/heave 两套 PID + 速度档）**/tasks.enabled（默认 `[ball]`；gate 需后端或 mock）/ball/gate 任务参数。
 > **共用参数只写一份**：`comm.motion` 里的值同时被撞球与过门读取（读法见 `common/cfg/cfgnode.py`
 > 的 `motion_num/motion_node/motion_pid`）；确需某个任务单独一套时，才在该任务段写覆盖键
 > （如 `comm.gate.pid_sway`）。`gate.surge.fast/slow` 与 `ball` 段**不再存在**这些重复键。
@@ -322,7 +322,7 @@ cd ../pc
 - **冲刺与兜底标定**：`surge.through`(0.6) 与 `through.confirm_ms`(2500) 决定"能不能冲出去"、
   `loiter.{timeout_ms,dx_max,dy_max}` 决定"在门口等多久才拍板"——
   判据 = 通过时无接触（30 分）且不超时；**换模型后 `confirm_ms` 尚未按新航速复核**；
-- **小角度过冲的收尾（要动控制律，等下水数据）**：`turn_pid.deadzone_deg=6` 按目标缩放 /
+- **小角度过冲的收尾（2026-10-02 已随上位机闭环删除）**：原先 `turn_pid.deadzone_deg=6` 按目标缩放 /
   加最小舵效地板 `max(0.15,|out|)`（执行器死区 0.138 ⇒ 误差 <10.4° 时现在一点舵效都没有）/ 加大 `kd`；
 - **SEARCH 平移扫视标定**：`gate.search.sway`(**0.45** ≈ 25% 推力档) 是否真的能把船左右挪动、
   以及一趟来回后**有没有净漂移**（开环、无横向位置反馈，见 cfg 注释里标为未验证的那条）；

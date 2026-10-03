@@ -14,11 +14,13 @@
 #   ./manual.sh --no-udp                 # 只推流
 #   ./manual.sh --record --seconds 60 --out rec.mp4    # 额外做板端本地录像
 #   ./manual.sh --host 192.168.137.2 --port 5000 --stream-fps 30
+#   遥控包额外支持相机切换（PC 端发到端口 9000）：cam:front / cam:down / cam（前后切换）
 #   ./manual.sh --help
 #
 # 水面 PC 端看画面（任选）：
 #   ffplay -fflags nobuffer -flags low_delay -framedrop -f mjpeg "udp://@:5000"
 #   python3 -m manual.stream view --record # 本仓库自带：看画面 + 存到 PC 的 record/ 目录
+#   python3 -m manual.stream view --ctrl-host 192.168.137.10  # 看画面，按 Tab 切主视/下视
 #   浏览器（板端另开 HTTP 时）：python3 -m manual.stream push --host <PC> --http 8080
 set -u
 cd "$(dirname "$0")"
@@ -116,9 +118,13 @@ echo "  PC 端：ffplay -fflags nobuffer -flags low_delay -framedrop -f mjpeg \"
 echo "  停止：Ctrl-C（会先停录像并写完文件，再停遥控桥）"
 echo "=================================================================="
 
-# 1) 串口遥控桥（后台）
+# 1) 串口遥控桥（后台；非录像时顺带推流+主视/下视切换，录像时由 recorder 独占相机）
 if [ "${USE_UDP}" = "1" ]; then
-  "${PY}" -u manual/udp_server.py ${UART_MODE} --port "${CTRL_PORT}" &
+  UDP_STREAM_ARGS=""
+  if [ "${USE_REC}" = "0" ]; then
+    UDP_STREAM_ARGS="--stream-host ${HOST} --stream-port ${PORT} --stream-fps ${STREAM_FPS} --stream-pkt ${PKT} --camera ${CAMERA}"
+  fi
+  "${PY}" -u manual/udp_server.py ${UART_MODE} --port "${CTRL_PORT}" ${UDP_STREAM_ARGS} &
   UDP_PID=$!
   sleep 1
   if ! kill -0 "${UDP_PID}" 2>/dev/null; then
@@ -138,6 +144,9 @@ if [ "${USE_REC}" = "1" ]; then
   FG_PID=$!
   wait "${FG_PID}" || RC=$?
   echo "录像文件：$(cd "$(dirname "${OUT}")" && pwd)/$(basename "${OUT}")"
+elif [ "${USE_UDP}" = "1" ]; then
+  # 遥控桥已经在推流（主视/下视可切）；前台只等它，Ctrl-C 由 trap 收尾
+  wait "${UDP_PID}" || RC=$?
 else
   set -- push --host "${HOST}" --port "${PORT}" --stream-fps "${STREAM_FPS}" --pkt "${PKT}"
   [ "${CAM_SIM}" = "1" ] && set -- "$@" --camera-sim

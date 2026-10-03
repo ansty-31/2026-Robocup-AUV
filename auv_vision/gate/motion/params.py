@@ -11,19 +11,26 @@ PH_SEARCH = "SEARCH"
 PH_ALIGN = "ALIGN"
 PH_APPROACH = "APPROACH"
 PH_THROUGH = "THROUGH"
+PH_CREEP_THROUGH = "CREEP_THROUGH"
 SUB_HDG = "HDG"
 SUB_GOLDEN = "GOLDEN"
 SUB_CREEP = "CREEP"
 SUB_HOLD = "HOLD"
 SUB_REACQUIRE = "REACQUIRE"
 SUB_SWAY_BACK = "SWAY_BACK"
-_D_ALIGN = dict(confirm_frames=2, px_x=0.20, px_y=0.25)
-_D_LOITER = dict(enable=True, near_ratio=0.60, timeout_ms=3000, dx_max=0.14, dy_max=0.20)
-_D_Z = dict(cross=1.2, cross_confirm_frames=2, slow_max=1.3,
+_D_ALIGN = dict(confirm_frames=3, px_x=0.20, px_y=0.25)
+_D_LOITER = dict(enable=True, near_ratio=0.50, timeout_ms=6000, dx_max=0.25, dy_max=0.30,
+                 # pose_hist_*：近距历史判断（coarse/width 在门口、下视看不到、主视也没信息时，
+                 #   用本轮最近采信位姿的中位数判"已到门口"）。只取本轮，换门清零。
+                 pose_hist_ms=1500.0, pose_hist_min=3)
+_D_Z = dict(cross=1.2, cross_confirm_frames=2, slow_max=1.2,
             relock_z_jump_m=0.5, relock_far_ratio=0.7,
-
+            # relock_away_m：丢门重锁时，z 超过它 ⇒ 判为「下一个门」——当前门丢了/测不到距时，
+            #   不能被远处能测距的门骗过去误当当前门。只对"有丢门参照"生效，首见不拦。
+            relock_away_m=1.8,
             near_lost_ratio=0.50)
 _D_SURGE = dict(creep=0.20, lost_backward=0.20, reacquire=0.25, through=0.6)
+_D_CREEP_THROUGH = dict(creep_ms=5000)   # creep_through：门口过门，慢速 creep 冲门时长(ms)
 _D_COARSE = dict(far_ratio=0.18, near_ratio=0.55, align_x=0.33, align_y=0.29)
 _D_WIDTH = dict(z_max=1.5)
 _D_TASK = dict(timeout_ms=180000, pass_target=4, pose_hold_frames=10)
@@ -32,7 +39,8 @@ _D_HOLD = dict(max_frames=20)
 _D_REACQ = dict(max_ms=800, max_times=2, stop_ratio=0.75, reset_after_ms=3000)
 _D_THROUGH = dict(confirm_frames=8, confirm_ms=3000,
                   require_align_deg=8.0)
-_D_SEARCH = dict(sweep_s=2.0, sweep_max_s=32.0, pause_s=1.0, sway=0.6)
+_D_SEARCH = dict(sweep_s=2.0, sweep_max_s=32.0, pause_s=1.0, sway=0.6,
+                 max_ms=2000)
 _D_PNP = dict(reproj_px=20.0, z_min=0.2, z_max=15.0, refine=True,
               max_z_jump_m=0.8)
 _D_GEOM = dict(frame_w=GATE_FRAME_W, frame_h=GATE_FRAME_H,
@@ -47,6 +55,9 @@ _D_HDG = dict(enable=True, tol_deg=8.0,        # enable=关掉后完全不进正
               #   实测偏大，先按 0.8 缩一档试；1.0 = 不缩。
               turn_scale=0.8,
               timeout_ms=30000.0, turn_timeout_s=8.0,
+              # turn_period：等"下位机完成反馈"时的轮询节拍（秒）= 上位机自己的内层循环 pace。
+              #   原属 `motion.turn_pid.period`；那套"上位机 PID 驱动转向"的参数 2026-10-02 已整块删除。
+              turn_period=0.05,
               # post_sway(_ms)：转完门被甩出视野时（转 ≤15° 就接近 32° 半视场），在**丢门的帧**上朝
               #   **转向的反方向**平移一小段把门拉回视野；窗口 = post_sway_ms。幅度必须 > 执行器死区 0.138。
               post_sway_ms=600.0, post_sway=0.20,
@@ -70,6 +81,7 @@ __all__ = [
     'PH_ALIGN',
     'PH_APPROACH',
     'PH_THROUGH',
+    'PH_CREEP_THROUGH',
     'SUB_HDG',
     'SUB_GOLDEN',
     'SUB_CREEP',
@@ -80,6 +92,7 @@ __all__ = [
     '_D_LOITER',
     '_D_Z',
     '_D_SURGE',
+    '_D_CREEP_THROUGH',
     '_D_COARSE',
     '_D_WIDTH',
     '_D_TASK',

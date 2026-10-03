@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""telemetry.py — 下位机**遥测上行**帧（14B：0xAA55 + 5×int16 + 校验和）
+"""telemetry.py — 下位机**遥测上行**帧（15B：0xAA55 + 5×int16 + 校验和）
 
 下位机(STM32)按下面的格式持续回传**深度**等状态；`base/hw/uart.py` 在每次发帧时顺带
 读空串口接收缓冲，把最新深度交给"不得浮出水面"的限深保护（`comm.depth_guard`）。
@@ -7,13 +7,14 @@
 帧格式（与下位机固件、`manual/udp_server.py` 的旧解析保持一致，**小端**）：
 
     byte0..1   : 0xAA 0x55            帧头
-    byte2      : 保留（不参与语义，但计入校验和）
+    byte2      : turn_id：接受的旋转编号，0=同步/无任务
     byte3..4   : depth_cm   int16     当前深度（cm，正=水面以下）→ /100 = m
     byte5..6   : target_cm  int16     下位机目标深度（cm）→ /100 = m
     byte7..8   : roll_cd    int16     横滚（0.01°）→ /100 = °
     byte9..10  : pitch_cd   int16     俯仰（0.01°）→ /100 = °
     byte11..12 : yaw_cd     int16     航向（0.01°）→ /100 = °
-    byte13     : checksum = sum(byte0..12) & 0xFF
+    byte13     : turn_done    0=未完成，1=完成
+    byte14     : checksum = sum(byte0..13) & 0xFF
 
 用法：
     rx = TelemetryReceiver()
@@ -26,12 +27,12 @@ import json
 import struct
 import time
 
-TEL_LEN = 14                     # 整帧长度
+TEL_LEN = 15                     # 整帧长度
 TEL_HEADER = b"\xAA\x55"         # 帧头
 TEL_PAYLOAD_OFF = 3              # 5×int16 起始偏移（byte2 保留）
 TEL_FMT = "<hhhhh"               # 小端 5×int16：depth, target, roll, pitch, yaw
 TEL_SCALE = 0.01                 # 原始值 → 物理量（cm→m / 0.01°→°）
-TEL_CHECK_OFF = TEL_LEN - 1      # 校验字节位置（=13）
+TEL_CHECK_OFF = TEL_LEN - 1      # 校验字节位置（=14）
 
 
 def _now_ms():
@@ -39,7 +40,7 @@ def _now_ms():
 
 
 def build_telemetry_frame(depth_m=0.0, target_m=0.0, roll_deg=0.0,
-                          pitch_deg=0.0, yaw_deg=0.0):
+                          pitch_deg=0.0, yaw_deg=0.0, turn_done=False, turn_id=0):
     """按协议打包一帧遥测（测试、台架模拟下位机、上位机自检用）。"""
     payload = struct.pack(TEL_FMT,
                           int(round(depth_m / TEL_SCALE)),
@@ -47,7 +48,8 @@ def build_telemetry_frame(depth_m=0.0, target_m=0.0, roll_deg=0.0,
                           int(round(roll_deg / TEL_SCALE)),
                           int(round(pitch_deg / TEL_SCALE)),
                           int(round(yaw_deg / TEL_SCALE)))
-    body = bytearray(TEL_HEADER) + b"\x00" + payload     # 2+1+10 = 13B
+    body = bytearray(TEL_HEADER) + bytes([turn_id]) + payload     # 2+1+10 = 13B
+    body.append(int(bool(turn_done)))
     body.append(sum(body) & 0xFF)
     return bytes(body)
 
@@ -55,20 +57,21 @@ def build_telemetry_frame(depth_m=0.0, target_m=0.0, roll_deg=0.0,
 def check_telemetry(frame):
     """帧头 + 校验和是否合法（不合法即丢弃，绝不拿脏数据去限深）。"""
     return (len(frame) >= TEL_LEN and bytes(frame[:2]) == TEL_HEADER
+            and frame[13] in (0, 1)
             and (sum(frame[:TEL_CHECK_OFF]) & 0xFF) == frame[TEL_CHECK_OFF])
 
 
 def decode_telemetry(frame):
-    """14B 整帧 → (depth_m, target_m, roll_deg, pitch_deg, yaw_deg)。"""
+    """15B 整帧 → (depth_m, target_m, roll_deg, pitch_deg, yaw_deg, turn_done, turn_id)。"""
     d, t, r, p, y = struct.unpack_from(TEL_FMT, frame, TEL_PAYLOAD_OFF)
     return (d * TEL_SCALE, t * TEL_SCALE, r * TEL_SCALE,
-            p * TEL_SCALE, y * TEL_SCALE)
+            p * TEL_SCALE, y * TEL_SCALE, bool(frame[13]), frame[2])
 
 
 def parse_telemetry_frames(buf, stats=None):
     """从字节缓冲 buf 解析出所有完整遥测帧（**就地消费** buf）。
 
-    返回 [(depth_m, target_m, roll_deg, pitch_deg, yaw_deg), ...]。
+    返回 [(depth_m, target_m, roll_deg, pitch_deg, yaw_deg, turn_done, turn_id), ...]。
     stats（可选 dict）：累计统计 `ok`（解析成功帧数）/ `bad`（丢弃的坏帧头/校验错次数）。
 
     同步策略：逐字节搜 0xAA55；校验错只丢 1 字节继续搜（不整段丢），
@@ -177,6 +180,11 @@ class TelemetryReceiver(object):
         self.roll_deg = None
         self.pitch_deg = None
         self.yaw_deg = None
+        self.turn_done = None
+        self.turn_complete = False
+        self._turn_waiting = False
+        self.turn_id = None
+        self._expected_turn_id = None
         self.last_ms = 0           # 最后一帧的接收时刻(ms)
 
     def feed(self, data, now_ms=None):
@@ -193,7 +201,12 @@ class TelemetryReceiver(object):
             sign = float(_S.get("comm.telemetry.yaw_sign", 1.0) or 1.0)
         except Exception:
             sign = 1.0
-        for depth, target, roll, pitch, yaw in rows:
+        for depth, target, roll, pitch, yaw, done, turn_id in rows:
+            self.turn_done = done
+            self.turn_id = turn_id
+            if self._turn_waiting and turn_id == self._expected_turn_id and done:
+                self.turn_complete = True
+                self._turn_waiting = False
             self.depth_m = depth
             self.target_m = target
             self.roll_deg = roll
@@ -203,6 +216,13 @@ class TelemetryReceiver(object):
         self.frames += stats["ok"]
         self.bad += stats["bad"]
         return len(rows)
+
+    def begin_turn(self, turn_id):
+        """按编号确认完成，不再要求先收到 busy 帧。"""
+        self.buf.clear()
+        self.turn_complete = False
+        self._expected_turn_id = turn_id
+        self._turn_waiting = True
 
     def age_ms(self, now_ms=None):
         """距最后一帧多久(ms)；从未收到过返回 None。"""
@@ -224,4 +244,9 @@ class TelemetryReceiver(object):
         self.frames = self.bad = 0
         self.depth_m = self.target_m = None
         self.roll_deg = self.pitch_deg = self.yaw_deg = None
+        self.turn_done = None
+        self.turn_complete = False
+        self._turn_waiting = False
+        self.turn_id = None
+        self._expected_turn_id = None
         self.last_ms = 0

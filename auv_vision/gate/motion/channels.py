@@ -6,7 +6,9 @@ from __future__ import annotations
 import numpy as np
 from common.cfg.cfgnode import flag, merge, motion_num, num, sub
 from gate.percept.gate_postproc import pick as postproc_pick
-from gate.motion.params import PH_SEARCH, SUB_SWAY_BACK, _D_Z, _D_SURGE, _D_KPT, _D_SEARCH, _D_HDG
+from gate.percept.gate_frontend import parse_kpt_mode, width_range_depth, MODE_FULL, MODE_P3P, MODE_WIDTH
+from gate.percept.geometry import gate_pose
+from gate.motion.params import PH_SEARCH, PH_ALIGN, SUB_SWAY_BACK, _D_Z, _D_SURGE, _D_KPT, _D_SEARCH, _D_HDG, _D_PNP
 
 def _dof_clip(v):
     return float(max(-1.0, min(1.0, v)))
@@ -40,7 +42,11 @@ class GateChannels(object):
             _kmin = int(num(sub(self._G, "hdg"), "post_sway_kpt_min",
                             _D_HDG["post_sway_kpt_min"]) or 0)
             _kcur = self._post_sway_kpt_count()
-            if _kmin <= 0 or _kcur >= _kmin:
+            #   ★ 2026-10-02：窗口**开启那一帧**不许按角点数退出 —— 那一帧的检测是**转向之前**采的
+            #   （转向现在整段在同一帧内跑完），拿它判"门回来了"会把窗口当帧清掉、补偿永远不发。
+            #   要等**开启之后的新一帧**检测。
+            _fresh = self.frames > int(getattr(self, "_post_sway_frame0", -1) or -1)
+            if _fresh and (_kmin <= 0 or _kcur >= _kmin):
                 self._post_sway_until_ms = None
                 self.last_info["sway_exit"] = "kpt_off" if _kmin <= 0 else "kpt>=%d" % _kmin
             elif _now >= self._post_sway_until_ms:
@@ -68,9 +74,7 @@ class GateChannels(object):
             "kpt_raw": int(self._dbg_kpt_raw if kpt_raw is None else kpt_raw),
             "ratio": round(float(self._dbg_ratio if ratio is None else ratio), 3),
             "hdg": None if hdg is None else round(float(hdg), 1),
-            # 转向排查用：`img_sign`=本次转向用的极性 σ（turn_deg 里定死的乘式）、
             # `dir`/`tgt`=本次转向方向与目标角、`hdg_entry`=入口（**只有 golden=居中达标**）。
-            "img_sign": self._hdg.imag_sign,
             "hdg_dir": self._hdg.last_dir,
             "hdg_tgt": round(float(self._hdg.last_target_deg or 0.0), 1)})
         self.uart.send_dof(_dof_clip(surge), _dof_clip(sway),
@@ -82,7 +86,8 @@ class GateChannels(object):
         """本次冲刺速度 = `comm.gate.surge.through`。"""
         return num(sub(self._G, "surge"), "through", _D_SURGE["through"])
     def _start_search(self):
-        self.phase = PH_SEARCH
+        # 2026-10-03 用户定：**删掉 SEARCH 扫视** —— 直接回 ALIGN 原地等门（不左右扫）
+        self.phase = PH_ALIGN
         self.substate = ""
         self._post_sway_until_ms = None      # 换门/重新搜索 → 反向平移状态作废
         self._hdg_f = None
@@ -92,7 +97,10 @@ class GateChannels(object):
         self._hdg_turns_last_ms = None
         self._hdg.reset()
         self._hdg_done = not flag(self._hdg_cfg, "enable", True)
+        self._hdg_ok = False              # 新门重新确认航向
         self._hdg_skip_logged = False
+        self._inside_since_ms = None       # 贴脸出口的短确认计时（换门/重新搜索清零）
+        self._pose_hist = []               # 最近采信的位姿历史 [(ms, z, dxn, dyn)]（换门清零）
         self._relock_z_ref = None          # 重新搜索 = 换门，重锁保护作废
         self._relock_ratio_ref = None
         self._relock_logged = False
@@ -124,6 +132,10 @@ class GateChannels(object):
         if self._search_entry_ms is None:
             self._search_entry_ms = now_ms
         t = now_ms - self._search_entry_ms
+        # ★ 固定搜索时长：过完门/丢门后最多扫 max_ms，到点就不再扫（保持静止，等门自己出现）
+        max_ms = num(s, "max_ms", 0) * 1000.0
+        if max_ms > 0 and t > max_ms:
+            return 0.0
         k, t0, sweep = 0, 0.0, base          # 先定位当前落在第几轮（每轮时长翻倍）
         while k < 24:
             cyc = 2.0 * (sweep + pause)
@@ -158,11 +170,55 @@ class GateChannels(object):
         """下位机回传的绝对航向（度；没有就 None）。"""
         tel = getattr(self.uart, "telemetry", None)
         return None if tel is None else getattr(tel, "yaw_deg", None)
+    def _down_sees_red_bar(self):
+        """下视红色横向横杆（门框底部）是否可见。仅在 `vision.gate.down.enable` 且本帧有下视帧时判。"""
+        if not getattr(self, "_down_enabled", False):
+            return False
+        frame = getattr(self, "_down_frame", None)
+        if frame is None:
+            return False
+        from gate.percept.down_view import detect_red_bar
+        return detect_red_bar(frame)
+    def _z_est(self, det, conf_thr):
+        """估计一个检测门的距离 z（**选门用，近者优先**）。
+
+        full/p3p → PnP；width（对向 2 角）→ `fx·W/Δu`；其余 → 框宽代理 `fx·W/w`。None = 估不出。
+        """
+        kp = getattr(det, "kpts", None)
+        kc = getattr(det, "kpt_conf", None)
+        if kp is not None and kc is not None and len(kp) >= 4:
+            mode, ids = parse_kpt_mode(kp, kc, conf_thr)
+            if mode in (MODE_FULL, MODE_P3P) and len(ids) >= 3:
+                obj3s = self.obj3[ids]
+                img2s = np.asarray(kp)[ids]
+                res = gate_pose(self.camera, obj3s, img2s, prev=None,
+                                reproj_thr=float(_D_PNP["reproj_px"]),
+                                z_bounds=(float(_D_PNP["z_min"]), float(_D_PNP["z_max"])),
+                                refine=bool(_D_PNP["refine"]))
+                if res is not None:
+                    return float(res[1].ravel()[2])
+            elif mode == MODE_WIDTH and len(ids) == 2:
+                z = width_range_depth(float(kp[ids[0]][0]), float(kp[ids[1]][0]),
+                                      float(self.camera.fx), self.frame_w_m)
+                if z is not None:
+                    return float(z)
+        if det.w > 0:
+            return float(self.camera.fx * self.frame_w_m / det.w)
+        return None
     def _pick_gate(self, dets):
-        """选目标门：按 `vision.gate.select.mode`（规范 `doc/设计/gate_pose_decode_spec.md` §4）。
-        用 **框宽**当测距代理（`z ≈ fx·W/w`，单调）；并列再比可信角点数 / 置信和 / score。
-        "水面倒影可能形成第二个门框，只按 score 选会选到倒影"。要回退就是把 cfg 改成一行。
-        去重（同一个门被两个尺度各检出一次）与四角几何合法性**不在本函数**里 ——
-        它们在 `gate/percept/gate_postproc.py`（`detect()` 先过 `vision.gate.postproc`）。"""
+        """选目标门 = **near（近距离优先，按真实 z 排序取最小）**。
+
+        2026-10-02 用户定：把视野中**所有**门的距离 z 都算出来再排序，最小的那扇就是当前要过的
+        —— 不单纯靠框占比（离得最近的门可能在画面边缘，框占比反而小）。
+        z 估计顺序：PnP(full/p3p) → width(fx·W/Δu) → 框宽代理(fx·W/w)；并列才比可信角点数。
+        """
         conf_thr = num(sub(self._V, "keypoint"), "conf_thr", _D_KPT["conf_thr"])
-        return postproc_pick(dets, conf_thr=conf_thr, cfg=self._select_cfg)
+        gates = [d for d in dets if getattr(d, "kind", None) == "gate"]
+        if not gates:
+            return None
+        best, best_z = None, None
+        for d in gates:
+            z = self._z_est(d, conf_thr)
+            if best is None or (z is not None and (best_z is None or z < best_z)):
+                best, best_z = d, z
+        return best

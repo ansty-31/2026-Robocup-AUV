@@ -337,9 +337,9 @@ import base.cfg.settings as S
 from gate.percept.kpt_memory import ENV_ENABLE, kpt_mem_enabled
 print('ball : timeout_ms=%s dash_ratio=%s stop_hold_s=%s' % (S.comm.ball.timeout_ms, S.comm.ball.dash_ratio, S.comm.ball.stop_hold_s))
 print('gate : near_ratio=%s hold=%s reacquire=%s' % (S.comm.gate.coarse.near_ratio, S.comm.gate.hold.max_frames, dict(S.comm.gate.reacquire)))
-print('motion(共用) : sway_kp=%s heave_kp=%s surge_fast=%s surge_slow=%s turn_kp=%s' % (
+print('motion(共用) : sway_kp=%s heave_kp=%s surge_fast=%s surge_slow=%s' % (
     S.comm.motion.pid_sway.kp, S.comm.motion.pid_heave.kp,
-    S.comm.motion.surge_fast, S.comm.motion.surge_slow, S.comm.motion.turn_pid.kp))
+    S.comm.motion.surge_fast, S.comm.motion.surge_slow))
 print('kptm : enable=%s（%s=%s）alpha=%s beta=%s recall_conf=%s' % (
     kpt_mem_enabled(S.vision.gate.kpt_mem), ENV_ENABLE,
     __import__('os').environ.get(ENV_ENABLE, '<未设>'),

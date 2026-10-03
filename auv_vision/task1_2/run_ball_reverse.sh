@@ -3,7 +3,7 @@
 #
 # 撞球 → **直线倒车** REV_S 秒返回（简单、不依赖轨迹/视觉；不做记忆回放）
 #      → 前进 POST_FWD_S 秒（重新摆位）
-#      → 左转 TURN_DEG 度（**遥测闭环**，见 common/motion/turn_deg.py）
+#      → 左转 TURN_DEG 度（**下位机执行相对角 + 等完成反馈**，见 common/motion/turn_deg.py）
 #      → main.py --task gate（过门）
 #
 # 流程：待机 → (可选)下潜 → (可选)前进 → main.py --task ball → 直接倒车
@@ -25,21 +25,6 @@
 #         AUV_POST_FWD_SURGE(0.35) 该前进的速度
 #         AUV_TURN_DEG(90)        转角大小（度）
 #         AUV_TURN_LEFT(1)        1=左转（默认） 0=右转
-#         AUV_TURN_YAW(空)        转向限幅覆盖（**默认空 → 用 comm.motion.turn_pid.out_max=0.45**）
-#         AUV_TURN_KP / AUV_TURN_KD / AUV_TURN_NORM_DEG(空)
-#                                 覆盖 PID 增益（默认取 cfg 的 **motion.turn_pid 独立一套**：
-#                                 kp 0.2 / kd 0 / out_max 0.45 / 死区 6° / norm_deg 15°）
-#         AUV_TURN_TIMEOUT(20)    闭环超时秒数（到不了会明确报实测角度）
-#         AUV_GATE_AFTER(1)       1=最后接过门任务（0=只做前面几步，便于分段试）
-#         AUV_GATE_LOG(log/gate_after_turn.jsonl) 过门任务的逐帧日志
-#         AUV_BALL_SKIP(0)        1=跳过撞球任务（台架只想试后三步时用）
-#         AUV_SIM_MODE(0)       0=真发串口（默认） / 1=只打印（台架）
-#
-# 注意：默认 AUV_SIM_MODE=0，**真驱动**；台架只想看打印时用 AUV_SIM_MODE=1。
-#       ⚠️ 每一步结束都会 `stop_hard()`：连发中性帧走完 ramp + （转向那步）用遥测 yaw
-#          确认真的停住 —— 否则最后一帧的舵量会被下位机一直保持（它没有无帧超时停车）。
-#       ⚠️ 转向是**遥测闭环**（下位机回传 yaw + PID），没有任何开环/盲转备案：
-#          拿不到遥测就**拒绝转向**（退出码 5）。
 set -u
 cd "$(dirname "$0")/.."
 
@@ -62,10 +47,10 @@ POST_FWD_S="${AUV_POST_FWD_S:-2}"
 POST_FWD_SURGE="${AUV_POST_FWD_SURGE:-0.35}"
 TURN_DEG="${AUV_TURN_DEG:-90}"
 TURN_LEFT="${AUV_TURN_LEFT:-1}"
-TURN_YAW="${AUV_TURN_YAW:-}"        # 空 = 用 cfg 的 motion.turn_pid.out_max
-TURN_KP="${AUV_TURN_KP:-}"
-TURN_KD="${AUV_TURN_KD:-}"
-TURN_NORM="${AUV_TURN_NORM_DEG:-}"
+TURN_YAW=""
+TURN_KP=""
+TURN_KD=""
+TURN_NORM=""
 TURN_TIMEOUT="${AUV_TURN_TIMEOUT:-20}"
 GATE_AFTER="${AUV_GATE_AFTER:-1}"
 BALL_SKIP="${AUV_BALL_SKIP:-0}"
@@ -149,25 +134,23 @@ fi
 echo "==== [6/8] 倒车后前进 ${POST_FWD_S} 秒 (surge=${POST_FWD_SURGE}) ===="
 timed_dof "${POST_FWD_S}" "${POST_FWD_SURGE}" 0 0 0 post_forward
 
-echo "==== [7/8] ${TURN_DIR_TXT} ${TURN_DEG}°（遥测闭环$([ -n "${TURN_YAW}" ] && echo "，舵 ${TURN_YAW}" || echo "，舵=cfg")）===="
+  echo "==== [7/8] ${TURN_DIR_TXT} ${TURN_DEG}°（手动给角度；下位机执行 + 等完成反馈）===="
 if [ "${TURN_DEG}" = "0" ]; then
   echo "-- 角度为 0，跳过转向 --"
 else
   turn_args=(--deg "${TURN_DEG}" --timeout "${TURN_TIMEOUT}")
-  [ -n "${TURN_YAW}" ] && turn_args+=(--out-max "${TURN_YAW}")
-  [ -n "${TURN_KP}" ] && turn_args+=(--kp "${TURN_KP}")
-  [ -n "${TURN_KD}" ] && turn_args+=(--kd "${TURN_KD}")
-  [ -n "${TURN_NORM}" ] && turn_args+=(--norm-deg "${TURN_NORM}")
   [ "${TURN_LEFT}" = "0" ] && turn_args+=(--dir right) || turn_args+=(--dir left)
   python3 common/motion/turn_deg.py "${turn_args[@]}"
   trc=$?
   case "${trc}" in
     0) echo "-- 转向到达（退出码 0）--" ;;
-    3|4) echo "!! 转向**未到达**（退出码 ${trc}）→ 看上面打印的实测角度；"
+    3) echo "!! 转向**没等到完成反馈**（退出码 3）：下位机没回 turn_done"
+       echo "   查 15B 上行帧（byte2=turn_id / byte13=turn_done）是否在回、编号是否对得上；"
+       echo "   若船其实转了但没回报 ⇒ 先查下位机固件这一侧（上位机已不再闭环）"
          echo "   实测角度很小(<5°) = 舵效不足；一直朝一个方向转到停不下来 = 查 dof_map.yaw.sign / 接线" ;;
     5) echo "!! **没拿到遥测 yaw → 已拒绝转向**（退出码 5）。查："
        echo "   控制台有没有 [UART←] depth=… yaw=… 这类上行行（没有=下位机没回传/串口不对）" ;;
-    6) echo "!! **方向自证失败**（退出码 6）：命令朝一边、船朝另一边 → 查 dof_map.yaw.sign /"
+    6) echo "!! （旧模型遗留的退出码 6；新模型不会出现：方向自证已随上位机闭环删除）"
        echo "   comm.telemetry.yaw_sign / 推进器接线（转向已停，不会一路转到底）" ;;
     *) echo "!! 转向异常退出码 ${trc}" ;;
   esac

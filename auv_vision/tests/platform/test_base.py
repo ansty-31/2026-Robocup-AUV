@@ -84,10 +84,9 @@ def test_uart_controller_sim_setmotion_neutral_estop():
     assert u.estop_active is False
     assert u.dof_target == (0.0, 0.0, 0.0, 0.0)
 
-    assert u.set_motion("forward_fast") is True
-    assert u.last_motion == "forward_fast"
-    assert u.dof_target == (1.0, 0.0, 0.0, 0.0)     # 取 comm.motion.presets
-    assert tuple(S.comm.motion.presets["forward_fast"]) == (1.0, 0.0, 0.0, 0.0)
+    assert u.set_motion("stop") is True
+    assert u.last_motion == "stop"
+    assert u.dof_target == (0.0, 0.0, 0.0, 0.0)     # 取 comm.motion.presets（表里只留生产用得到的 stop）
 
     u.set_motion("no_such_preset")                  # 未定义 → 回落 stop
     assert u.last_motion == "stop"
@@ -122,8 +121,8 @@ def test_create_camera_sim_returns_configured_frame(monkeypatch):
     assert f.dtype == np.uint8
     assert f.shape == (front.height, front.width, 3)
 
-    # down 配置本身即 sim
-    assert S.vision.camera.down.type == "sim"
+    # down 现在是 usb（2026-10-02 板端 /dev/video2）；同样强制 sim，避免打开真实设备
+    monkeypatch.setitem(S.vision.camera.down, "type", "sim")
     down = create_camera("down")
     d = down.read()
     assert d.shape == (S.vision.camera.down.height,
@@ -131,21 +130,27 @@ def test_create_camera_sim_returns_configured_frame(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 下位机遥测上行（14B 0xAA55 + 深度/姿态 + 校验和）
+# 下位机遥测上行（15B 0xAA55 + turn_id + 深度/姿态 + turn_done + 校验和）
 # ---------------------------------------------------------------------------
 def test_telemetry_frame_roundtrip_and_resync():
     """造帧↔拆帧往返；半帧/粘包/错位/校验错可重同步（串口按字节切分是常态）。"""
     f = T.build_telemetry_frame(0.42, 0.30, 1.5, -2.25, 88.0)
-    assert len(f) == T.TEL_LEN == 14
+    assert len(f) == T.TEL_LEN == 15          # 2026-10-02：加了 turn_done，14B → 15B
     assert f[:2] == T.TEL_HEADER == b"\xAA\x55"
     assert T.check_telemetry(f) is True
-    assert T.decode_telemetry(f) == pytest.approx((0.42, 0.30, 1.5, -2.25, 88.0))
+    assert T.decode_telemetry(f)[:5] == pytest.approx((0.42, 0.30, 1.5, -2.25, 88.0))
+    assert T.decode_telemetry(f)[5:] == (False, 0)     # (turn_done, turn_id)
+
+    # 转向反馈：编号 + 完成标志要能原样往返
+    ft = T.build_telemetry_frame(0.42, 0.30, 1.5, -2.25, 88.0, turn_done=True, turn_id=7)
+    assert T.check_telemetry(ft) is True
+    assert T.decode_telemetry(ft)[5:] == (True, 7)
 
     # 半帧不产出；补齐后才产出
     buf = bytearray(f[:6])
     assert T.parse_telemetry_frames(buf) == []
     buf.extend(f[6:])
-    assert T.parse_telemetry_frames(buf)[0] == pytest.approx(
+    assert T.parse_telemetry_frames(buf)[0][:5] == pytest.approx(
         (0.42, 0.30, 1.5, -2.25, 88.0))
     assert len(buf) == 0                       # 整帧被消费掉
 
@@ -215,7 +220,7 @@ def test_uart_real_serial_pty_telemetry_and_guard(monkeypatch):
         assert u.sim is False
         os.write(master, T.build_telemetry_frame(0.22))
         time.sleep(0.05)                     # pty 主→从要过线规层，等一拍才可读
-        u.set_motion("up")                   # 发帧前收遥测 → 深度不足 → 上浮被压掉
+        u.send_dof(0.0, 0.0, 1.0, 0.0)       # 上浮指令：发帧前收遥测 → 深度不足 → 被压掉
         assert u.depth_m == pytest.approx(0.22)
         assert u.dof_out[2] == 0.0
         assert list(u._current_frame())[3] == S.comm.frame.axis_mid   # heave 轴回中
@@ -228,7 +233,7 @@ def test_uart_real_serial_pty_telemetry_and_guard(monkeypatch):
 
         os.write(master, T.build_telemetry_frame(0.60))    # 深度够了 → 恢复上浮
         time.sleep(0.05)
-        u.set_motion("up", force=True)
+        u.send_dof(0.0, 0.0, 1.0, 0.0, force=True)   # 上浮 + 强制发帧
         assert u.depth_m == pytest.approx(0.60)
         assert u.dof_out[2] == 1.0
     finally:

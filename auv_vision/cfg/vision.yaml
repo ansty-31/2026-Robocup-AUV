@@ -3,18 +3,18 @@
 
 camera:
   fallback_sim: true
-  front:  # 前视：撞球/过门使用
+  front:  # 前视(主视)：撞球/过门使用 —— 板端实测 USB 2.0 Camera = /dev/video2
     type: usb  # sim | usb
-    device: 0  # usb: 0 或 /dev/videoN
+    device: /dev/video2  # usb: 0 或 /dev/videoN
     width: 1280
     height: 720
     fps: 30
     calibration: cfg/front_camera.yaml  # 去畸变标定 yaml
-  down:  # 下视(IMX415 MIPI)：保留
-    type: sim  # sim | mipi
-    device: /dev/video1
-    width: 640
-    height: 360
+  down:  # 下视：板端实测 HBV HD CAMERA = /dev/video0（usb 1.1）
+    type: usb  # sim | usb
+    device: /dev/video0
+    width: 1280
+    height: 720
     fps: 20
     calibration: null
 
@@ -77,6 +77,7 @@ gate:  # 过门
   det: {conf: 0.5}
   postproc: {edge_tol: 0.10, min_edges: 2, geom_check: true, lr_norm: true}
   select: {mode: near}
+  down: {enable: true}  # 下视辅助过门：coarse/width 门口识别红色横向门框 ⇒ 进 creep_through（下视=USB 720p，HSV 已实测确认）
   keypoint: {conf_thr: 0.8, vis_thr: 0.5}
   kpt_mem: {enable: false, alpha: 0.4, beta: 0.1, valid_ms: 800,
             k_sigma: 3.0, r_min_px: 10.0, r_max_px: 80.0,

@@ -1,8 +1,16 @@
 # -*- coding: utf-8 -*-
 """tests/tasks/test_motion.py — 运动原语：额定转角 `TurnCore` + 正航向 `HeadingAligner`。
-两半都是"遥测 yaw 闭环"状态机（转角是原语；正航向是 gate ALIGN 的子状态），
-时钟与 sleep 全部注入 → 确定性、毫秒级跑完。
-假船的默认极性 = **真机极性**（命令 +yaw 时遥测 yaw **减小**）—— 谁把 `dof_map.yaw.sign` /"""
+
+**2026-10-02 起模型变了**（板端先行的版本，本地对齐）：旋转**交给下位机执行**——
+上位机只发"相对角度 + 编号"（`uart.request_turn`）、由 UART 层按同一编号重发，
+然后等 15B 遥测里的完成标志（`uart.poll_turn_complete`）。**上位机不再跑 yaw PID 闭环**。
+
+所以这一半测的是新契约：
+  · 符号：`+` = 右转、`−` = 左转（`TurnCore.d` 左 −1 / 右 +1）；
+  · 执行期间上位机的 yaw 恒 0（手动 yaw 永远回中，转头这件事不归它）；
+  · 完成/超时/下发失败/急停四条收场路径，以及超时要**取消**下位机那次转动；
+  · 正航向 `HeadingAligner`：起转前冻结目标角 → 交给下位机 → 等完成。
+"""
 import os
 import sys
 
@@ -15,64 +23,104 @@ while _ROOT != os.path.dirname(_ROOT) and not os.path.isdir(os.path.join(_ROOT, 
 sys.path.insert(0, _ROOT)
 
 import base.cfg.settings as S                                          # noqa: E402
-from common.motion.turn_deg import TurnCore, turn, turn_cfg, wrap180, yaw_sign             # noqa: E402
+from common.motion.turn_deg import TurnCore, turn, wrap180, yaw_sign   # noqa: E402
 from gate.motion.hdg import (ABORTED, DONE, GIVEUP, TURN,             # noqa: E402
-                                HeadingAligner, hdg_cfg)
+                             HeadingAligner, hdg_cfg)
 
 # 真机极性：+yaw 命令 → 遥测 yaw 减小（σ = -1）
 BOARD_SIGN = -1.0
 
 
 # ======================================================================
-# 额定转角（common/motion/turn_deg.py）
+# 假下位机：**旋转的执行者**（2026-10-02 起）
+#   上位机 `request_turn(相对角)` → 下位机转动 → 遥测回 `turn_done`
+#   ⇒ 测试里用 `request_turn` / `poll_turn_complete` / `cancel_turn` 三个钩子模拟它。
 # ======================================================================
-class _Tel(object):
-    def __init__(self):
-        self.yaw_deg = 170.0        # 故意放在回绕边界附近
-class _FakeBoat(object):
-    """假船：下发的 yaw DOF → 遥测 yaw 按 imag_sign 方向积分（纯积分器，无延迟）。"""
+class _World(object):
+    """只记航向的假船：`H` 正 = 右转，门的航向误差 **psi = psi0 − H**。"""
 
-    def __init__(self, imag_sign=BOARD_SIGN, gain=60.0, start_yaw=170.0, dt=0.05):
-        self.telemetry = _Tel()
-        self.telemetry.yaw_deg = start_yaw
-        self.imag_sign = imag_sign
-        self.gain = gain            # 度/秒 每 1.0 DOF
-        self.dt = dt
-        self.cmd = []
-        self.neutral_calls = 0
-        self.closed = False
+    def __init__(self, psi0=0.0):
+        self.psi0 = float(psi0)
+        self.H = 0.0
+
+    @property
+    def psi(self):
+        return self.psi0 - self.H
+
+    def turn_by(self, angle_deg):
+        """下位机执行相对角：正 = 右转 ⇒ H 增大 ⇒ psi 变小。"""
+        self.H += float(angle_deg)
+
+
+class _Lower(object):
+    """假下位机。
+
+    Args:
+        world:   给了就"真的"把假世界转过去（等价于下位机执行）。
+        replies: poll 几次之后才回报完成（1 = 当帧完成；很大 = 永不回报 → 触发上位机超时）。
+        accept:  False = 模拟下发失败（`request_turn` 返回 False）。
+        estop:   True = 下位机处于急停（上位机必须立刻收手）。
+    """
+
+    def __init__(self, world=None, replies=1, accept=True, estop=False):
+        self.world = world
+        self.replies = int(replies)
+        self.accept = accept
+        self.estop_active = estop
+        self.reqs = []            # [(编号, 相对角)] —— 断言"发了多少度"看这里
+        self.cancels = []
+        self.stop_hard_calls = 0
+        self._id = 0
+        self._pending = 0
+
+    def request_turn(self, angle_deg, turn_id=None):
+        if self.estop_active or not self.accept:
+            return False
+        self._id = int(turn_id) if turn_id is not None else self._id + 1
+        self.reqs.append((self._id, float(angle_deg)))
+        if self.world is not None:
+            self.world.turn_by(float(angle_deg))
+        self._pending = self.replies
+        return True
+
+    def poll_turn_complete(self):
+        if self._pending <= 0:
+            return False
+        self._pending -= 1
+        return self._pending <= 0
+
+    def cancel_turn(self):
+        if self.estop_active:
+            return
+        self.cancels.append(self._id)
+        self._pending = 0
+
+    def stop_hard(self, *a, **kw):
+        self.stop_hard_calls += 1
+        self.cancel_turn()
+        return True
 
     def send_dof(self, surge=0.0, sway=0.0, heave=0.0, yaw=0.0):
-        self.cmd.append((surge, sway, heave, yaw))
-        if self.telemetry.yaw_deg is None:      # 无遥测的台架：yaw 不可用
-            return
-        self.telemetry.yaw_deg = wrap180(
-            self.telemetry.yaw_deg + yaw * self.gain * self.dt * self.imag_sign + 360.0)
+        """脚本入口每帧会回中；假下位机不关心（转头由 request_turn 表现）。"""
+        self.dof_calls = getattr(self, "dof_calls", 0) + 1
 
-    def neutral(self):
-        self.neutral_calls += 1
-        self.cmd.append((0.0, 0.0, 0.0, 0.0))
 
-    def close(self):
-        self.closed = True
-class _Clock(object):
-    def __init__(self, dt=0.05):
-        self.t = 0.0
-        self.dt = dt
+def _run_core(core, lower, dt=50, frames=200):
+    """按帧推进 TurnCore，返回 (终态, 每帧 yaw 指令)。"""
+    now = 0
+    yaws = []
+    for _ in range(frames):
+        st, yaw = core.step(now, lower)
+        yaws.append(yaw)
+        if core.finished():
+            break
+        now += dt
+    return core.state, yaws
 
-    def now(self):
-        return self.t
 
-    def sleep(self, s):
-        self.t += max(self.dt, s)
-def _run_turn(boat, **kw):
-    clk = _Clock(dt=boat.dt)
-    logs = []
-    rc = turn(boat, log=logs.append, now=clk.now, sleep=clk.sleep, **kw)
-    return rc, logs
-def _yaw_cmds(boat):
-    return [c[3] for c in boat.cmd if abs(c[3]) > 1e-9]
-
+# ======================================================================
+# 额定转角（common/motion/turn_deg.py）
+# ======================================================================
 def test_yaw_sign_is_a_fixed_derivation_not_a_measurement():
     """**极性 σ 是算出来的常量**（固件 × dof_map × telemetry），不配置、不探向、不现场测。"""
     sig, src = yaw_sign()
@@ -90,290 +138,259 @@ def test_yaw_sign_is_a_fixed_derivation_not_a_measurement():
         monkeypatch.undo()
     assert yaw_sign()[0] == pytest.approx(-1.0)
 
-def test_turn_left_reaches_rated_angle():
-    """左转 90°：遥测 yaw 应转出 +90°（真机极性下 +yaw 命令 → yaw 减小 ⇒ 左转 = yaw 增大）。"""
-    b = _FakeBoat()
-    y0 = b.telemetry.yaw_deg
-    rc, logs = _run_turn(b, deg=90.0, left=True, timeout=20.0)
-    assert rc == 0, "应到达目标角，logs=%s" % logs[-3:]
-    got = wrap180(b.telemetry.yaw_deg - y0)
-    assert abs(got - 90.0) <= 8.0, "实测 %.1f° 应≈目标 +90°" % got
-    assert b.neutral_calls >= 1, "结束时必须回中位"
-    ys = _yaw_cmds(b)
-    assert ys and all(y < 0 for y in ys), "左转不该出现正（右转）舵：%s" % set(ys)
 
-def test_turn_right_uses_positive_yaw():
-    b = _FakeBoat(start_yaw=0.0, gain=30.0)
-    rc, _ = _run_turn(b, deg=90.0, left=False, timeout=20.0)
-    assert rc == 0
-    assert abs(wrap180(b.telemetry.yaw_deg - 0.0) + 90.0) <= 8.0, "右转应转出 -90°（真机极性）"
-    ys = _yaw_cmds(b)
-    assert ys and all(y > 0 for y in ys), "右转应是正舵（+yaw=右转）"
-
-def test_pid_eases_off_near_the_target_and_respects_out_max():
-    """**用 PID 的判据**：① 命令不过 out_max；② 近目标时自动收力（不是一路满舵到点）。"""
-    cfg, _src = turn_cfg()
-    om = float(cfg["out_max"])
-    b = _FakeBoat(start_yaw=0.0, gain=40.0)
-    rc, _ = _run_turn(b, deg=90.0, left=True, timeout=20.0)
-    assert rc == 0
-    ys = [abs(y) for y in _yaw_cmds(b)]
-    assert max(ys) <= om + 1e-9, "命令不该超过限幅 %.2f（实际 %.3f）" % (om, max(ys))
-    assert min(ys[-3:]) < 0.5 * max(ys), \
-        "近目标没收力（峰值 %.3f，末段 %s）→ 说明不是 PID 闭环" % (max(ys), ys[-3:])
-
-def test_loop_converges_without_limit_cycle():
-    """**必须"逐步收敛"，不许原地极限环**（2026-09-27 仿真抓到的真问题）。
-    现行 cfg 是 `kd=0 / deadzone_deg=6`：一次转到位、出力不反号（导致极限环的旧参数"""
-    cfg, _ = turn_cfg()
-    assert float(cfg["kd"]) == pytest.approx(0.0), "kd 必须为 0（见 cfg/comm.yaml 的 turn_pid 注释）"
-    b = _FakeBoat(start_yaw=75.07, gain=200.0)      # 增益按板端实测量级取
-    rc, _ = _run_turn(b, deg=52.6, left=False, timeout=10.0)
-    assert rc == 0, "应一次转到位（实际退出码 %s）" % rc
-    res = wrap180(b.telemetry.yaw_deg - (75.07 - 52.6))     # 真机极性：右转 → yaw 减小
-    assert abs(res) <= float(cfg["deadzone_deg"]) + 1.0, "残余 %.2f° 应落在到达窗内" % res
-    outs = _yaw_cmds(b)
-    flips = sum(1 for i in range(1, len(outs)) if outs[i] * outs[i - 1] < 0)
-    assert flips <= 2, "出力来回反号 %d 次 ⇒ 极限环（不是收敛）" % flips
+def test_left_turn_is_a_negative_relative_angle():
+    """左转 90° ⇒ 发给下位机的相对角是 **−90°**（`d` 左 −1 / 右 +1）。"""
+    low = _Lower(replies=3)                       # 别当帧就完成，好断言"执行中"
+    core = TurnCore(deg=90.0, left=True, timeout=5.0, log=lambda *a: None)
+    core.start(0)
+    st, yaw = core.step(0, low)
+    assert low.reqs == [(1, -90.0)], "左转应下发 −90°，实际 %s" % low.reqs
+    assert st == TurnCore.RUN and abs(yaw) < 1e-9, "执行期间上位机 yaw 必须恒 0"
 
 
-def test_turn_gains_are_independent_from_ball(monkeypatch):
-    """**独立不变量**（2026-09-18 用户定）：转角这套 PID 不跟小球那套联动。"""
-    cfg0, src0 = turn_cfg()
-    assert src0 == "turn_pid(独立)", "默认来源应为独立那套，实际=%s" % src0
-    kp0 = float(cfg0["kp"])
-    monkeypatch.setitem(S.comm.ball, "edge_yaw_kp", 1.25)
-    cfg1, src1 = turn_cfg()
-    assert float(cfg1["kp"]) == pytest.approx(kp0), \
-        "改了 ball.edge_yaw_kp 却把转角 PID 带跑了 → 又变成联动（用户要独立）"
-    assert src1 == "turn_pid(独立)"
-    monkeypatch.setitem(S.comm.motion, "turn_pid",
-                        dict(S.comm.motion.get("turn_pid", {}), kp=0.7))
-    cfg2, _ = turn_cfg()
-    assert float(cfg2["kp"]) == pytest.approx(0.7)
+def test_right_turn_is_a_positive_relative_angle():
+    """右转 90° ⇒ **+90°**（真机极性下 +yaw=右转，见 `yaw_sign`）。"""
+    low = _Lower()
+    core = TurnCore(deg=90.0, left=False, timeout=5.0, log=lambda *a: None)
+    core.start(0)
+    core.step(0, low)
+    assert low.reqs == [(1, 90.0)], low.reqs
 
-def test_timeout_reports_how_far_it_actually_turned():
-    """舵效不足（几乎不转）→ 退出码 4；转了一部分但没到位 → 3。都带实测角度。"""
-    b = _FakeBoat(gain=0.2)                       # 极弱
-    # sat_max_s=0：本用例测的是**超时**那条保护，先把"满舵+无进展即停"这条新保护关掉，
-    #   否则新保护会先中止（两条保护的职责不同，用例要各自隔离）。
-    rc, logs = _run_turn(b, deg=90.0, left=True, timeout=3.0, sat_max_s=0.0)
-    assert rc == 4, "几乎没转应报 4，实际 %s" % rc
-    assert any("超时" in s for s in logs)
-    assert any("实测只转了" in s for s in logs)
-    assert b.neutral_calls >= 1
 
-    b2 = _FakeBoat(gain=8.0)                      # 能转但很慢
-    rc2, _ = _run_turn(b2, deg=90.0, left=True, timeout=3.0, sat_max_s=0.0)
-    assert rc2 == 3, "转了一部分应报 3，实际 %s" % rc2
+def test_upper_pc_never_outputs_yaw_during_the_turn():
+    """**上位机不再驱动 yaw**：整段转向里 `step()` 回给主循环的 yaw 永远是 0。"""
+    low = _Lower(replies=3)
+    core = TurnCore(deg=45.0, left=False, timeout=5.0, log=lambda *a: None)
+    st, yaws = _run_core(core, low)
+    assert st == TurnCore.DONE
+    assert all(abs(y) < 1e-9 for y in yaws), "转向期间不许再有上位机 yaw：%s" % set(yaws)
 
-def test_refuses_to_turn_without_telemetry():
-    """**默认行为**：没有遥测 → **拒转**（rc=5），一根转向指令都不许发
-    （不能"以为转了 90° 其实瞎转"），但必须回中位、不能挂死。**没有盲转备案。**"""
-    b = _FakeBoat()
-    b.telemetry.yaw_deg = None
-    rc, logs = _run_turn(b, deg=90.0, left=True, timeout=5.0, wait_tel_s=0.5)
-    assert rc == 5, "缺闭环量应拒转（rc=5），实际 %s" % rc
-    assert not _yaw_cmds(b), "拒转时不该发出任何非零舵：%s" % _yaw_cmds(b)
-    assert b.neutral_calls >= 1, "拒转也要回中位"
-    assert any("拒绝转向" in s for s in logs)
 
-def test_divergence_guard_stops_the_turn():
-    """**方向自证**（唯一的兜底，不是测量）：命令朝一边、船朝另一边 ⇒ 停转（rc=6）。"""
-    b = _FakeBoat(imag_sign=+1.0, start_yaw=0.0, gain=60.0)      # 反极性
-    # sat_max_s=0：本用例测**方向自证**，新保护（满舵无进展即停）会抢在前面 ⇒ 隔离掉
-    rc, logs = _run_turn(b, deg=30.0, left=True, timeout=20.0, sat_max_s=0.0)
-    assert rc == 6, "反极性应被方向自证拦下（rc=6），实际 %s（logs=%s）" % (rc, logs[-2:])
-    turned = abs(wrap180(b.telemetry.yaw_deg - 0.0))
-    limit = 30.0 + float(turn_cfg()[0]["div_deg"]) + 3.0
-    assert turned <= limit, "反极性下实测转了 %.1f° > 上限 %.1f°（兜底没生效）" % (turned, limit)
-    assert any("方向自证失败" in s for s in logs)
-    assert b.neutral_calls >= 1
-    # 关掉兜底（div_deg=0）→ 只能靠超时收场（旧行为：一路转到底，转出 limit 之外）
-    b2 = _FakeBoat(imag_sign=+1.0, start_yaw=0.0, gain=60.0)
-    rc2, _ = _run_turn(b2, deg=30.0, left=True, timeout=6.0, div_deg=0.0, sat_max_s=0.0)
-    turned2 = abs(wrap180(b2.telemetry.yaw_deg - 0.0))
-    assert rc2 == 3 and turned2 > limit, \
-        "div_deg=0 时应退回旧行为（一路转到 %.1f° 才超时）—— 这就是兜底存在的理由" % turned2
+def test_turn_done_when_the_lower_reports_completion():
+    """下位机回报完成 ⇒ DONE；且**只下发一次**（重发是 UART 层按同一编号做的事）。"""
+    low = _Lower(replies=2)
+    core = TurnCore(deg=30.0, left=True, timeout=5.0, log=lambda *a: None)
+    st, _ = _run_core(core, low)
+    assert st == TurnCore.DONE and core.state == "done", core.state
+    assert len(low.reqs) == 1 and low.reqs[0][1] == -30.0, low.reqs
+
+
+def test_turn_times_out_then_cancels_the_lower():
+    """下位机一直不回报 ⇒ 超时收场，并且**必须取消**那一次转动（别让它继续转）。"""
+    low = _Lower(replies=10 ** 6)
+    core = TurnCore(deg=90.0, left=True, timeout=1.0, log=lambda *a: None)
+    st, _ = _run_core(core, low, frames=500)
+    assert st == TurnCore.TIMEOUT and core.why == "completion_timeout", (st, core.why)
+    assert low.cancels == [1], "超时应取消编号 1，实际 %s" % low.cancels
+
+
+def test_turn_aborts_when_the_lower_rejects_the_request():
+    """下发失败 ⇒ ABORTED(send_failed)，**不许**当成"转过了"继续往下走。"""
+    low = _Lower(accept=False)
+    core = TurnCore(deg=90.0, left=True, timeout=5.0, log=lambda *a: None)
+    st, _ = _run_core(core, low, frames=5)
+    assert st == TurnCore.ABORTED and core.why == "send_failed", (st, core.why)
+    assert low.reqs == [], "下发都失败了，不该有成功的转向请求：%s" % low.reqs
+
+
+def test_estop_aborts_the_turn_immediately():
+    """下位机急停中 ⇒ 立刻 ABORTED(external)，一根指令都不发。"""
+    low = _Lower(estop=True)
+    core = TurnCore(deg=90.0, left=True, timeout=5.0, log=lambda *a: None)
+    st, yaw = core.step(0, low)
+    assert st == TurnCore.ABORTED and core.why == "external", (st, core.why)
+    assert low.reqs == [] and abs(yaw) < 1e-9
+
+
+def test_script_rc_mapping_matches_the_new_model():
+    """脚本入口 `turn()` 的退出码：0=完成 / 3=超时 / 5=下发失败或中止。"""
+    ok = _Lower(replies=1)
+    assert turn(ok, deg=90.0, left=True, timeout=2.0, log=lambda *a: None) == 0
+    assert ok.stop_hard_calls >= 1, "脚本收尾必须硬停"
+    slow = _Lower(replies=10 ** 6)
+    assert turn(slow, deg=90.0, left=True, timeout=0.5, log=lambda *a: None) == 3
+    bad = _Lower(accept=False)
+    assert turn(bad, deg=90.0, left=True, timeout=2.0, log=lambda *a: None) == 5
+
+
+def test_old_upper_pc_pid_is_gone_not_just_disabled():
+    """**旧机关不许复活**（源码级）：上位机 PID / 方向自证 / 等待遥测那套已经不在转向路径里。"""
+    import inspect
+    from common.motion import turn_deg as TD
+    src = inspect.getsource(TD)
+    for dead in ("自我证明", "方向自证失败", "_pid_out", "wait_tel_s=3.0, at_least"):
+        assert dead not in src, "旧的 %s 还在 turn_deg 里" % dead
+    assert "request_turn" in inspect.getsource(TD.TurnCore.step), "新模型必须走 request_turn"
 
 
 # ======================================================================
-# 正航向（gate/motion/hdg.py）：PnP 目标角 → 转一次 → 结束
+# 正航向（gate/motion/hdg.py）：冻结 PnP 目标角 → 交下位机转一次 → 结束
 # ======================================================================
-class _World(object):
-    """假船 + 假门：h=机身转角(正=右)，**psi=psi0−h**（2026-09-28 实船改正：右转使 psi **变小**），
-    遥测 yaw=h×imag_sign。"""
+class _Hull(object):
+    """假船 + 假门：h=机身转角(正=右)，**psi=psi0−h**（右转使 psi 变小），遥测 yaw=h×imag_sign。"""
 
-    def __init__(self, psi0=20.0, imag_sign=BOARD_SIGN, gain=60.0, dt=0.05, stuck=False):
+    def __init__(self, psi0=20.0, imag_sign=BOARD_SIGN, stuck=False):
         self.psi0 = float(psi0)
         self.imag_sign = float(imag_sign)
-        self.gain = float(gain)
-        self.dt = float(dt)
         self.stuck = bool(stuck)
-        self.h = 0.0
-        self.cmds = []
+        self.H = 0.0
 
     @property
     def psi(self):
-        return self.psi0 - self.h
+        return self.psi0 - self.H
 
     @property
     def yaw_tel(self):
-        return self.h * self.imag_sign
+        return self.H * self.imag_sign
 
-    def send(self, yaw_cmd):
-        self.cmds.append(float(yaw_cmd))
+    def turn_by(self, angle_deg):
         if not self.stuck:
-            self.h += float(yaw_cmd) * self.gain * self.dt
-def _run_hd(aligner, world, frames=1200, lost_after=None, telemetry=True, cfg_over=None,
-            on_frame=None):
-    """按帧推进 aligner；`on_frame(i)` 是每帧回调（用来数帧/断言状态）。"""
+            self.H += float(angle_deg)
+
+
+def _run_hd(aligner, hull, frames=600, lost_after=None, cfg_over=None, on_frame=None,
+            lower=None):
+    """按帧推进 aligner：下位机执行转动，aligner 只等完成标志。"""
     now = 0
     logs = []
     if cfg_over:
         aligner.cfg.update(cfg_over)
     aligner.log = logs.append
+    low = lower if lower is not None else _Lower(hull)
     if not aligner.finished():
-        aligner.start(now, psi=world.psi)      # gate_task 的 `_hdg_start` 就这一句
-    states = []
+        aligner.start(now, psi=hull.psi)         # gate_task 的 `_hdg_start` 就这一句
     for i in range(frames):
         if on_frame is not None:
             on_frame(i)
         lost = lost_after is not None and i >= lost_after
-        st, yaw = aligner.step(now, yaw_telemetry=(world.yaw_tel if telemetry else None),
-                               gate_lost=lost)
-        world.send(yaw)
-        states.append(st)
+        st, _yaw = aligner.step(now, yaw_telemetry=hull.yaw_tel, gate_lost=lost, uart=low)
         if aligner.finished():
             break
-        now += int(world.dt * 1000)
-    return states, logs, now
+        now += 50
+    return low, logs, now
+
 
 def test_converges_with_one_turn():
-    """psi=+20° → **右转 20°** → 结束（2026-09-28 实船改正；见 hdg.HeadingAligner.start 的注释）。
-
-    一次到位：目标角在起转那一刻冻结，转完就是 DONE，**只转一次**。
-    """
-    w = _World(psi0=20.0)
-    al = HeadingAligner(cfg=dict(hdg_cfg(), max_step_deg=0.0, turn_scale=1.0), log=lambda *a: None)
-    _run_hd(al, w)
+    """psi=+20° ⇒ 向（右转 +20°）；转完 DONE、**只转一次**、残余落到容差内。"""
+    hull = _Hull(psi0=20.0)
+    al = HeadingAligner(cfg=dict(hdg_cfg(), max_step_deg=0.0, turn_scale=1.0),
+                        log=lambda *a: None)
+    low, _, _ = _run_hd(al, hull)
     assert al.state == DONE, "应收敛，实际 %s（%s）" % (al.state, al.summary())
     assert al.iters == 1, "只该转一次（实际 %d 次）" % al.iters
-    assert al.last_dir == "右转", "psi>0 应**右转**（2026-09-28 实船改正），实际 %s" % al.last_dir
-    assert al.last_target_deg == pytest.approx(20.0), "目标角就是测到的 psi（%s）" % al.summary()
-    assert abs(w.psi) <= float(hdg_cfg()["tol_deg"]) + 1e-6, "转完残余 psi=%.1f°" % w.psi
-    nz = [c for c in w.cmds if abs(c) > 1e-9]
-    assert nz and all(c > 0 for c in nz), "右转不该出现负舵：%s" % set(nz)
-    assert max(abs(c) for c in nz) <= turn_cfg()[0]["out_max"] + 1e-9
+    assert al.last_dir == "右转", "psi>0 应**右转**，实际 %s" % al.last_dir
+    assert al.last_target_deg == pytest.approx(20.0), al.summary()
+    assert len(low.reqs) == 1 and low.reqs[0][1] == pytest.approx(20.0), low.reqs
+    assert abs(hull.psi) <= float(hdg_cfg()["tol_deg"]) + 1e-6, "转完残余 %.1f°" % hull.psi
+
 
 def test_left_turn_when_psi_is_negative():
-    """psi=-25° → **左转 25°**，舵全为负（2026-09-28 实船改正）。"""
-    w = _World(psi0=-25.0)
-    al = HeadingAligner(cfg=dict(hdg_cfg(), max_step_deg=0.0, turn_scale=1.0), log=lambda *a: None)
-    _run_hd(al, w)
+    """psi=−25° ⇒ 向（左转 −25°）。"""
+    hull = _Hull(psi0=-25.0)
+    al = HeadingAligner(cfg=dict(hdg_cfg(), max_step_deg=0.0, turn_scale=1.0),
+                        log=lambda *a: None)
+    low, _, _ = _run_hd(al, hull)
     assert al.state == DONE and al.last_dir == "左转", al.summary()
-    nz = [c for c in w.cmds if abs(c) > 1e-9]
-    assert nz and all(c < 0 for c in nz), "左转不该出现正舵：%s" % set(nz)
-    assert abs(w.psi) <= float(hdg_cfg()["tol_deg"]) + 1e-6
+    assert len(low.reqs) == 1 and low.reqs[0][1] == pytest.approx(-25.0), low.reqs
+    assert abs(hull.psi) <= float(hdg_cfg()["tol_deg"]) + 1e-6
+
 
 def test_target_angle_is_frozen_while_turning():
-    """**转动中不重测**：目标角在起转那一刻冻结成死数。
-    结构保证：转向期间 `HeadingAligner.step()` **根本收不到 psi**（入参只有"""
+    """**转动中不重测**：目标角在起转那一刻冻结成死数（入参里根本没有新的 psi）。"""
     import inspect
     params = list(inspect.signature(HeadingAligner.step).parameters)
     for dead in ("psi_deg", "psi_fresh", "psi_stale"):
-        assert dead not in params, "转向中不该再接收 %s（一次到位的结构性保证）：%s" % (dead, params)
-    w = _World(psi0=20.0)
-    al = HeadingAligner(cfg=dict(hdg_cfg(), max_step_deg=0.0, turn_scale=1.0), log=lambda *a: None)
-    seen = {"turn": 0}
+        assert dead not in params, "转向中不该再接收 %s（冻结目标角的结构性保证）：%s" % (dead, params)
+    hull = _Hull(psi0=20.0)
+    al = HeadingAligner(cfg=dict(hdg_cfg(), max_step_deg=0.0, turn_scale=1.0),
+                        log=lambda *a: None)
+    seen = {"n": 0}
 
     def on_frame(i):
         if al.state == TURN:
-            seen["turn"] += 1
+            seen["n"] += 1
 
-    _run_hd(al, w, on_frame=on_frame)
-    assert seen["turn"] >= 3, "转向应持续多帧（实际 %d）" % seen["turn"]
+    low, _, _ = _run_hd(al, hull, on_frame=on_frame)
     assert al.state == DONE and al.iters == 1, al.summary()
-    assert abs(w.psi) <= float(hdg_cfg()["tol_deg"]) + 1e-6, "转完残余 %.1f°" % w.psi
+    assert len(low.reqs) == 1, "冻结目标角 ⇒ 只该有一次下发：%s" % low.reqs
+    assert abs(hull.psi) <= float(hdg_cfg()["tol_deg"]) + 1e-6, "转完残余 %.1f°" % hull.psi
 
 
 def test_stuck_turn_times_out_then_gives_up():
-    """转不动（卡住）→ **只转一次**、超时后 GIVEUP（带残余航向继续走），不反复重试。"""
-    w = _World(psi0=60.0, stuck=True)
+    """下位机不回报（卡住）→ 超时后 GIVEUP（带残余航向继续走），不反复重试。"""
+    hull = _Hull(psi0=60.0, stuck=True)
     al = HeadingAligner(log=lambda *a: None, turn_kwargs=dict(timeout=1.0))
-    _, logs, _ = _run_hd(al, w, frames=5000)
+    low, logs, _ = _run_hd(al, hull, frames=800, lower=_Lower(hull, replies=10 ** 6))
     assert al.state == GIVEUP, "应放弃而不是死循环，实际 %s" % al.state
     assert al.iters == 1, "一次到位 ⇒ 只该有一次转向（实际 %d）" % al.iters
-    assert any("带残余航向继续走" in s for s in logs)
+    assert any("带残余航向继续走" in s or "放弃" in s for s in logs), logs[-3:]
 
-def test_step_cap_clamps_single_turn_and_zero_means_unlimited():
-    """`max_step_deg` 只是安全钳位：**0 = 不设限**（按测到的 psi 转）；>0 才限幅。"""
-    w = _World(psi0=60.0, stuck=True)
-    al0 = HeadingAligner(cfg=dict(hdg_cfg(), max_step_deg=0.0, turn_scale=1.0), log=lambda *a: None)
-    _run_hd(al0, w, frames=4)
+
+def test_step_cap_clamps_the_requested_angle():
+    """`max_step_deg` 是安全钳位：**0 = 不设限**（按测到的 psi 转）；>0 才限幅。"""
+    h0 = _Hull(psi0=60.0, stuck=True)
+    al0 = HeadingAligner(cfg=dict(hdg_cfg(), max_step_deg=0.0, turn_scale=1.0),
+                         log=lambda *a: None)
+    low0, _, _ = _run_hd(al0, h0, frames=3)
     assert al0.last_target_deg == pytest.approx(60.0), \
         "max_step_deg=0 应不设限（实际 %.1f°）" % al0.last_target_deg
-    w2 = _World(psi0=60.0, stuck=True)
-    al2 = HeadingAligner(cfg=dict(hdg_cfg(), max_step_deg=25.0, turn_scale=1.0), log=lambda *a: None)
-    _run_hd(al2, w2, frames=4)
+    h2 = _Hull(psi0=60.0, stuck=True)
+    al2 = HeadingAligner(cfg=dict(hdg_cfg(), max_step_deg=25.0, turn_scale=1.0),
+                         log=lambda *a: None)
+    low2, _, _ = _run_hd(al2, h2, frames=3)
     assert al2.last_target_deg == pytest.approx(25.0), \
         "配了 max_step_deg=25 应限幅到 25°（实际 %.1f°）" % al2.last_target_deg
+    assert low2.reqs and abs(low2.reqs[0][1]) == pytest.approx(25.0), low2.reqs
+
 
 def test_small_psi_is_left_alone():
-    """|psi| ≤ tol_deg ⇒ 直接 DONE，一根舵都不发（不为了 2~3° 去推一下）。"""
-    w = _World(psi0=3.0)
+    """|psi| ≤ tol_deg ⇒ 直接 DONE，**一次下发都没有**（不为了 2~3° 去推一下）。"""
+    hull = _Hull(psi0=3.0)
     al = HeadingAligner(log=lambda *a: None)
-    _, logs, _ = _run_hd(al, w, frames=200)
+    low, logs, _ = _run_hd(al, hull, frames=50)
     assert al.state == DONE and al.iters == 0, al.summary()
-    assert all(abs(c) < 1e-9 for c in w.cmds), "不该有任何转向指令"
+    assert low.reqs == [], "不该有任何转向下发：%s" % low.reqs
     assert any("不转" in s for s in logs)
+
 
 def test_no_psi_no_turn():
     """没有 PnP 目标角 ⇒ GIVEUP，不转（没有"开环盲转"这条路）。"""
-    w = _World(psi0=20.0)
     al = HeadingAligner(log=lambda *a: None)
-    st, yaw = al.start(0, psi=None)
-    assert st == GIVEUP and abs(yaw) < 1e-9
-    assert all(abs(c) < 1e-9 for c in w.cmds)
+    st = al.start(0, psi=None)
+    if isinstance(st, tuple):                    # start() 有的分支回 (state, yaw)
+        st = st[0]
+    assert st == GIVEUP, st
+    assert al.finished(), "GIVEUP 之后本门不再转，应视为已结束"
+
 
 def test_gate_lost_aborts_immediately():
-    """转向中整门丢失 → 立刻中止（不再发任何转向指令），本门不再尝试。"""
-    w = _World(psi0=45.0)
+    """转向中整门丢失 → 立刻中止，并**取消下位机那一次转动**，本门不再尝试。"""
+    hull = _Hull(psi0=45.0)
     al = HeadingAligner(log=lambda *a: None)
-    al.start(0, psi=w.psi)
-    now = 0
-    for i in range(600):
-        st, yaw = al.step(now, yaw_telemetry=w.yaw_tel, gate_lost=False)
-        if al.state == TURN and i > 3:                  # 转几帧后丢门
-            st, yaw = al.step(now, yaw_telemetry=w.yaw_tel, gate_lost=True)
-            assert al.state == ABORTED
-            assert abs(yaw) < 1e-9, "丢门时本帧不许再给转向舵"
-            break
-        w.send(yaw)
-        now += 50
-    assert al.state == ABORTED and al.finished(), "中止后应视为已结束（放行到下一步）"
+    low = _Lower(hull, replies=10 ** 6)          # 让它一直"转着"，好在途中丢门
+    al.start(0, psi=hull.psi)
+    _st, _ = al.step(0, yaw_telemetry=hull.yaw_tel, gate_lost=False, uart=low)
+    assert al.state == TURN, al.summary()
+    _st, _ = al.step(50, yaw_telemetry=hull.yaw_tel, gate_lost=True, uart=low)
+    assert al.state == ABORTED, al.summary()
+    assert low.cancels == [1], "中止时应取消下位机那次转动：%s" % low.cancels
+    assert al.finished(), "中止后应视为已结束（放行到下一步）"
+
 
 def test_disabled_switches_off_completely():
     """`enable: false` → 永远 finished、不发任何指令（一键关掉正航向）。"""
     al = HeadingAligner(cfg=dict(hdg_cfg(), enable=False), log=lambda *a: None)
     assert al.finished()
-    st, yaw = al.step(0, yaw_telemetry=0.0)
-    assert st == al.state and abs(yaw) < 1e-9
+    low = _Lower()
+    st, yaw = al.step(0, yaw_telemetry=0.0, uart=low)
+    assert st == al.state and abs(yaw) < 1e-9 and low.reqs == []
 
-def test_no_telemetry_never_turns():
-    """**没有遥测 yaw ⇒ 不转**（ABORTED，且全程零舵）。
-    这条守的是用户定的原则：转向只允许闭环，**不留开环盲转备案**"""
-    w = _World(psi0=20.0)
-    al = HeadingAligner(log=lambda *a: None, turn_kwargs=dict(wait_tel_s=0.5))
-    _, logs, _ = _run_hd(al, w, frames=400, telemetry=False)
-    assert al.state == ABORTED, "无遥测应中止，实际 %s" % al.state
-    assert all(abs(c) < 1e-9 for c in w.cmds), "无遥测时一根舵都不许发：%s" % set(w.cmds)
-    assert any("拒绝转向" in s for s in logs)
 
 def test_p3p_frames_do_not_feed_the_filter():
     """**p3p 的 psi 不许进滤波器**（3 点解欠定，航向 std 极大）。
 
-    做法：同一个 GateTask 先喂一帧 full（建立测量），再喂一帧 p3p（旋转过的、会测出别的值）
+    做法：同一个 GateTask 先喂两帧 full（建立 +20° 的测量），再喂几帧 p3p（旋转过的、会测出别的值）
     → `_hdg_deg` / `_hdg_ms` 必须保持 full 那帧的值不变。
     """
     import numpy as np
@@ -415,36 +432,96 @@ def test_p3p_frames_do_not_feed_the_filter():
         "p3p 帧污染了航向测量（%.1f → %.1f）" % (kept, task._hdg_deg)
 
 
-def test_overshoot_tolerance_is_measured_against_the_issued_deg():
-    """**超转容差 = 10°**（用户 2026-09-28 定："可以超转，但超转不得超过 10 度"）。
-    `0 ≤ done_deg − 下发的 deg ≤ overshoot_tol_deg` 即算这一小步到位，且在这窗里**不再触发满舵保护**："""
-    def run(tol, cap=45.0):
-        c = TurnCore(deg=20.0, left=True, timeout=30.0, log=lambda *a: None,
-                     # out_max 调小只为让"满舵"这条判据在合成航迹上真的生效
-                     #   （默认 0.30 需要 |err| ≥ 20.25° 才饱和，测起来不直观）
-                     cfg=dict(overshoot_tol_deg=tol, sat_max_s=2.0, sat_progress_deg=5.0,
-                              out_max=0.10))
-        t, i = 0, 0
-        while not c.finished() and t < 15000:
-            i += 1
-            # 0 → 45°：**每帧 8° 冲过去**（快得跳过 3 帧死区确认），冲到 45° 停住 ⇒ 下发 20°、超转 25°。
-            c.step(t, min(cap, i * 8.0))
-            t += 100
-        return c, t
+def test_wrap180_wraps_into_half_open_range():
+    """回绕归一化：(-180, 180]。"""
+    assert wrap180(0.0) == pytest.approx(0.0)
+    assert wrap180(180.0) == pytest.approx(180.0)
+    assert wrap180(190.0) == pytest.approx(-170.0)
+    assert wrap180(-190.0) == pytest.approx(170.0)
 
-    a, _ = run(0.0)                       # 关掉容差：超转后不再改善 ⇒ 被满舵保护掐死
-    assert a.state == TurnCore.ABORTED and a.why == "sat", (a.state, a.why)
-    b, _ = run(10.0, cap=28.0)             # 冲到 28°（下发 20° ⇒ 超转 8° ≤ 10°）⇒ 认到位
-    assert b.state == TurnCore.DONE and 0.0 <= b.overshoot_deg() <= 10.0 + 1e-9, \
-        (b.state, b.overshoot_deg())
-    c_big, _ = run(10.0, cap=80.0)         # 冲到 80°（超转 60° ≫ 10°）⇒ **不许**判到位
-    assert c_big.state != TurnCore.DONE, (c_big.state, c_big.overshoot_deg())
 
-    # 反面：容差**不许**把"只转了一点点"判成到位（只放宽超转一侧）
-    c = TurnCore(deg=20.0, left=True, timeout=2.0, log=lambda *a: None,
-                 cfg=dict(overshoot_tol_deg=10.0, sat_max_s=0.0, deadzone_deg=6.0))
-    t = 0
-    while not c.finished() and t < 3000:
-        c.step(t, 5.0)                           # 只转了 5°（下发 20°，差 15° > 死区）
-        t += 50
-    assert c.state != TurnCore.DONE, "未转够 15° 不该判到位（容差只管超转）：%s" % c.state
+# ======================================================================
+# 手动入口（CLI）：**给一个目标角度就转**（与 gate 自动接受同一条执行链）
+# ======================================================================
+class _FakeUartCtl(object):
+    """冒充 `UartController`：把 request_turn / poll / cancel 转发给假下位机。"""
+
+    sim = False
+
+    def __init__(self, low):
+        self._low = low
+        self._turn_counter = 0
+
+    def close(self):
+        pass
+
+    def _write(self, *a, **kw):
+        pass
+
+    def set_motion(self, *a, **kw):
+        pass
+
+    def __getattr__(self, name):
+        return getattr(self._low, name)
+
+
+def test_manual_cli_takes_a_target_angle(monkeypatch):
+    """**手动规定目标角度**：`turn_deg.py --deg 45 --dir right` ⇒ 下发的正是 +45°（右转）。
+
+    与自动那条对照：两者都落到 `uart.request_turn()`（同一个 `TurnCore`）。
+    """
+    import sys as _sys
+    from common.motion import turn_deg as TD
+
+    low = _Lower(replies=1)
+    monkeypatch.setattr("base.hw.uart.UartController", lambda *a, **kw: _FakeUartCtl(low))
+    monkeypatch.setattr(_sys, "argv", ["turn_deg.py", "--deg", "45", "--dir", "right"])
+    rc = TD.main()
+    assert rc == 0, "手动转向应报完成（rc=0），实际 %s" % rc
+    assert low.reqs == [(1, 45.0)], "应把 +45°（右转）下发给下位机，实际 %s" % low.reqs
+    assert low.stop_hard_calls >= 1, "收尾必须硬停"
+
+
+def test_manual_cli_left_is_a_negative_angle(monkeypatch):
+    """左转 = −角（`--dir left`），与 gate 那条的符号约定完全一致。"""
+    import sys as _sys
+    from common.motion import turn_deg as TD
+
+    low = _Lower(replies=1)
+    monkeypatch.setattr("base.hw.uart.UartController", lambda *a, **kw: _FakeUartCtl(low))
+    monkeypatch.setattr(_sys, "argv", ["turn_deg.py", "--deg", "30", "--dir", "left"])
+    assert TD.main() == 0
+    assert low.reqs and low.reqs[0][1] == -30.0, low.reqs
+
+
+def test_manual_cli_only_takes_deg_dir_timeout(monkeypatch):
+    """**只接受 `--deg/--dir/--timeout`**（用户 2026-10-02 定）：限幅/PID/归一化等运动参数都归下位机，
+    老写法（`--out-max/--kp/--kd/--norm-deg/--imag-sign`）现在必须**报错**而不是被静默忽略 ——
+    静默忽略会让"以为设了限幅其实没设"，宁可让老脚本当场失败。"""
+    import sys as _sys
+    from common.motion import turn_deg as TD
+
+    low = _Lower(replies=1)
+    monkeypatch.setattr("base.hw.uart.UartController", lambda *a, **kw: _FakeUartCtl(low))
+    for dead in (["--out-max", "0.3"], ["--kp", "0.2"], ["--kd", "0.05"],
+                 ["--norm-deg", "15"], ["--imag-sign", "-1"]):
+        monkeypatch.setattr(_sys, "argv", ["turn_deg.py", "--deg", "10"] + dead)
+        with pytest.raises(SystemExit) as e:
+            TD.main()
+        assert e.value.code == 2, "旧旋钮 %s 应被拒（实际退出码 %s）" % (dead[0], e.value.code)
+    assert low.reqs == [], "参数不合法时不该下发任何转向"
+
+
+# ======================================================================
+# 2026-10-02：运行时**可信边界** `z.relock_away_m = 1.2 m`（超出即不采纳该帧位姿）。
+# 本模块绝大多数用例合成的门放在 1.5–3 m，考的是**位姿之后的逻辑**（起转/出口/恢复/SWAY_BACK…），
+# 与"多远才算可信"正交 ⇒ 这里统一把边界放宽到 99（= 关闭），只有专门考这条的用例用真值
+# （用例名里带 jump/relock/far 的自动跳过，不覆盖）。
+# ======================================================================
+@pytest.fixture(autouse=True)
+def _relax_z_trust_boundary(request, monkeypatch):
+    name = request.node.name
+    if any(k in name for k in ("jump", "relock", "far", "stale", "history", "hist")):
+        return
+    if "relock_away_m" in S.comm.gate.get("z", {}):
+        monkeypatch.setitem(S.comm.gate["z"], "relock_away_m", 99.0)

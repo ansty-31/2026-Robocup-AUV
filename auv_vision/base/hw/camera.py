@@ -19,8 +19,9 @@ except ImportError:
 
 
 class Camera(object):
-    def __init__(self, width, height, fps):
+    def __init__(self, width, height, fps, stream=True):
         self.width, self.height, self.fps = width, height, fps
+        self._stream = bool(stream)   # False=辅助相机(下视)：read() 不推流，别污染主视画面
 
     def read(self):
         raise NotImplementedError
@@ -97,9 +98,9 @@ class VideoFileCamera(Camera):
 # 虚拟相机（前视/下视各自仿真；下视带红色标示线供 back 真实颜色逻辑测试）
 # ---------------------------------------------------------------------------
 class SimCamera(Camera):
-    def __init__(self, which):
+    def __init__(self, which, stream=True):
         cfg = S.vision.camera[which]
-        super().__init__(cfg.width, cfg.height, cfg.fps)
+        super().__init__(cfg.width, cfg.height, cfg.fps, stream=stream)
         self.which = which
         self._rng = np.random.default_rng(20260904)
         self._frame = 0
@@ -121,7 +122,7 @@ class SimCamera(Camera):
                 base[y0:, x0:x0 + band_w, 0] = 20
                 base[y0:, x0:x0 + band_w, 1] = 20
         self._frame += 1
-        pusher = get_stream_pusher()          # 仿真也能推（无硬件时验证全链路）
+        pusher = get_stream_pusher() if self._stream else None          # 仿真也能推（无硬件时验证全链路）
         if pusher is not None:
             ok, enc = cv2.imencode(".jpg", base, [cv2.IMWRITE_JPEG_QUALITY, 70])
             if ok:
@@ -186,10 +187,10 @@ def get_stream_pusher():
 # 真机后端
 # ---------------------------------------------------------------------------
 class UsbCamera(Camera):
-    def __init__(self, cfg):
+    def __init__(self, cfg, stream=True):
         if not HAS_CV2:
             raise RuntimeError("需要 opencv-python(cv2) 打开 USB 相机")
-        super().__init__(cfg.width, cfg.height, cfg.fps)
+        super().__init__(cfg.width, cfg.height, cfg.fps, stream=stream)
         self.dev = cfg.device
         self._cap = cv2.VideoCapture(self.dev, getattr(cv2, "CAP_V4L2", 0))
         if not self._cap.isOpened():
@@ -224,7 +225,7 @@ class UsbCamera(Camera):
         ok, buf = self._cap.read()
         if not ok or buf is None:
             return None
-        pusher = get_stream_pusher()
+        pusher = get_stream_pusher() if self._stream else None
         if self._raw:
             if pusher is not None:
                 pusher.offer(buf)                        # 原始 JPEG：零转码（CPU≈0）
@@ -258,7 +259,7 @@ class MipiCamera(Camera):
 # ---------------------------------------------------------------------------
 # 工厂：front/down 各自按 yaml type 实例化；真机失败按 fallback_sim 软回退
 # ---------------------------------------------------------------------------
-def create_camera(which, fallback_sim=None):
+def create_camera(which, fallback_sim=None, stream=True):
     cfg = S.vision.camera[which]
     typ = cfg.type
     fallback = S.vision.camera.fallback_sim if fallback_sim is None \
@@ -269,9 +270,9 @@ def create_camera(which, fallback_sim=None):
         return VideoFileCamera(cfg, vid, fps=os.environ.get("AUV_CAM_VIDEO_FPS"))
     try:
         if typ == "sim":
-            return SimCamera(which)
+            return SimCamera(which, stream=stream)
         if typ == "usb":
-            return UsbCamera(cfg)
+            return UsbCamera(cfg, stream=stream)
         if typ == "mipi":
             return MipiCamera(cfg)
         raise RuntimeError("未知相机类型 %s.%s" % (which, typ))
@@ -289,7 +290,7 @@ def create_camera(which, fallback_sim=None):
             elif dev:
                 print("[CAM]    %s 无进程占用 -> 检查线缆/USB 供电，或换 device 索引"
                       "（cfg/vision.yaml -> camera.front.device）" % dev)
-            return SimCamera(which)
+            return SimCamera(which, stream=stream)
         raise
 
 def _camera_holders(dev):

@@ -176,7 +176,13 @@ def test_gate_task_mock_reaches_through_and_counts_pass(fake_uart, monkeypatch):
             break
 
     assert status == S.STATUS_DONE
-    assert phases == [PH_ALIGN, PH_APPROACH, PH_THROUGH]
+    #  2026-10-02：**1.8 m 外的位姿一概不信**（用户定）⇒ mock 起始距离在 1.8 m 外时，
+    #  开头几帧没有可用位姿 ⇒ 先 SEARCH（靠框占比靠近），进了 1.8 m 才进 ALIGN。
+    from gate.gate_task import PH_SEARCH
+    assert phases[0] in (PH_ALIGN, PH_SEARCH), phases[:3]
+    assert PH_THROUGH in phases and phases[-1] == PH_THROUGH, phases
+    for _p in (PH_ALIGN, PH_APPROACH, PH_THROUGH):
+        assert _p in phases, "缺相位 %s：%s" % (_p, phases)
     assert SUB_GOLDEN in substates                 # 位姿对准子状态确实走到
     assert task.last_info["reason"] == "pass"
     assert task.last_info["pass"] == 1             # 达 comm.gate.pass_target
@@ -330,3 +336,18 @@ def test_low_score_cells_are_filtered_by_conf():
         _set_kpt_cell(out, 3, 3, i, cell_x=3.5, cell_y=3.5)
     assert decode_yolo11_kpt(out, LABELS, INPUT, INPUT, conf=0.25,
                              input_w=INPUT, input_h=INPUT) == []
+
+
+# ======================================================================
+# 2026-10-02：运行时**可信边界** `z.relock_away_m = 1.2 m`（超出即不采纳该帧位姿）。
+# 本模块绝大多数用例合成的门放在 1.5–3 m，考的是**位姿之后的逻辑**（起转/出口/恢复/SWAY_BACK…），
+# 与"多远才算可信"正交 ⇒ 这里统一把边界放宽到 99（= 关闭），只有专门考这条的用例用真值
+# （用例名里带 jump/relock/far 的自动跳过，不覆盖）。
+# ======================================================================
+@pytest.fixture(autouse=True)
+def _relax_z_trust_boundary(request, monkeypatch):
+    name = request.node.name
+    if any(k in name for k in ("jump", "relock", "far", "stale", "history", "hist")):
+        return
+    if "relock_away_m" in S.comm.gate.get("z", {}):
+        monkeypatch.setitem(S.comm.gate["z"], "relock_away_m", 99.0)

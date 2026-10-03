@@ -56,6 +56,9 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         G = S.get("comm.gate", None) or {}
         V = S.get("vision.gate", None) or {}
         self._G, self._V = G, V
+        # 下视辅助过门：开关 vision.gate.down.enable（相机配置上机后补）；帧由 main 每帧写入。
+        self._down_enabled = flag(sub(V, "down"), "enable", False)
+        self._down_frame = None
 
         geo = merge(sub(V, "geometry"), _D_GEOM)
         self.frame_w_m = float(geo["frame_w"])
@@ -120,6 +123,7 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
                  det_cfg()))
         self._hdg_done = True             # True=本门不需要再正航向（未启用或已出结论）
         self._hdg_done = not flag(self._hdg_cfg, "enable", True)
+        self._hdg_ok = False              # 本门是否满足冲刺前航向条件；每次换门清零
         self._hdg_f = None                # EMA 状态（只吃 full 帧，避免 p3p 垃圾污染）
         self._hdg_deg = None              # 最近一次 full 帧测到的航向误差（度）
         self._hdg_ms = None               # 上面那个值的时刻
@@ -133,7 +137,7 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         self._now_ms = None               # 本帧时基（process 每帧写入）
         self._det_now = None              # 本帧选中的门（状态判"门回来了吗"用当帧数据）
 
-        self.last_info = {"phase": PH_SEARCH, "substate": "", "mode": "",
+        self.last_info = {"phase": PH_ALIGN, "substate": "", "mode": "",
                           "action": "stop", "z": 0.0, "dx": 0.0, "dy": 0.0,
                           "sway": 0.0, "heave": 0.0, "surge": 0.0, "yaw": 0.0,
                           "pass": 0, "kpt": 0, "kpt_raw": 0, "ratio": 0.0,
@@ -146,7 +150,7 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
     def reset_state(self):
         self.frames = 0
         self._start_ms = None
-        self.phase = PH_SEARCH
+        self.phase = PH_ALIGN
         self.substate = ""
         self.mode = ""
         self._last_pose = None            # (rvec, tvec) 上一帧位姿（消歧/防抖）
@@ -158,8 +162,10 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         self._cross_cnt = 0              # 连续 z≤cross 帧数（穿门确认，防单帧错解）
         self._through_frames = 0
         self._through_start_ms = None    # THROUGH 起始时间戳（时长判据）
+        self._creep_through_start_ms = None  # CREEP_THROUGH 起始时间戳
         self._hdg.reset()
         self._hdg_done = not flag(self._hdg_cfg, "enable", True)
+        self._hdg_ok = False
         self._hdg_skip_logged = False
         self._hdg_turns = 0
         self._hdg_turns_last_ms = None
@@ -181,6 +187,16 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         self._finished = False
         self._reason = ""
         self.last_dets = []               # 本帧门检测（供 main._draw 画角点）
+    def set_down_frame(self, frame):
+        """每帧由装配层(main)写入下视帧；下视处理只在 coarse/width 门口时读它。"""
+        self._down_frame = frame
+    def wants_down(self):
+        """本帧是否需要下视帧：下视开关开 且 当前档位是 coarse/width（门口过门才用下视判断）。
+
+        只在这两种档位才让 main 开/读下视相机，其余时间释放 —— 别让第二路 USB 相机抢带宽、
+        影响前视（自动挡主视）的显示。
+        """
+        return self._down_enabled and self.mode in ("coarse", "width")
     @property
     def ready(self):
         return self.hub.has_extra(self.name)
@@ -205,7 +221,7 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
 
         if (self._hdg.turning and not self._hdg.finished()):
             #   转向期间**连检测都不做**（画面丢了/门转出视野/水花糊了都不影响它），
-            #   按 `turn_pid.period` 跑完再回主循环。
+            #   按 `gate.hdg.turn_period` 跑完再回主循环。
             self.last_dets = []            # 本帧没有视觉结果 → 叠加层不许画上一帧的框
             self._turn_blocking(now_ms)
         else:
@@ -228,8 +244,11 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         if self._hdg.turning and not self._hdg.finished():
             self._turn_blocking(now_ms)
             return
-        if self.phase == PH_THROUGH:
-            self._tick_through(now_ms)      # 穿门=直行，不做横向微调
+        if self.phase in (PH_THROUGH, PH_CREEP_THROUGH):
+            if self.phase == PH_THROUGH:
+                self._tick_through(now_ms)      # 正常过门=直行，不做横向微调
+            else:
+                self._tick_creep_through(now_ms)   # 门口过门=慢速 creep 直行
             return
         if det is None:
             self._tick_lost(now_ms)

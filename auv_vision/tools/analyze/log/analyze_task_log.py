@@ -182,10 +182,10 @@ def main():
                   "噪声底用静态 dump 测（tools/analyze/log/analyze_heading.py）")
 
     # ---- ⑦c 水平通道"能动力"：为什么调不动 ----
-    #     gate 里唯一的 yaw 来源是 ALIGN.HDG 正航向 → 增益 comm.motion.turn_pid）。
-    yaw_out = float((S.get("comm.motion.turn_pid", None) or {}).get("out_max", 0.45) or 0.45)
-    sway_out = float((S.get("comm.gate.pid_sway", None) or {}).get(
-        "out_max", (S.get("comm.motion.pid_sway", None) or {}).get("out_max", 0.45)) or 0.45)
+    #     2026-10-02：转向交下位机执行 ⇒ **上位机 yaw 恒 0 属正常**，这里不再有"yaw 上限"可读。
+    yaw_out = 0.0
+    #     sway 的上限就是共用那套 `comm.motion.pid_sway.out_max`（gate 不再抄第二份）
+    sway_out = float((S.get("comm.motion.pid_sway", None) or {}).get("out_max", 0.55) or 0.55)
     sw = [_g(r, "sway") for r in rows]
     yw = [_g(r, "yaw") for r in rows]
     print("\n⑦c 水平通道能动力（执行器死区 %.3f；sway 上限 %.2f=25%% 推力）" % (dz, sway_out))

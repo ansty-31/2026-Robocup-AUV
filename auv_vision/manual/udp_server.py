@@ -28,6 +28,7 @@ import time
 
 import base.cfg.settings as S
 from base.hw.uart import UartController
+from manual.cam_switch import CamPusher, parse_camera_packet
 
 def clamp(value, lo=-1.0, hi=1.0):
     return max(lo, min(hi, float(value)))
@@ -80,16 +81,35 @@ def main():
                         help="force real serial mode, overriding settings.SIM_MODE")
     parser.add_argument("--quiet", dest="debug", action="store_false",
                         help="reduce debug logging")
+    parser.add_argument("--stream-host", default=None,
+                        help="推流目标 PC IP（默认取 AUV_STREAM_HOST；不给则不推流）")
+    parser.add_argument("--stream-port", type=int, default=None,
+                        help="推流 UDP 端口（默认 AUV_STREAM_PORT / 5000）")
+    parser.add_argument("--stream-fps", type=float, default=None,
+                        help="推流帧率上限（默认 AUV_STREAM_FPS / 30）")
+    parser.add_argument("--stream-pkt", type=int, default=None,
+                        help="UDP 切片大小（默认 AUV_STREAM_PKT / 8000）")
+    parser.add_argument("--camera", default="front", choices=["front", "down"],
+                        help="起始相机：front(主视,默认) | down(下视)")
     parser.set_defaults(debug=None)
     args = parser.parse_args()
 
     apply_runtime_overrides(args)
+
+    import os as _os
+    stream_host = args.stream_host or _os.environ.get("AUV_STREAM_HOST")
+    stream_port = int(args.stream_port or _os.environ.get("AUV_STREAM_PORT") or 5000)
+    stream_fps = float(args.stream_fps or _os.environ.get("AUV_STREAM_FPS") or 30.0)
+    stream_pkt = int(args.stream_pkt or _os.environ.get("AUV_STREAM_PKT") or 8000)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((args.bind, args.port))
     sock.settimeout(0.02)
 
     uart = UartController()
+
+    cam = CamPusher(stream_host, port=stream_port, pkt=stream_pkt,
+                    stream_fps=stream_fps, start=args.camera)
 
     target = (0.0, 0.0, 0.0, 0.0)
     last_rx = time.time()
@@ -100,7 +120,10 @@ def main():
     print("[UDP] serial=%s baud=%d sim=%s timeout=%dms"
           % (S.comm.serial.device, S.comm.serial.baud, S.SIM_MODE,
              args.timeout_ms))
-    print("[UDP] packet format: surge,sway,heave,yaw")
+    print("[UDP] packet format: surge,sway,heave,yaw | cam:front/cam:down/cam(切换相机)")
+    print("[UDP] 相机推流：%s（起始 %s）"
+          % ("udp://%s:%d" % (stream_host, stream_port) if stream_host else "关闭",
+             args.camera))
     print("[UDP] depth_guard=%s min_depth=%.2fm（深度来自下位机 14B 遥测 0xAA55；"
           "≤min_depth 时禁止上浮）"
           % (S.get("comm.depth_guard.enable", True),
@@ -111,6 +134,17 @@ def main():
             now = time.time()
             try:
                 data, addr = sock.recvfrom(256)
+                cam_cmd = parse_camera_packet(data)
+                if cam_cmd is not None:          # 相机切换 ≠ 运动指令
+                    if cam_cmd == "toggle":
+                        which = cam.toggle()
+                    elif cam_cmd in ("front", "down"):
+                        which = cam.which if not cam.switch(cam_cmd) else cam_cmd
+                    else:
+                        print("[UDP] 未知相机指令：%r" % bytes(data[:32]))
+                        continue
+                    print("[UDP] 相机切换 → %s" % which)
+                    continue
                 target = parse_motion_packet(data)
                 last_rx = now
                 if now - last_log >= 0.25:      # 收到 PC 包就打印（诊断手动控制是否收到指令）
@@ -135,6 +169,7 @@ def main():
             uart.neutral()
             uart.estop()
         finally:
+            cam.close()
             uart.close()
             sock.close()
             print("[UDP] stopped")
