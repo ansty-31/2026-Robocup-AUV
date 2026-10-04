@@ -1,41 +1,58 @@
 #!/bin/bash
-# run_gate.sh — 过门(gate)单任务下水编排：权重自检 → 待机 → (可选下潜/前进) → main.py --task gate
+# run_gate.sh — 过门单任务：待机 → (可选下潜/前进) → (转指定角度 → 过门)×N → 转指定角度
 #
-# 与 run_ball_return.sh 的关系：都是**单任务**编排，互不干扰。
-# 本脚本只跑 gate，不会加载 ball 权重（DetectorHub 惰性加载）。
+# 只跑 gate、不撞球；每次"过门"都是单门（pass_target=1，见 cfg/comm.yaml），
+# 转角由脚本机械控制、按固定序列执行 —— "四个门当一个门四次过"。
 #
-# 关键点（为什么能单独测 gate）：
-#   - main.py --task gate 只装配 gate 专用后端（vision.model.task_models.gate.path），
-#     GateTask 走 hub.detect_list("gate")，用的就是 gate_kpt_*.bin 角点权重；
-#   - 启动时若 gate 后端不可用会**直接拒绝启动**(退出码 3)，不会入水后空跑；
-#   - 本脚本在待机前先做权重自检，权重缺失当场退出，省得白等/白下水。
-#
-# 用法：  ./run_gate.sh
-# 可调：  AUV_WAIT_S（待机秒数，默认30）、AUV_DESCEND_S（下潜秒数，默认0=不下潜）、
-#         AUV_FWD_S（下潜后前进秒数，默认0=不前进）、AUV_FWD_SURGE（前进速度，默认0.35）
-#
-# 下水前建议先单独验视觉（船不动）：
-#   python3 preview_detect.py --gate-kpt --stream     # 门框 + 4 角点 + 置信度
+# 用法：  ./task1_2/run_gate.sh
+# 可调（环境变量，默认值在括号里）：
+#   AUV_WAIT_S(10)        待机秒数
+#   AUV_DESCEND_S(0)      下潜秒数（0=不下潜）
+#   AUV_FWD_S(0)          下潜后前进秒数（0=不前进）
+#   AUV_FWD_SURGE(0.35)   前进速度
+#   AUV_TURN_ANGLES       转角序列（空格分隔，带符号：正=左转 / 负=右转）
+#                         如 AUV_TURN_ANGLES="90 -45 90 30"；个数=过门次数
+#   AUV_TURN_TIMEOUT(20)  转向等完成反馈超时（秒）
+#   AUV_LOG_TAG(run)      日志前缀（区分轮次，别用 date）
+#                         → log/<tag>gate_<N>.jsonl
 set -u
 cd "$(dirname "$0")/.."
 
-WAIT_S="${AUV_WAIT_S:-30}"
+export AUV_SIM_MODE="${AUV_SIM_MODE:-0}"
+
+WAIT_S="${AUV_WAIT_S:-0}"
 DESCEND_S="${AUV_DESCEND_S:-0}"
 FWD_S="${AUV_FWD_S:-0}"
 FWD_SURGE="${AUV_FWD_SURGE:-0.35}"
+# ============ ★ 现场代填：每一次"转角度→过门"的转角（度）============
+# 数组长度 = 过门次数；四扇门可以填四个不同的角度。
+TURN_ANGLES=(
+   0   # 第 1 次：第 1 扇门前转角（正=左转）
+   0   # 第 2 次
+   20   # 第 3 次
+   -30   # 第 4 次
+)
+[ -n "${AUV_TURN_ANGLES:-}" ] && read -r -a TURN_ANGLES <<< "${AUV_TURN_ANGLES}"
+# ⚠️ 角度**带符号**：正数=左转，负数=右转
+TURN_TIMEOUT="${AUV_TURN_TIMEOUT:-20}"
+TAG="${AUV_LOG_TAG:-run}"
+GATE_LOG_PREFIX="${AUV_GATE_LOG_PREFIX:-log/${TAG}gate}"
 
-echo "=================================================================="
-echo " 过门任务(gate)单任务下水：待机 ${WAIT_S}s → 下潜 ${DESCEND_S}s → 前进 ${FWD_S}s"
-echo "                           → main.py --task gate"
-echo "=================================================================="
-
-# ---- [0/5] 残留进程清理：孤儿 main.py 会占住相机/串口，导致下次启动像“锁死”
-if pkill -f "python3 main.py --task" 2>/dev/null; then
+# 清理上次残留
+if pkill -f "[p]ython3 main.py --task" 2>/dev/null; then
   echo "[clean] 已清理上一次残留的 main.py 进程"
   sleep 1
 fi
 
-# ---- [1/5] 权重自检（不加载模型，只看文件在不在；缺失立刻退出，别白下水）
+echo "=================================================================="
+echo " 过门单任务：待机 ${WAIT_S}s → 下潜 ${DESCEND_S}s → 前进 ${FWD_S}s → (转角度→过门)×${#TURN_ANGLES[@]}"
+echo "   过门 ${#TURN_ANGLES[@]} 次(单门 pass_target=1)"
+echo "   转角序列（现场代填，正=左转/负=右转）：${TURN_ANGLES[*]}"
+[ "${AUV_SIM_MODE}" = "1" ] && echo " ⚠️ AUV_SIM_MODE=1：只打印指令，不会真正驱动电机！"
+echo " 日志：过门 ${GATE_LOG_PREFIX}_<N>.jsonl"
+echo "=================================================================="
+
+# ---- 权重自检（不加载模型，只看文件在不在；缺失立刻退出，别白下水）----
 GATE_BIN="$(python3 - <<'PYEOF'
 import sys
 sys.path.insert(0, ".")
@@ -44,71 +61,82 @@ cfg = S.get("vision.model.task_models.gate", None) or {}
 print(cfg.get("path", "") or "")
 PYEOF
 )"
-echo "==== [1/5] 权重自检：${GATE_BIN:-<未配置>} ===="
 if [ -z "${GATE_BIN}" ] || [ ! -f "${GATE_BIN}" ]; then
   echo "!! gate 权重不存在：${GATE_BIN:-<空>}"
   echo "!! 检查 cfg/vision.yaml → model.task_models.gate.path"
   exit 1
 fi
-echo "[ok] $(ls -l "${GATE_BIN}" | awk '{print $5" bytes"}')"
+echo "==== [0] 权重自检 ok：$(ls -l "${GATE_BIN}" | awk '{print $5" bytes"}') ===="
 
-# ---- [2/5] 待机（放船/对门）
-echo "==== [2/5] 待机 ${WAIT_S} 秒 ===="
+# ---- 定时 DOF ----
+timed_dof() {   # $1=秒 $2=surge $3=sway $4=heave $5=yaw $6=标签
+  python3 - "$1" "$2" "$3" "$4" "$5" "$6" <<'PYEOF'
+from base.hw.uart import UartController
+import sys, time
+dur, surge, sway, heave, yaw = (float(sys.argv[1]), float(sys.argv[2]),
+                               float(sys.argv[3]), float(sys.argv[4]),
+                               float(sys.argv[5]))
+label = sys.argv[6]
+if dur <= 0:
+    print("[%s] 跳过（时长 0）" % label)
+    raise SystemExit(0)
+u = UartController()
+if u.sim:
+    print("!! 串口处于 SIM（只打印）：[%s] 不会真正驱动电机" % label)
+print("[%s] 发送 %.1fs dof=(surge %.2f, sway %.2f, heave %.2f, yaw %.2f) ..."
+      % (label, dur, surge, sway, heave, yaw))
+try:
+    t0 = time.time()
+    while time.time() - t0 < dur:
+        u.send_dof(surge, sway, heave, yaw)
+        time.sleep(0.05)
+finally:
+    u.stop_hard(verify=False)
+    u.close()
+print("[%s] 完成，已回中位（硬停）" % label)
+PYEOF
+}
+
+# ---- 转角度（**带符号**：正=左转 / 负=右转）----
+turn_once() {   # $1=带符号角度，如 90 / -45
+  local sdeg="$1" mag="$1" dir="left" txt="左转"
+  case "${sdeg}" in
+    -*) dir="right"; txt="右转"; mag="${sdeg#-}" ;;
+  esac
+  if [ "${mag}" = "0" ] || [ -z "${mag}" ]; then
+    echo "-- 角度 0，跳过转向 --"
+    return 0
+  fi
+  python3 common/motion/turn_deg.py --deg "${mag}" --dir "${dir}" --timeout "${TURN_TIMEOUT}"
+  echo "-- ${txt} ${mag}° 转向退出码 $?（0=完成 / 3=等完成超时 / 5=下发失败）--"
+  return 0
+}
+
+# ---- 过门一次（单门）----
+gate_once() {   # $1=第几次
+  local idx="$1" glog="${GATE_LOG_PREFIX}_${idx}.jsonl"
+  echo "==== 过门 ${idx}/${#TURN_ANGLES[@]}（单门）→ ${glog} ===="
+  AUV_TASK_LOG="${glog}" python3 main.py --task gate
+  echo "-- 过门 ${idx} 退出码 $? --"
+}
+
+# ============================== 流程 ==============================
+echo "==== [1] 待机 ${WAIT_S} 秒 ===="
 sleep "${WAIT_S}"
 
-# ---- [3/5] 可选下潜
-if [ "${DESCEND_S}" != "0" ]; then
-  echo "==== [3/5] 串口下潜 ${DESCEND_S} 秒 ===="
-  python3 - "$DESCEND_S" <<'PYEOF'
-from base.hw.uart import UartController
-import sys, time
-dur = float(sys.argv[1]) if len(sys.argv) > 1 else 3.0
-u = UartController()
-if u.sim:
-    print("!! 串口未打开(sim)，下潜仅模拟")
-print("[descend] 串口发送下潜指令 %.1fs ..." % dur)
-t0 = time.time()
-while time.time() - t0 < dur:
-    u.send_dof(0.0, 0.0, -1.0, 0.0)   # heave=-1 → 下潜
-    time.sleep(0.05)
-u.neutral()
-u.close()
-print("[descend] 完成，已回中位")
-PYEOF
-else
-  echo "==== [3/5] 跳下潜（AUV_DESCEND_S=0）===="
-fi
+echo "==== [2] 下潜 ${DESCEND_S} 秒 ===="
+timed_dof "${DESCEND_S}" 0 0 -1 0 descend
 
-# ---- [4/5] 可选前进（离壁/进入门前方位）
-if [ "${FWD_S}" != "0" ]; then
-  echo "==== [4/5] 串口前进 ${FWD_S} 秒 (surge=${FWD_SURGE}) ===="
-  python3 - "$FWD_S" "$FWD_SURGE" <<'PYEOF'
-from base.hw.uart import UartController
-import sys, time
-dur = float(sys.argv[1]) if len(sys.argv) > 1 else 3.0
-surge = float(sys.argv[2]) if len(sys.argv) > 2 else 0.35
-u = UartController()
-if u.sim:
-    print("!! 串口未打开(sim)，前进仅模拟")
-print("[fwd] 串口发送前进指令 %.1fs (surge=%.2f) ..." % (dur, surge))
-t0 = time.time()
-while time.time() - t0 < dur:
-    u.send_dof(surge, 0.0, 0.0, 0.0)   # surge 前进
-    time.sleep(0.05)
-u.neutral()
-u.close()
-print("[fwd] 完成，已回中位")
-PYEOF
-else
-  echo "==== [4/5] 跳前进（AUV_FWD_S=0）===="
-fi
+echo "==== [3] 前进 ${FWD_S} 秒 (surge=${FWD_SURGE}) ===="
+timed_dof "${FWD_S}" "${FWD_SURGE}" 0 0 0 pre_forward
 
-# ---- [5/5] gate 任务本体
-echo "==== [5/5] 过门任务 main.py --task gate ===="
-echo "     (板端看画面: export DISPLAY=:0 后运行; 推流: 默认 vision.stream.enable)"
-python3 main.py --task gate
-rc=$?
-echo "main.py 退出码 ${rc}（0=正常结束，3=gate 后端不可用拒绝启动，130=Ctrl-C）"
+echo "==== [4] (转角度 → 过门) × ${#TURN_ANGLES[@]} ===="
+idx=0
+for deg in "${TURN_ANGLES[@]}"; do
+  idx=$((idx + 1))
+  echo "---- [4.${idx}] 转 ${deg}°（$([ "${deg:0:1}" = "-" ] && echo 右转 || echo 左转)）----"
+  turn_once "${deg}"
+  gate_once "${idx}"
+done
 
 echo "==== 完成 ===="
-exit "${rc}"

@@ -37,7 +37,7 @@ from gate.percept.gate_postproc import (det_cfg,
                                               postproc_cfg,
                                               select_cfg,
                                               pick as postproc_pick)
-from gate.motion.params import PH_SEARCH, PH_ALIGN, PH_APPROACH, PH_THROUGH, SUB_HDG, SUB_GOLDEN, SUB_CREEP, SUB_HOLD, SUB_REACQUIRE, SUB_SWAY_BACK, _D_ALIGN, _D_LOITER, _D_Z, _D_SURGE, _D_COARSE, _D_WIDTH, _D_TASK, _D_KPT, _D_HOLD, _D_REACQ, _D_THROUGH, _D_SEARCH, _D_PNP, _D_GEOM
+from gate.motion.params import PH_SEARCH, PH_ALIGN, PH_APPROACH, PH_THROUGH, SUB_HDG, SUB_GOLDEN, SUB_CREEP, SUB_HOLD, SUB_REACQUIRE, SUB_SWAY_BACK, _D_ALIGN, _D_LOITER, _D_Z, _D_SURGE, _D_COARSE, _D_WIDTH, _D_TASK, _D_KPT, _D_HOLD, _D_REACQ, _D_THROUGH, _D_SEARCH, _D_PNP, _D_GEOM, _D_LOCK
 from gate.motion.channels import GateChannels
 from gate.motion.exits import GateExits
 from gate.motion.hdg import GateHdg
@@ -124,6 +124,7 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         self._hdg_done = True             # True=本门不需要再正航向（未启用或已出结论）
         self._hdg_done = not flag(self._hdg_cfg, "enable", True)
         self._hdg_ok = False              # 本门是否满足冲刺前航向条件；每次换门清零
+        self._hdg_ok_cnt = 0              # ★ 连续落进 tol_deg 的帧数（ok_frames 判据用）
         self._hdg_f = None                # EMA 状态（只吃 full 帧，避免 p3p 垃圾污染）
         self._hdg_deg = None              # 最近一次 full 帧测到的航向误差（度）
         self._hdg_ms = None               # 上面那个值的时刻
@@ -134,8 +135,14 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         self._post_sway = 0.0
         self._post_sway = 0.0             # 该状态里下发的 sway（= 转向的反方向）
         self._post_sway_back = 0.0        # 同时叠加的**缓慢后退**分量（负=后退）
+        self._locked_det = None           # ★ 换门/复位 → 解锁，允许重新 near 选门
+        self._lock_miss = 0
         self._now_ms = None               # 本帧时基（process 每帧写入）
         self._det_now = None              # 本帧选中的门（状态判"门回来了吗"用当帧数据）
+        self._locked_det = None           # ★ 本轮**锁定**的门（det 对象）：锁定后只跟它，不再每帧重选
+        self._lock_miss = 0               # 锁定后连续没匹配上的帧数（≥lock.miss_frames 才解锁重选）
+        self._lock_cnt = 0                # ★ 连续跟住同一扇的帧数（≥lock.stable_frames ⇒ 稳定后不再参与选门）
+        self._lock_stable = False         # ★ 锁定是否已稳定（稳定后才不许别的门抢）
 
         self.last_info = {"phase": PH_ALIGN, "substate": "", "mode": "",
                           "action": "stop", "z": 0.0, "dx": 0.0, "dy": 0.0,
@@ -166,6 +173,7 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         self._hdg.reset()
         self._hdg_done = not flag(self._hdg_cfg, "enable", True)
         self._hdg_ok = False
+        self._hdg_ok_cnt = 0
         self._hdg_skip_logged = False
         self._hdg_turns = 0
         self._hdg_turns_last_ms = None
@@ -226,8 +234,11 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
             self._turn_blocking(now_ms)
         else:
             dets = self.hub.detect_list(self.name, frame)
-            self.last_dets = dets
-            det = self._pick_gate(dets)
+            fw = frame.shape[1] if frame is not None and hasattr(frame, "shape") else 0
+            det = self._gate_lock(dets, fw)
+            # ★ 2026-10-04 用户定：**锁定本轮的门之后，画面只打锁定那扇门的框**（别的门不画，
+            #   免得看着像"要过那一扇"）。没锁到就不画（不沿用上一帧的框）。
+            self.last_dets = [det] if det is not None else []
             self._step(det, now_ms)
 
         if (self._start_ms is not None and
@@ -236,6 +247,76 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         self.last_info["status"] = S.STATUS_DONE if self._finished \
             else S.STATUS_RUNNING
         return self.last_info["status"]
+    def _gate_lock(self, dets, frame_w):
+        """选门 + **锁定**（★ 2026-10-04 用户定："可以锁定，但锁定前务必做好检查 ——
+        锁定**稳定**后再进行不参与选门"）。
+
+        两段式：
+        · **未稳定**（连续跟住同一扇 < `lock.stable_frames` 帧）：仍正常 `_pick_gate` 选门，
+          选到别的门就换锁、重新计数 —— 头几帧选错了必须能纠正。
+        · **已稳定**：锁定门**不再参与选门**，别的门抢不走。只要它**还被检测到**
+          （哪怕没 z、没角点、只有框 —— 贴到门口时正是这样）就继续追它；
+          只有**连续 `lock.miss_frames` 帧完全检测不到**才解锁重选。
+
+        为什么必须做在选门层（实船 `log/rungate_1.jsonl`）：第一扇门贴到门口时角点出画、
+        `_z_est` 返回 None，而远处第三扇还能算出一个（崩小的）z ⇒ 老逻辑"有 z 的才参与比较"
+        直接选走第三扇；`_relock_guard` 也拦不住 —— 它只看**已采纳**的位姿，而近门压根没有位姿。
+        """
+        Lc = merge(sub(self._G, "lock"), _D_LOCK)
+        gates = [d for d in dets if getattr(d, "kind", None) == "gate"]
+        miss_max = int(num(Lc, "miss_frames", _D_LOCK["miss_frames"]))
+        stable_n = int(num(Lc, "stable_frames", _D_LOCK["stable_frames"]))
+        if not gates:
+            self._lock_miss += 1
+            if self._lock_miss >= miss_max:
+                self._unlock()
+            return None
+        if self._locked_det is None:
+            self._locked_det = self._pick_gate(dets)
+            self._lock_miss = 0
+            self._lock_cnt = 0
+            self._lock_stable = False
+            return self._locked_det
+        lx = float(self._locked_det.x) + float(self._locked_det.w) * 0.5
+        ly = float(self._locked_det.y) + float(self._locked_det.h) * 0.5
+        thr = float(num(Lc, "match_ratio", _D_LOCK["match_ratio"])) * float(frame_w or 0.0)
+        best, best_d = None, None
+        for d in gates:
+            cx = float(d.x) + float(d.w) * 0.5
+            cy = float(d.y) + float(d.h) * 0.5
+            dd = ((cx - lx) ** 2 + (cy - ly) ** 2) ** 0.5
+            if best is None or dd < best_d:
+                best, best_d = d, dd
+        matched = best if (best is not None and thr > 0 and best_d <= thr) else None
+        if matched is None:
+            self._lock_miss += 1
+            if self._lock_miss >= miss_max:
+                self._unlock()
+                return self._pick_gate(dets)
+            return None if self._lock_stable else self._pick_gate(dets)
+        self._lock_miss = 0
+        self._lock_cnt += 1
+        if self._lock_cnt >= max(1, stable_n):
+            self._lock_stable = True
+        if self._lock_stable:
+            self._locked_det = matched          # ★ 稳定 ⇒ 不参与选门
+            return matched
+        pick = self._pick_gate(dets)
+        if pick is not None and pick is not matched:
+            self._locked_det = pick
+            self._lock_cnt = 0
+            return pick
+        self._locked_det = matched
+        return matched
+
+    def _unlock(self):
+        """解锁：允许下一帧重新 near 选门。"""
+        self._locked_det = None
+        self._lock_miss = 0
+        self._lock_cnt = 0
+        self._lock_stable = False
+
+
     def _step(self, det, now_ms):
         self._det_now = det          # 本帧的门（「反向平移」状态判"门回来了吗"用当帧数据）
         # ---- 正航向的「转」：**一个自包含动作**，跑完才回来 ----

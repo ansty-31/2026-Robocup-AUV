@@ -12,10 +12,26 @@ from gate.percept.gate_frontend import (width_range_depth,
                                               MODE_WIDTH,
                                               MODE_COARSE)
 from gate.percept.geometry import gate_normal_angles_deg
-from gate.motion.params import PH_SEARCH, PH_ALIGN, PH_APPROACH, SUB_GOLDEN, SUB_CREEP, SUB_HOLD, SUB_REACQUIRE, _D_ALIGN, _D_Z, _D_SURGE, _D_COARSE, _D_WIDTH, _D_HOLD, _D_REACQ, _D_PNP, _D_THROUGH
+from gate.motion.params import PH_SEARCH, PH_ALIGN, PH_APPROACH, SUB_GOLDEN, SUB_CREEP, SUB_HOLD, SUB_REACQUIRE, _D_ALIGN, _D_Z, _D_SURGE, _D_COARSE, _D_WIDTH, _D_HOLD, _D_REACQ, _D_PNP, _D_THROUGH, _D_HDG
 from gate.motion.channels import _dof_clip
 
 class GateModes(object):
+    def _hdg_ok_tick(self, align_deg):
+        """航向「已 OK」锁存判据（★ 2026-10-04 用户定：**持续稳定才锁存**）。
+
+        单帧落进阈值就锁存，会被一个噪声样本把"航向已 OK"钉死 —— 实测 ψ 在 1.5m 处
+        标准差 22°，船真实 yaw 标准差只有 3°（`log/rungate_1.jsonl`）；|ψ|≤8° 的最长
+        连续段只有 4 帧。锁存后 ψ 再大也不再复核 ⇒ **该转的不转**。
+        改成：**连续 ok_frames 帧**都在 tol 内才锁存；中间破一次就清零重数。
+        """
+        if align_deg <= 0 or abs(float(self._hdg_deg)) <= align_deg:
+            self._hdg_ok_cnt = getattr(self, "_hdg_ok_cnt", 0) + 1
+            need_ok = int(num(sub(self._G, "hdg"), "ok_frames", _D_HDG["ok_frames"]))
+            if self._hdg_ok_cnt >= max(1, need_ok):
+                self._hdg_ok = True
+        else:
+            self._hdg_ok_cnt = 0
+
     def _on_pose(self, det, pose, now_ms, mode, kpt):
         """位姿档：**位姿只提供深度 z 与"可信"这一事实**；居中一律用**像素误差**。
         而且米制/像素两套阈值+两套 PID 会在 mode 于 full↔coarse 间跳时交替工作 → 收敛不了。
@@ -60,8 +76,7 @@ class GateModes(object):
             # 航向确认使用冲刺闸门的配置阈值；真正完成的 hdg DONE 也会保持确认。
             align_deg = num(sub(G, "through"), "require_align_deg",
                             _D_THROUGH["require_align_deg"])
-            if align_deg <= 0 or abs(self._hdg_deg) <= align_deg:
-                self._hdg_ok = True
+            self._hdg_ok_tick(align_deg)          # 航向"已 OK"锁存（连续 ok_frames 帧判据）
         # 符号：图像 x 向右 = 机身向右 → sway 取正；图像 y 向下 → heave 取负。
         # 这里 yaw 恒 0（居中只用 sway；姿态交给 ALIGN.HDG，见 `_lateral_out`）。
         sway, yaw = self._lateral_out(dxn, now_ms), 0.0
@@ -347,12 +362,18 @@ class GateModes(object):
         """
         jump = num(sub(self._G, "z"), "relock_z_jump_m", _D_Z["relock_z_jump_m"])
         away = num(sub(self._G, "z"), "relock_away_m", _D_Z["relock_away_m"])
+        dist_max = num(sub(self._G, "z"), "dist_max_m", _D_Z["dist_max_m"])
         prev = self._z_last
         ref = getattr(self, "_relock_z_ref", None)
         zf = float(z)
         why = None
+        # ★ 2026-10-04 用户定：**2.5m 开外完全不相信**。无条件第一条 —— 不看有无丢门参照、
+        #   不看跳没跳，只要 z 超过 dist_max_m 就当这帧位姿不可信（远处 PnP 的 z 与 yaw 都不可信；
+        #   宁可"当成门丢了"原地 hold，也不让远处能测距的门骗过当前门）。
+        if dist_max > 0 and zf > dist_max:
+            why = "z=%.2f m > %.2f m ⇒ 2.5m 开外**完全不相信**（无条件）" % (zf, dist_max)
         # 只挡"向上/更远"；向下跳（更快接近）是正常的，不挡。三条：
-        if jump > 0 and prev is not None and (zf - float(prev)) >= jump:
+        elif jump > 0 and prev is not None and (zf - float(prev)) >= jump:
             why = "z 从 %.2f m 向上跳到 %.2f m（≥%.2f m）⇒ 不是当前门" % (float(prev), zf, jump)
         elif jump > 0 and ref is not None and (zf - float(ref)) >= jump:
             why = "z=%.2f 比丢门前的 %.2f m 远 ≥%.2f m ⇒ 不是那扇门" % (zf, float(ref), jump)

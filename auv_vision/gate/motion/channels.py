@@ -8,7 +8,8 @@ from common.cfg.cfgnode import flag, merge, motion_num, num, sub
 from gate.percept.gate_postproc import pick as postproc_pick
 from gate.percept.gate_frontend import parse_kpt_mode, width_range_depth, MODE_FULL, MODE_P3P, MODE_WIDTH
 from gate.percept.geometry import gate_pose
-from gate.motion.params import PH_SEARCH, PH_ALIGN, SUB_SWAY_BACK, _D_Z, _D_SURGE, _D_KPT, _D_SEARCH, _D_HDG, _D_PNP
+from gate.motion.params import (PH_SEARCH, PH_ALIGN, SUB_SWAY_BACK, _D_Z, _D_SURGE,
+                                _D_KPT, _D_SEARCH, _D_HDG, _D_PNP, _D_LOCK, _D_SELECT)
 
 def _dof_clip(v):
     return float(max(-1.0, min(1.0, v)))
@@ -98,6 +99,7 @@ class GateChannels(object):
         self._hdg.reset()
         self._hdg_done = not flag(self._hdg_cfg, "enable", True)
         self._hdg_ok = False              # 新门重新确认航向
+        self._hdg_ok_cnt = 0              # ★ 连续达标帧数清零（ok_frames 判据用）
         self._hdg_skip_logged = False
         self._inside_since_ms = None       # 贴脸出口的短确认计时（换门/重新搜索清零）
         self._pose_hist = []               # 最近采信的位姿历史 [(ms, z, dxn, dyn)]（换门清零）
@@ -111,6 +113,8 @@ class GateChannels(object):
         self._cross_cnt = 0
         self._lost_cnt = 0
         self._hold_cnt = 0
+        self._locked_det = None            # ★ 换门/重新搜索 → 解锁，允许重新 near 选门
+        self._lock_miss = 0
         if self._kpt_mem is not None:
             self._kpt_mem.reset()
     def _search_sweep(self, now_ms):
@@ -206,19 +210,32 @@ class GateChannels(object):
             return float(self.camera.fx * self.frame_w_m / det.w)
         return None
     def _pick_gate(self, dets):
-        """选目标门 = **near（近距离优先，按真实 z 排序取最小）**。
+        """选目标门 = **near（按有效距离最小）**。
 
-        2026-10-02 用户定：把视野中**所有**门的距离 z 都算出来再排序，最小的那扇就是当前要过的
-        —— 不单纯靠框占比（离得最近的门可能在画面边缘，框占比反而小）。
-        z 估计顺序：PnP(full/p3p) → width(fx·W/Δu) → 框宽代理(fx·W/w)；并列才比可信角点数。
+        ★ 2026-10-04 用户定：**用 k 做一致性检验**（k = z × 框占比）。
+        同一扇门 k ≈ 常数，理论值 k_true = fx·frame_w/画面宽 = 0.560（门框 70cm）。
+        实测 full 0.599(k/k_true=1.07) ✓、p3p 0.457(0.82) ✓、而"远处门 z 崩小"那次
+        k=0.23(0.41) ✗ —— 一眼可辨。所以 **k/k_true < k_lo_ratio ⇒ 这个 z 崩了**，
+        改用框占比反推的 z（k_true/占比）顶上；k 正常则用实测 z。
         """
         conf_thr = num(sub(self._V, "keypoint"), "conf_thr", _D_KPT["conf_thr"])
         gates = [d for d in dets if getattr(d, "kind", None) == "gate"]
         if not gates:
             return None
+        k_true = float(self.camera.fx) * float(self.frame_w_m) / float(self.w or 1)
+        k_lo = float(num(sub(self._G, "select"), "k_lo_ratio", _D_SELECT["k_lo_ratio"]))
         best, best_z = None, None
         for d in gates:
             z = self._z_est(d, conf_thr)
-            if best is None or (z is not None and (best_z is None or z < best_z)):
-                best, best_z = d, z
+            ratio = (float(d.w) / float(self.w)) if (self.w and getattr(d, "w", 0)) else 0.0
+            if ratio > 1e-6 and k_true > 0:
+                k_meas = (float(z) * ratio) if z is not None else None
+                if k_meas is None or k_meas < k_lo * k_true:
+                    z_eff = k_true / ratio          # z 崩溃/测不出 ⇒ 用框占比反推
+                else:
+                    z_eff = float(z)
+            else:
+                z_eff = z
+            if best is None or (z_eff is not None and (best_z is None or z_eff < best_z)):
+                best, best_z = d, z_eff
         return best

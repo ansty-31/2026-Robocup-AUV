@@ -1354,13 +1354,20 @@ def test_z_jump_protection(monkeypatch):
 
     ① 同一扇门下 z **向上**跳 ≥ 0.5m ⇒ 不是这扇门（判丢门、不采纳）；
     ② 丢门重锁时，z **超过 1.8m ⇒ 判为「下一个门」**（当前门丢了/测不到距，不能被远处能测距的门骗过去）；
-    ③ 向下跳（更快接近）不挡；**首见不拦**（还没锁过门时无人可比）。
+    ③ 向下跳（更快接近）不挡；**首见不拦**（还没锁过门时无人可比）；
+    ④ **2.5m 开外完全不相信**（2026-10-04 用户定）：无条件第一条，不看参照、不看跳没跳。
     """
     import base.cfg.settings as S
     assert float(S.comm.gate.z.relock_z_jump_m) == 0.5
     assert float(S.comm.gate.z.relock_away_m) == 1.8
-    # 首见不拦（无参照）
-    task = _task(lambda: []); assert task._relock_guard(3.4) is False
+    assert float(S.comm.gate.z.dist_max_m) == 2.5
+    # ★ 2.5m 开外**完全不相信**：无条件（无参照也拦、比参照近也拦）
+    task = _task(lambda: []); assert task._relock_guard(3.4) is True
+    task = _task(lambda: []); assert task._relock_guard(2.6) is True
+    task = _task(lambda: []); task._z_last = 1.0; assert task._relock_guard(2.8) is True
+    task = _task(lambda: []); assert task._relock_guard(2.5) is False  # 恰在 dist_max 上放行（> 才拦）
+    # 首见不拦（无参照，且 2.5m 以内）
+    task = _task(lambda: []); assert task._relock_guard(2.0) is False
     # 向上跳（在追的 z）
     task = _task(lambda: []); task._z_last = 1.0; assert task._relock_guard(1.6) is True
     task = _task(lambda: []); task._z_last = 1.0; assert task._relock_guard(1.4) is False
@@ -1425,3 +1432,115 @@ def _relax_z_trust_boundary(request, monkeypatch):
         return                                  # 守卫用例要比对 cfg 与兜底表真值，不能覆盖
     #  （2026-10-02 起已无 relock_away_m 这个键；保留壳子以防将来再加"绝对距离"类参数）
     return
+
+
+def test_gate_lock_keeps_same_gate_and_draws_only_it():
+    """★ 2026-10-04 用户定：**选门后锁定**，且 HUD 只画锁定那扇门。
+
+    · 第 1 帧按 near 选中左侧那扇（z=2.0）→ 锁定；
+    · 第 4 帧起右侧那扇变成 z=1.0（比锁定门"更近"）→ **不许换过去**
+      （否则转向目标角会跳到"后边那扇门"的偏移角上）；
+    · `last_dets` 每帧最多 1 个 = 只画锁定那扇门的框。
+    """
+    stable_n = int(S.comm.gate.lock.stable_frames)
+    seq = {"i": 0}
+
+    def det_fn():
+        seq["i"] += 1
+        a = _det(2.0, px=(CAM.width * 0.30, CAM.height / 2.0))      # 左：先近 → 应被锁定
+        b = _det(3.5 if seq["i"] <= stable_n + 2 else 1.0,
+                 px=(CAM.width * 0.75, CAM.height / 2.0))           # 右：**稳定锁定之后**才变"更近"
+        return a + b
+
+    task = _task(det_fn)
+    frame = np.zeros((CAM.height, CAM.width, 3), np.uint8)
+    drawn = []
+    for i in range(stable_n + 6):
+        task.process(frame, 1000 + 100 * i)
+        drawn.append(list(task.last_dets))
+
+    # ① 每帧最多画一个框（锁定后不再画别的门）
+    assert all(len(d) <= 1 for d in drawn), \
+        "锁定后画面只该画锁定那扇门，实际每帧框数=%s" % [len(d) for d in drawn]
+    # ② 第 1 帧锁定左侧近门，之后**一直**是它（右边更近也不换）
+    assert drawn[0], "第 1 帧该选到一扇门"
+    cx0 = drawn[0][0].x + drawn[0][0].w * 0.5
+    assert cx0 < CAM.width * 0.5, "第 1 帧该锁定左侧那扇（框中心 x=%.0f）" % cx0
+    for i, ds in enumerate(drawn):
+        assert ds, "帧 %d 锁定门丢了（不该丢）" % i
+        cx = ds[0].x + ds[0].w * 0.5
+        assert cx < CAM.width * 0.5, \
+            "帧 %d 换到了右边那扇门（中心 x=%.0f）—— 锁定失效，会误转后边门的偏移角" % (i, cx)
+
+
+def test_hdg_ok_latch_requires_sustained_stability(monkeypatch):
+    """★ 2026-10-04 用户定：ψ 必须**连续 ok_frames 帧**都在 tol 内才锁存"航向 OK"。
+
+    动机（实船 `log/rungate_1.jsonl`）：ψ 在 1.5m 处标准差 22°、船真实 yaw 标准差只 3°；
+    |ψ|≤8° 的最长连续段只有 4 帧。旧的"单帧落进阈值就锁"被噪声钉死 ⇒ 该转的不转。
+    """
+    task = _task(lambda: [])
+    g = S.comm.gate
+    n = int(g.hdg.ok_frames)
+    assert n >= 2
+    # 连续 n-1 帧达标 → **还不许**锁存
+    for _ in range(n - 1):
+        task._hdg_deg = 1.0
+        task._hdg_ok_tick(8.0)
+    assert task._hdg_ok is False, "只连续 %d 帧达标就锁存了（ok_frames=%d）" % (n - 1, n)
+    # 第 n 帧达标 → 锁存
+    task._hdg_deg = 1.0
+    task._hdg_ok_tick(8.0)
+    assert task._hdg_ok is True, "连续 %d 帧达标该锁存" % n
+    # 破了要清零重数
+    task2 = _task(lambda: [])
+    for _ in range(n - 1):
+        task2._hdg_deg = 1.0
+        task2._hdg_ok_tick(8.0)
+    task2._hdg_deg = 30.0            # 中间破一次
+    task2._hdg_ok_tick(8.0)
+    assert task2._hdg_ok_cnt == 0 and task2._hdg_ok is False, "破了该清零重数"
+    task2._hdg_deg = 1.0
+    task2._hdg_ok_tick(8.0)
+    assert task2._hdg_ok is False, "清零后单帧达标不该锁存"
+
+
+def test_pick_gate_uses_k_consistency_to_reject_bogus_small_z(monkeypatch):
+    """★ 2026-10-04 用户定：**用 k 做一致性检验**（k = z × 框占比）。
+
+    故障现场：远处门 PnP 的 z 崩成比实际小、甚至小于更近那扇 ⇒ 按纯 z 选会选错门。
+    实测 k：full 0.599(k/k_true=1.07)、p3p 0.457(0.82) 都可信；崩掉那次 k=0.23(0.41)。
+    做法：k/k_true < k_lo_ratio ⇒ 这个 z 崩了 ⇒ 改用框占比反推 z（k_true/占比）。
+    """
+    task = _task(lambda: [])
+    near = _det(1.6)[0]                  # 近门 → 框大
+    far = _det(4.0)[0]                   # 远门 → 框小
+    monkeypatch.setattr(task, "_z_est",
+                        lambda det, conf_thr: 1.0 if det is far else 1.6)
+    assert task._pick_gate([near, far]) is near, \
+        "远处门报了崩小的 z 仍被选中 → k 一致性检验失效（选错门）"
+    # 反向确认：关掉 k 检验（k_lo_ratio=0）就退回纯 z 选，会选到远门
+    monkeypatch.setitem(S.comm.gate, "select",
+                        S.Y(dict(S.comm.gate.select, k_lo_ratio=0.0)))
+    assert task._pick_gate([near, far]) is far, "k_lo_ratio=0 时应按纯 z 选（选到远门）"
+
+
+def test_gate_lock_only_becomes_exclusive_after_stable(monkeypatch):
+    """★ 2026-10-04 用户定：**锁定前务必做好检查 —— 锁定稳定后再不参与选门**。
+
+    · 稳定前：选到别的门 → 换锁（选错必须能纠正）；
+    · 连续跟住 `lock.stable_frames` 帧后：别的门（哪怕 z 更小）再也抢不走；
+    · 但"锁定门这帧没被检测到"仍计时，连续 `miss_frames` 帧才解锁。
+    """
+    stable_n = int(S.comm.gate.lock.stable_frames)
+    task = _task(lambda: [])
+    frame_w = CAM.width
+    a = _det(1.6, px=(CAM.width * 0.45, CAM.height / 2.0))[0]      # 锁定门
+    b = _det(3.0, px=(CAM.width * 0.85, CAM.height / 2.0))[0]      # 干扰门（**画面另一侧**，不该匹配上）
+    # 第 1 次只是"初次选中"，之后每帧 +1 ⇒ 需要 stable_n+1 次才稳定
+    for _ in range(stable_n + 1):
+        task._gate_lock([a], frame_w)
+    assert task._lock_stable is True, "连续 %d 帧后该稳定" % stable_n
+    # 稳定后：即便只给"别的门"，也不换（会按没检测到计时，但阈值内仍保留锁定）
+    task._gate_lock([b], frame_w)
+    assert task._locked_det is a, "稳定后不该被别的门顶掉"

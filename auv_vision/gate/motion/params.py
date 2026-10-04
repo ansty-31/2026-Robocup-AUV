@@ -18,12 +18,13 @@ SUB_CREEP = "CREEP"
 SUB_HOLD = "HOLD"
 SUB_REACQUIRE = "REACQUIRE"
 SUB_SWAY_BACK = "SWAY_BACK"
-_D_ALIGN = dict(confirm_frames=3, px_x=0.20, px_y=0.25)
+_D_ALIGN = dict(confirm_frames=4, px_x=0.18, px_y=0.22)
 _D_LOITER = dict(enable=True, near_ratio=0.50, timeout_ms=6000, dx_max=0.25, dy_max=0.30,
                  # pose_hist_*：近距历史判断（coarse/width 在门口、下视看不到、主视也没信息时，
                  #   用本轮最近采信位姿的中位数判"已到门口"）。只取本轮，换门清零。
                  pose_hist_ms=1500.0, pose_hist_min=3)
-_D_Z = dict(cross=1.2, cross_confirm_frames=2, slow_max=1.2,
+_D_Z = dict(cross=1.2, cross_confirm_frames=4, slow_max=1.2,
+            dist_max_m=2.5,   # z 超过它 ⇒ 完全不相信该帧位姿（跳变保护第一条，无条件）
             relock_z_jump_m=0.5, relock_far_ratio=0.7,
             # relock_away_m：丢门重锁时，z 超过它 ⇒ 判为「下一个门」——当前门丢了/测不到距时，
             #   不能被远处能测距的门骗过去误当当前门。只对"有丢门参照"生效，首见不拦。
@@ -33,7 +34,7 @@ _D_SURGE = dict(creep=0.20, lost_backward=0.20, reacquire=0.25, through=0.6)
 _D_CREEP_THROUGH = dict(creep_ms=5000)   # creep_through：门口过门，慢速 creep 冲门时长(ms)
 _D_COARSE = dict(far_ratio=0.18, near_ratio=0.55, align_x=0.33, align_y=0.29)
 _D_WIDTH = dict(z_max=1.5)
-_D_TASK = dict(timeout_ms=180000, pass_target=4, pose_hold_frames=10)
+_D_TASK = dict(timeout_ms=45000, pass_target=1, pose_hold_frames=10)
 _D_KPT = dict(conf_thr=0.8)
 _D_HOLD = dict(max_frames=20)
 _D_REACQ = dict(max_ms=800, max_times=2, stop_ratio=0.75, reset_after_ms=3000)
@@ -41,12 +42,17 @@ _D_THROUGH = dict(confirm_frames=8, confirm_ms=3000,
                   require_align_deg=8.0)
 _D_SEARCH = dict(sweep_s=2.0, sweep_max_s=32.0, pause_s=1.0, sway=0.6,
                  max_ms=2000)
+_D_LOCK = dict(match_ratio=0.20, miss_frames=5, stable_frames=5)   # 选门后锁定（见 cfg comm.gate.lock）
+# 选门时 z 与框占比的配合（见 cfg comm.gate.select）：z_eff = max(z_pnp, ratio_z_scale × 框宽代理z)
+_D_SELECT = dict(k_lo_ratio=0.75, k_hi_ratio=1.40)   # k 一致性检验（见 cfg comm.gate.select）
 _D_PNP = dict(reproj_px=20.0, z_min=0.2, z_max=15.0, refine=True,
               max_z_jump_m=0.8)
 _D_GEOM = dict(frame_w=GATE_FRAME_W, frame_h=GATE_FRAME_H,
                body_center_offset=0.0)
 
 _D_HDG = dict(enable=True, tol_deg=8.0,        # enable=关掉后完全不进正航向；tol_deg=够正判据(°)
+              # ok_frames：**连续**多少帧 ψ 都在 tol_deg 内才锁存"航向 OK"（防单帧噪声钉死）
+              ok_frames=5,
               # max_step_deg：**单次转角上限**（0 = 不设限）。先按 turn_scale 缩小测到的 ψ 再用它钳位，
               #   被钳掉的残余**由下一小步补转**（逐小步逼近，无次数上限）⇒ 它是"每步别太猛"
               #   兼"防垃圾 ψ 把船甩出去"的安全钳位，不再等于"只转一次"。

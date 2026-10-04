@@ -107,6 +107,13 @@ class MjpegPusher(object):
         self._thread = threading.Thread(target=self._run, name="mjpeg-pusher", daemon=True)
         self._thread.start()
 
+    def set_host(self, host, port=None):
+        """运行时改推流目标（板端从遥控包源地址学到 PC 的 IP 后自动retarget）。"""
+        if host:
+            self.host = str(host)
+        if port:
+            self.port = int(port)
+
     def offer(self, jpeg):
         """投递一帧（numpy (1,N) uint8 或 bytes）。立刻返回，永不阻塞采集循环。"""
         data = _as_bytes(jpeg)          # 拷贝约 140KB ≈ 数十微秒，换取对相机缓冲复用的免疫

@@ -147,6 +147,13 @@ def main():
                     continue
                 target = parse_motion_packet(data)
                 last_rx = now
+                # ★ 推流目标自动跟 PC（2026-10-04）：不再依赖 AUV_STREAM_HOST 写死的 IP。
+                #   PC 的 DHCP 地址从 .2 变 .3 后，板端还推 .2 → pc.sh --show 一片黑；
+                #   而板端 ping 得通 PC、相机也正常，极难查。谁在遥控，画面就推给谁。
+                if cam is not None and addr[0] != getattr(cam, "_cam_host", None):
+                    if cam.set_host(addr[0]):
+                        print("[UDP] 推流目标自动跟随遥控端 → udp://%s:%d"
+                              % (addr[0], getattr(cam, "_cam_port", 0)))
                 if now - last_log >= 0.25:      # 收到 PC 包就打印（诊断手动控制是否收到指令）
                     print("[UDP] %s -> surge=%.2f sway=%.2f heave=%.2f yaw=%.2f"
                           % (addr[0], target[0], target[1], target[2],

@@ -73,7 +73,7 @@ DELETED=(
   gate/motion/phase_degrade.py
   gate/motion/phase_recover.py
   gate/motion/phases.py
-  gate/motion/__init__.py
+    # [REMOVED 2026-10-04] gate/motion/__init__.py  ← 是活文件（本地存在+在清单里），列在 DELETED 会被误删
   # 分层版专用工具/测试/文档（板端旧副本一并删）
   tools/watch_quality.py
   tools/check_cue_geometry.py
@@ -160,7 +160,7 @@ DELETED=(
   gate/geometry.py
   gate/kpt_memory.py
   gate/mock.py
-  gate/gate_task.py
+    # [REMOVED 2026-10-04] gate/gate_task.py  ← 是活文件（本地存在+在清单里），列在 DELETED 会被误删
   gate/heading_align.py
   tools/analyze/analyze_task_log.py
   tools/analyze/feature_coverage.py
@@ -183,8 +183,8 @@ DELETED=(
   tests/test_common.py
   tests/test_paths.py
   tests/test_hud.py
-  tests/tasks/test_ball.py
-  tests/tasks/test_motion.py
+    # [REMOVED 2026-10-04] tests/tasks/test_ball.py  ← 是活文件（本地存在+在清单里），列在 DELETED 会被误删
+    # [REMOVED 2026-10-04] tests/tasks/test_motion.py  ← 是活文件（本地存在+在清单里），列在 DELETED 会被误删
   tests/tasks/test_gate_flow.py
   tests/tasks/test_gate_vision.py
   tests/tasks/test_gate_postproc.py
@@ -315,6 +315,14 @@ fi
 # ---- 4) 删除已废弃文件（一次 SSH，先备份）----
 { echo "cd $BOARD"; echo "mkdir -p bak/deploy_$STAMP";
   for f in "${DELETED[@]}"; do
+    # ★ 活文件保护（2026-10-04）：清单里的文件是活文件，绝不能被这里删掉。
+    #   历史坑：gate/gate_task.py、gate/motion/__init__.py、tests/tasks/test_ball.py、
+    #   tests/tasks/test_motion.py 既在 board_parity.md5 又在 DELETED 里，
+    #   跑一次 deploy 就会把板端活文件删掉（且因"已一致"不会重传）→ gate 任务直接崩。
+    if awk -v p="$f" '{ sub(/[[:space:]]*\]$/, ""); n=split($0, a, /[[:space:]]+/); if (a[n]==p) { found=1; exit } } END { exit !found }' "$MANIFEST"; then
+      echo "[skip-live] $f（在清单里 = 活文件，不删）"
+      continue
+    fi
     echo "[ -f '$f' ] && { mkdir -p bak/deploy_$STAMP/$(dirname "$f"); cp -p '$f' 'bak/deploy_$STAMP/$f'; rm -f '$f'; echo \"[removed+bak] $f\"; }"
   done
   echo "rmdir work 2>/dev/null"

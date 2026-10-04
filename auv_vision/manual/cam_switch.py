@@ -1,8 +1,15 @@
 # -*- coding: utf-8 -*-
-"""manual/cam_switch.py — 手动模式的**主视/下视切换推流**
+"""manual/cam_switch.py — 手动模式的**主视/下视选路推流**
 
-手动挡下，操作手在 PC 端发 `cam:front` / `cam:down` / `cam`(切换) 到遥控桥，
-遥控桥就把推流画面在**前视**与**下视**相机之间切。
+手动挡下，启动时用 `--camera front|down` 选一路（`udp_server.py --stream-host ... --camera X`）；
+PC 端只被动接收，不做运行时切换。
+
+⚠️ **同一时刻只开一路相机**（2026-10-04 实测）：两块 720p 相机挂在同一个 USB 2.0 总线上
+   （`lsusb -t`：都在 Bus 01/480M 同一个 Hub 下），**同时打开必超等时带宽** —— 不管打开顺序，
+   **后开的那路 `read()` 永远返回 None**（实测 front=/dev/video2 与 down=/dev/video0 都如此）。
+   旧实现"两个一起开"会导致被选中的那路恰好是空的 → `frames_sent=0` → PC 完全没有画面。
+   所以这里改成"选哪路就开哪路"，切换时先关旧再开新。
+
 用 `base.hw.camera.create_camera("front"|"down")` 开相机（走 cfg/vision.yaml 的 camera.* 配置，
 无硬件时 fallback_sim），`manual.stream.MjpegPusher` 零转码 UDP 推流（与 manual.sh 共用同一套）。
 """
@@ -34,9 +41,9 @@ def parse_camera_packet(data):
 
 
 class CamPusher(object):
-    """后台线程：开前视+下视两台相机，把**当前选中**的那台转 JPEG 推给 pusher。
+    """后台线程：只开**当前选中**的那一路相机，转 JPEG 推给 pusher。
 
-    `switch("front"|"down")` / `toggle()` 只改一个标志，推流线程下一帧就切过去。
+    `switch("front"|"down")` / `toggle()` 会**先关旧相机再开新相机**（不能两路同开，见模块头注释）。
     """
 
     def __init__(self, host, port=5000, pkt=8000, stream_fps=30.0, start="front"):
@@ -44,7 +51,8 @@ class CamPusher(object):
         self._host = host
         self._stop = threading.Event()
         self._pusher = None
-        self._cams = {}
+        self._cap = None                 # 当前唯一打开的那路相机
+        self._lock = threading.Lock()    # 保护 _cap / which（切换线程 vs 推流线程）
         # 相机放在线程里懒开：串口已经可能失败，相机再失败就明确报错而不是崩。
         self._cam_host = host
         self._cam_port = int(port)
@@ -54,38 +62,78 @@ class CamPusher(object):
                                         daemon=True)
         self._thread.start()
 
+    # ---------------------------------------------------------------- 选路
+    def _open_locked(self, which):
+        """（**调用方需持 self._lock**）关掉当前相机，开指定那一路。"""
+        if self._cap is not None:
+            try:
+                self._cap.close()
+            except Exception:
+                pass
+            self._cap = None
+        from base.hw.camera import create_camera
+        self._cap = create_camera(which, stream=False)
+        self.which = which
+
     def switch(self, which):
-        if which in ("front", "down"):
-            self.which = which
-            return True
-        return False
+        """切到指定那一路（先关旧再开新）。返回是否成功。"""
+        if which not in ("front", "down"):
+            return False
+        with self._lock:
+            if which == self.which and self._cap is not None:
+                return True
+            try:
+                self._open_locked(which)
+            except Exception as exc:
+                print("[CAM] 切换相机失败：%s" % exc)
+                return False
+        print("[CAM] 已切到 %s" % which)
+        return True
+
+    def set_host(self, host, port=None):
+        """改推流目标地址（不重开相机）。板端 UDP 遥控桥收到 PC 包后调它，自动跟上 PC 的 IP。"""
+        if not host:
+            return False
+        self._cam_host = str(host)
+        if port:
+            self._cam_port = int(port)
+        if self._pusher is not None:
+            try:
+                self._pusher.set_host(self._cam_host, self._cam_port)
+            except Exception:
+                pass
+        return True
 
     def toggle(self):
-        self.which = "down" if self.which == "front" else "front"
+        self.switch("down" if self.which == "front" else "front")
         return self.which
 
+    # ---------------------------------------------------------------- 推流
     def _run(self):
         if not self._cam_host:
             return                                  # 不推流 ⇒ 不开相机（纯遥控 / 测试）
         import cv2
         try:
-            from base.hw.camera import create_camera
-            # stream=False：CamPusher 用自己的 MjpegPusher 推选中那一路；别让相机 read 再推全局流
-            self._cams = {"front": create_camera("front", stream=False),
-                          "down": create_camera("down", stream=False)}
+            with self._lock:
+                self._open_locked(self.which)
         except Exception as exc:
             print("[CAM] 打开相机失败：%s" % exc)
             return
-        if self._cam_host:
-            try:
-                from manual.stream import MjpegPusher
-                self._pusher = MjpegPusher(self._cam_host, self._cam_port,
-                                           pkt=self._cam_pkt, stream_fps=self._cam_fps)
-            except Exception as exc:
-                print("[CAM] 推流初始化失败：%s" % exc)
+        print("[CAM] 推流相机 = %s（同一时刻只开这一路，避免 USB 带宽超限）" % self.which)
+        try:
+            from manual.stream import MjpegPusher
+            self._pusher = MjpegPusher(self._cam_host, self._cam_port,
+                                       pkt=self._cam_pkt, stream_fps=self._cam_fps)
+        except Exception as exc:
+            print("[CAM] 推流初始化失败：%s" % exc)
         while not self._stop.is_set():
+            with self._lock:
+                cap = self._cap
+            if cap is None:
+                time.sleep(0.05)
+                continue
             try:
-                frame = self._cams[self.which].read()
+                frame = cap.read()
             except Exception:
                 time.sleep(0.05)
                 continue
@@ -103,8 +151,10 @@ class CamPusher(object):
                 self._pusher.close()
             except Exception:
                 pass
-        for c in self._cams.values():
-            try:
-                c.close()
-            except Exception:
-                pass
+        with self._lock:
+            if self._cap is not None:
+                try:
+                    self._cap.close()
+                except Exception:
+                    pass
+                self._cap = None
