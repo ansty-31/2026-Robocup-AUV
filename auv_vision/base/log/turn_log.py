@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """base/log/turn_log.py — **转向调用日志**（只写字，不参与任何控制）。
-· 谁调用的（src=cli/turn/gate/gate_loop）、进了几次（n 递增）、间隔多久；
 用法：
-from base.log.turn_log import turn_log"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import json

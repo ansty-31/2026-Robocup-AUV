@@ -76,7 +76,7 @@ python scripts/1_prepare/calibrate_camera.py data/calib/AUV_1_board --cols 11 --
     --output configs/front_camera.yaml --save-views qc/
 python scripts/1_prepare/prepare_frames.py data/frames/AUV_2_<分类目录> --config configs/vision.yaml
 python scripts/1_prepare/select_frames.py data/frames/AUV_2_auv_20260910_172208_frames --weights weights/yolo11n.pt \
-    --drop-classes red_ball --quality-dir data/frames/AUV_2_auv_20260910_172208_frames --keep 2000 --out-dir data/derived/AUV_2_selected_2000
+    --drop-classes red_ball --quality-dir data/frames/AUV_2_auv_20260910_172208_frames --keep 2000 --out-dir _archive/auv5/derived_AUV_2_selected_2000
 ```
 
 ### ~~混入「不去畸变」图，增强模型韧性~~（已废弃）
@@ -129,7 +129,7 @@ python scripts/1_prepare/resplit_dataset.py data/datasets/AUV_4_PNP.kpt4.yolov8
 > ⚠️ **已过时（2026-09-26）：D 节原口径「只判板端选中的那一个实例」作废。**
 > 那条"我方排序规则会挑哪一个实例 = 板端会用的那一个"是**本仓的假设，不是板端契约**（本仓没有板端选门代码）。**板端选门规则由用户给定（2026-09-26）：近距离优先；无法测距时选置信度高或画面大的** → D 节**以严格口径为主**；
 > 旧画法会把画面里第二个门整个藏掉，且顶部信息条有 46 px 错位，**该轮 39.7% 的数字已作废**。
-> 现状见上文表格与 `../cleanup_record/MOVES_2026-09-26.md`、`../output/preview/auv5_pose/docs/CRITERIA.md`。
+> 现状见上文表格与 `../cleanup_record/reports/MOVES_2026-09-26.md`、`../output/preview/auv5_pose/docs/CRITERIA.md`。
 > 另外**口径不可混用**：「坏率 12.8%」（A 节旧清水重判，V_MIN=0.8）与「板端不可用 8.8%（严格）/1.2%（宽松）」（D 节 339 张）
 > 回答的不是同一个问题，不能对比；线上权重（`boardview_base`，282 张）**用户决定不判**（2026-09-26）⇒ 线上权重**没有**有效的板端口径数字。
 

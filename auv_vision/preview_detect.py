@@ -1,14 +1,7 @@
 # -*- coding: utf-8 -*-
 """preview_detect.py — 真机实时识别预览（**只画识别框，不发任何运动指令**）
-- 本脚本 **不创建 UartController**，不打开串口 → 船不会动；
-- 每帧做一次推理，把识别框画在实时画面上。
-显示方式（可任选/组合）：
---show            本机窗口 cv2.imshow（需要 DISPLAY；板子桌面终端可用）
---stream          把“带框画面”编码成 MJPEG，用 UDP 推给 PC 观看
---save DIR        每 N 帧存一张带框图到 DIR（默认每 30 帧）
 用法示例（板端，工程根目录）：
-门角点(关键点)模式 —— 用 gate 任务模型（`vision.model.task_models.gate.path`，当前为阶段一
-按 Ctrl-C 或窗口里按 q/Esc 退出；结束打印各类别累计帧数。"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import argparse
 import os
 import sys
@@ -45,6 +38,9 @@ def main():
     ap.add_argument("--gate-kpt", action="store_true",
                     help="门角点模式: 用 vision.model.task_models.gate 的 keypoint 权重，"
                          "画 4 角点+四边形并打印坐标/置信度")
+    ap.add_argument("--grab", action="store_true",
+                    help="夹取小球模式: 用 grab 任务后端的**纯 CV 红球检测**（不占 BPU），"
+                         "画圆+圆心并打印 r/score；参数见 cfg/vision.yaml 的 grab.*")
     ap.add_argument("--conf", type=float, default=None, help="覆盖 score_threshold")
     ap.add_argument("--show", action="store_true", help="本机窗口显示")
     ap.add_argument("--stream", action="store_true", help="UDP 推流带框画面给 PC")
@@ -86,12 +82,24 @@ def main():
         gc = S.get("vision.model.task_models.gate", None) or {}
         model_desc = "%s (%s)" % (gc.get("path", "?"), gc.get("kind", "keypoint"))
 
+    if a.grab:
+        from handling.percept.grab_detector import build_grab_backend
+        backend = build_grab_backend()                 # 纯 CV：不加载任何 .bin
+        if backend is None:
+            print("[PV] grab 后端未启用（cfg: grab.detect.mode = mock）")
+            return 3
+        want = None
+        model_desc = "CV red-ball (no BPU) track=%s" % backend.track_enable
+
     print("=" * 64)
     print(" 真机识别预览(无运动) | 模型: %s" % model_desc)
     if a.gate_kpt:
         print(" 模式: 门角点(keypoint) | conf=%.2f | 相机: %s | 显示: show=%s stream=%s save=%s"
               % (S.vision.model.score_threshold, a.camera,
                  a.show, a.stream, a.save or "-"))
+    elif a.grab:
+        print(" 模式: 夹取小球(纯 CV，不走 BPU) | 相机: %s | 显示: show=%s stream=%s save=%s"
+              % (a.camera, a.show, a.stream, a.save or "-"))
     else:
         print(" 类别: %s | conf=%.2f | 相机: %s | 显示: show=%s stream=%s save=%s"
               % ("ALL" if want is None else sorted(want),
@@ -103,8 +111,9 @@ def main():
     hub = DetectorHub()
     parse_kpt_mode = None
     if backend is not None:
-        hub.register("gate", backend)         # 复用门任务后端(独立权重)
-        from gate.percept.gate_frontend import parse_kpt_mode
+        hub.register("grab" if a.grab else "gate", backend)   # 复用任务后端(独立权重/纯 CV)
+        if a.gate_kpt:
+            from gate.percept.gate_frontend import parse_kpt_mode
 
     pusher = None
     if a.stream:
@@ -159,6 +168,8 @@ def main():
                 continue
             if a.gate_kpt:
                 dets = hub.detect_list("gate", frame)     # 门角点专用权重
+            elif a.grab:
+                dets = hub.detect_list("grab", frame)     # 纯 CV 红球（不占 BPU）
             else:
                 dets = hub.detect_all(frame)             # 一次前向，全类别
                 if want is not None:
@@ -174,6 +185,16 @@ def main():
                     cv2.putText(img, "%s %.2f" % (d.kind, d.score),
                                 (d.x, max(14, d.y - 6)), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.6, col, 2)
+                if a.grab:
+                    # 夹取要的是"球心+半径"：画圆+圆心，并标 r/score（Det 的 bbox 只是外接方框）
+                    cd = getattr(backend, "last", None)
+                    if cd is not None:
+                        cxy = (int(round(cd.cx)), int(round(cd.cy)))
+                        cv2.circle(img, cxy, int(round(cd.r)), (0, 255, 0), 2)
+                        cv2.drawMarker(img, cxy, (0, 255, 255), cv2.MARKER_CROSS, 14, 2)
+                        cv2.putText(img, "r=%.0f s=%.2f" % (cd.r, cd.score),
+                                    (cxy[0] - int(cd.r), max(14, cxy[1] - int(cd.r) - 6)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                 if a.gate_kpt and d.kpts is not None and mem is not None:
                   try:
                     # 只对"选中的那个门"(角点最全)做融合，和 GateTask 口径一致

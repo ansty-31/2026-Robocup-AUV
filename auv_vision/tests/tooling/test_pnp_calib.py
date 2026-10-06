@@ -1,13 +1,6 @@
 # -*- coding: utf-8 -*-
 """tests/tooling/test_pnp_calib.py — tools/analyze/calib/pnp_calib.py 的**合成往返**校验。
-覆盖：
-1. 文件名真值解析（z/lat/up/yaw 各组合）；
-2. 标尺正确时：a≈1、b≈0、相对误差≈0、反演建议的 frame_w 不变；
-3. **故意把 cfg 门宽写大 20%**（模拟"标称外轮廓、实际开口"）：工具必须报 a≈1.2，
-并建议 `frame_w ≈ 0.70/1.2`；
-4. 横向/竖向真值 → t_x/t_y 的尺度与**符号**（t_y 与 up 反号）正确；
-6. 丢角点(3 角)时 mode=p3p 被正确分类，且 p3p 的深度明显偏（**p3p 不给米制阈值**的证据）；
-7. 汇总/逐帧 CSV 能写出来且行数正确。"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import json
@@ -33,8 +26,7 @@ W_TRUE, H_TRUE = 0.60, 0.40        # "真实"门（开口内缘的口径）
 
 # ------------------------------------------------------------------ 造数据
 def _rvec_for(yaw_deg, pitch_deg=0.0):
-    """**船体**偏航 → 门在相机系里的姿态。
-    （与 `gate_normal_angles_deg` 的约定一致：+psi = 门法向偏向画面右 = 机身相对门左偏。）"""
+    """**船体**偏航 → 门在相机系里的姿态。"""
     return np.array([0.0, -np.radians(yaw_deg), np.radians(pitch_deg)],
                     np.float64).reshape(3, 1)
 
@@ -47,9 +39,7 @@ def _tvec_for(z, lat=0.0, up=0.0):
 def make_dump(path, z, lat=0.0, up=0.0, yaw=0.0, n=40, W_model=W_TRUE,
               H_model=H_TRUE, drop=(), jitter_px=0.0, seed=0, img_w=1280, img_h=720,
               lead_full=0):
-    """按"真实门尺寸"投影生成 dump（PnP 侧要用的尺寸由调用方另给，模拟 cfg 与实际不符）。
-    `drop` = 要打掉置信度的角点 id（模拟缺角 → p3p/width/coarse）；
-    `lead_full` = 前多少帧仍给全 4 角 —— 给 3 点 PnP 建立 `prev` 猜值"""
+    """按"真实门尺寸"投影生成 dump（PnP 侧要用的尺寸由调用方另给，模拟 cfg 与实际不符）。"""
     rng = np.random.RandomState(int(seed))
     obj = object_points(W_model, H_model)
     rvec, tvec = _rvec_for(yaw), _tvec_for(z, lat, up)
@@ -118,9 +108,7 @@ def test_calib_recovers_correct_scale_when_cfg_matches(tmp_path):
 
 
 def test_calib_recovers_real_door_size_from_wrong_cfg(tmp_path):
-    """**核心用例**：cfg 标 0.70×0.50（外轮廓），真实是 0.60×0.40（开口内缘）。
-    ① a ≈ 1.17（z 系统性偏大）② 建议的门宽 ≈ 0.60、门高 ≈ 0.40。
-    反演不出来 = 工具没在反演标尺，那这份实验就白做了。"""
+    """**核心用例**：cfg 标 0.70×0.50（外轮廓），真实是 0.60×0.40（开口内缘）。"""
     W_cfg, H_cfg = 0.70, 0.50
     files = [make_dump(str(tmp_path / ("pnp_z%03d.jsonl" % (z * 100))), z, seed=int(z * 100))
              for z in (1.00, 1.50, 2.00, 3.00)]
@@ -137,8 +125,7 @@ def test_calib_recovers_real_door_size_from_wrong_cfg(tmp_path):
 
 
 def test_calib_reports_near_range_rejection_from_wrong_aspect(tmp_path):
-    """**近距会被 reproj 门槛整档拒掉**：宽高比不对时，近距离的残差（px）更大。
-    合成：真门 0.60×0.40 用 0.70×0.50 去解 → 0.6 m 处残差 > 20 px 全被拒（可用率 0%），"""
+    """**近距会被 reproj 门槛整档拒掉**：宽高比不对时，近距离的残差（px）更大。"""
     near = make_dump(str(tmp_path / "pnp_z060.jsonl"), 0.60, seed=60)
     far = make_dump(str(tmp_path / "pnp_z200.jsonl"), 2.00, seed=200)
     per_file, _ = PC.run([near, far], camera=CAM, W=0.70, H=0.50,
@@ -169,8 +156,7 @@ def test_calib_lateral_vertical_and_heading_signs(tmp_path):
 
 # ------------------------------------------------------------------ 6. p3p 分类与偏差
 def test_p3p_needs_prev_or_fails(tmp_path):
-    """3 角 PnP **必须有上帧猜值**：全程只有 3 角时 mode=p3p 但位姿解不出来。
-    这不是本工具的缺陷，而是 `geometry._iter_candidates` 的既定行为"""
+    """3 角 PnP **必须有上帧猜值**：全程只有 3 角时 mode=p3p 但位姿解不出来。"""
     no_prev = make_dump(str(tmp_path / "pnp_z200_drop.jsonl"), 2.00, n=20, drop=(3,), seed=2)
     per_file, _ = PC.run([no_prev], camera=CAM, W=W_TRUE, H=H_TRUE,
                          conf_thr=0.7, reproj_px=20.0, do_invert=False, verbose=False)

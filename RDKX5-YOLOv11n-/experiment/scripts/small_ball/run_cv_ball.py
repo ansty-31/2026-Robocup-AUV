@@ -11,10 +11,10 @@
 用法：
     /home/ansty/anaconda3/envs/yolov8/bin/python experiment/scripts/small_ball/run_cv_ball.py \
         --src data/derived/small_ball_selected_700 \
-        --params-json output/preview/small_ball/cv_tune.json \
+        --params-json output/preview/small_ball/tables/cv_tune.json \
         --set cov_min=0.42 --temporal link --min-track 3 \
-        --out-json output/preview/small_ball/cv_ball.json \
-        --sheet-dir output/preview/small_ball/sheets_cv
+        --out-json output/preview/small_ball/tables/cv_ball.json \
+        --sheet-dir output/preview/small_ball/renders/sheets_cv
 """
 
 from __future__ import annotations

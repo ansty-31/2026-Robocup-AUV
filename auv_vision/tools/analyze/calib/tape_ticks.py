@@ -1,16 +1,6 @@
 # -*- coding: utf-8 -*-
 """tools/analyze/calib/tape_ticks.py — 用**卷尺自己的刻度**测像素比例（不点鼠标、亚像素）
-------------
-把「1 cm 对应多少像素」当成一个**周期估计**问题，精度可以做到 ±0.5%，
-而且**完全不用点鼠标**（与门框那套独立证据互证过）。
-----------------------------------------------------
-Δu = f·L/(z + c)     这里 L = 一个刻度间隔（标准卷尺 = 0.01 m）
-1. **刻度间隔必须是 1 cm**（=0.01 m）。若这把尺细刻度是 5 mm，`f` 会**差 2 倍**。
-或与门框/`--gate` 的结果对一下量级。
-2. **靶线要水平**（量到的是 `fx`）。竖直放量到的是 `fy`。
-3. 距太远就测不出来：刻度周期 ≈ `f·0.01/z`。`f≈1080` 时 3 m 处只有 3.6 px，
-用法
-----"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import argparse
@@ -31,10 +21,7 @@ import numpy as np                                              # noqa: E402
 
 # ------------------------------------------------------------------ 纯函数（可测）
 def find_ticks(pr, min_prom=0.6, min_gap=2):
-    """亮度剖面 → 刻度（暗线）位置，抛物线插值到亚像素。
-
-    `pr` 是沿尺方向的平均亮度（亮尺 + 暗刻度）。返回 x 索引数组（相对 `pr` 起点）。
-    """
+    """亮度剖面 → 刻度（暗线）位置，抛物线插值到亚像素。"""
     sm = np.convolve(pr, np.ones(3) / 3, mode="same")
     base = np.convolve(pr, np.ones(15) / 15, mode="same")
     d = sm - base
@@ -73,10 +60,7 @@ def drop_extra_ticks(x, ratio=1.45, iters=200):
 
 
 def fft_period(pr, lo=2.0, hi=25.0, nbins=8000):
-    """整条尺的**全局**周期（FFT 主峰 + 抛物线插值）。
-    它对噪声稳，但会被"靶面没正对"带来的比例梯度糊掉（整条尺各处周期不同）；
-    `period_at` 则相反。**两者必须交叉校验**——只信一个会出事：
-    自信地给出 f=4252 px，而 FFT 给的是 3.58 px（正确）。"""
+    """整条尺的**全局**周期（FFT 主峰 + 抛物线插值）。"""
     d = np.asarray(pr, float)
     if len(d) < 16 or d.std() < 1e-6:
         return None
@@ -108,10 +92,7 @@ def fft_period(pr, lo=2.0, hi=25.0, nbins=8000):
 
 
 def robust_polyfit(k, x, deg=2, floor=0.6, k_mad=3.0, iters=5):
-    """稳健多项式拟合：按 **MAD** 剔离群点（用 std 会被离群点自己撑大，剔不掉）。
-
-    返回 `(co, keep_mask)`。
-    """
+    """稳健多项式拟合：按 **MAD** 剔离群点（用 std 会被离群点自己撑大，剔不掉）。"""
     k = np.asarray(k, float)
     x = np.asarray(x, float)
     keep = np.ones(len(k), bool)
@@ -132,13 +113,7 @@ def robust_polyfit(k, x, deg=2, floor=0.6, k_mad=3.0, iters=5):
 
 
 def fit_index(x, deg=2, iters=8):
-    """给刻度编序号 k 并拟合 `x(k)`（容忍漏检、多检与透视梯度）。
-    三步（每一步都是被真实数据的失败模式逼出来的）：
-    1. **增量编号**：用最近几格的中位间距决定这一步跨几格（漏检 → 一次跳 2 格）；
-    2. **稳健拟合**（按 MAD 剔离群点）—— 用 std 会被离群点撑大阈值，剔不掉；
-    3. **反解序号并合并重复**：用拟合曲线反解每点的序号，同号只留离拟合最近的那个
-    （多检的杂线会落到同一号上被合并）；再回到 2，直到序号不再变。
-    返回 dict：`co`(多项式系数)、`k`、`x`、`rms`、`n`、`period_med`。"""
+    """给刻度编序号 k 并拟合 `x(k)`（容忍漏检、多检与透视梯度）。"""
     x = drop_extra_ticks(np.asarray(x, float))
     if len(x) < 8:
         return None
@@ -194,8 +169,7 @@ def fit_index(x, deg=2, iters=8):
 
 
 def period_at(fit, x_target):
-    """`x(k) = x_target` 处的 `dx/dk`（= 该处每格多少 px）。
-    像素/厘米 本来就不同，而我们量的距离是到**尺中心**的 —— 中心处的局部比例才对。"""
+    """`x(k) = x_target` 处的 `dx/dk`（= 该处每格多少 px）。"""
     co = np.asarray(fit["co"], float)
     lo, hi = float(fit["k"].min()) - 10.0, float(fit["k"].max()) + 10.0
     for _ in range(80):
@@ -235,8 +209,7 @@ def tickiness(pr):
 
 def detect_span(gray, y0, y1, x0, x1, min_len=60, margins=(25.0, 12.0, 6.0),
                 min_frac=0.08):
-    """在给定的行带里找**卷尺的横向范围**。
-    判据用**刻度纹理性**（`tickiness`，高通标准差）—— 尺子有周期性刻度，门板没有。"""
+    """在给定的行带里找**卷尺的横向范围**。"""
     band = gray[y0:y1 + 1, x0:x1].mean(0)
     xm = float(band.mean())
     k = 21
@@ -258,10 +231,7 @@ def detect_span(gray, y0, y1, x0, x1, min_len=60, margins=(25.0, 12.0, 6.0),
 
 
 def detect_band(gray, x0, x1, min_len=40):
-    """自动找卷尺所在行带：在 x 范围内找"连续亮像素最长"的那一行，再向上下扩展。
-
-    返回 `(y0, y1)`；找不到返回 `None`。
-    """
+    """自动找卷尺所在行带：在 x 范围内找"连续亮像素最长"的那一行，再向上下扩展。"""
     h = gray.shape[0]
     best = (0, None)
     #    带子偏暗（远距档）时就逐步放宽重试。
@@ -312,8 +282,7 @@ def analyze_x(gray, band, xr, cx, z_m, c_m, grad_m, min_prom):
 
 def measure_one(path, z_m, c_m=0.0, grad_m=0.01, band=None, xr=None, cx=None,
                 min_prom=0.6):
-    """一张图 → dict（周期 / f / 质量），失败返回 None。
-    横向范围试**两个候选**：用户/默认的整段，和自动收窄到尺子的那段。"""
+    """一张图 → dict（周期 / f / 质量），失败返回 None。"""
     import cv2
     img = cv2.imread(path)
     if img is None:

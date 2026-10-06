@@ -2,17 +2,6 @@
 # check_board_parity.sh — 检查"本地代码 == 最后移植到板端的代码"
 #
 # 用法（任意位置都行；脚本自己定位工程根与清单目录）：
-#   bash tools/deploy/check_board_parity.sh              # 本地 vs tools/deploy/board_parity.md5（无需板子，毫秒级）
-#   AUV_SSH=/home/ansty/RDKX5/.ssh_x5.sh \
-#     bash check_board_parity.sh --board          # 再与板端比对（**1 次 SSH 批量取 md5**，秒级）
-#   ... --board --only-verified                   # 只查有板端实测证据的那批
-#   ... --board --slow                            # 退回"一文件一次 SSH"的老路径（SSH 不稳时用）
-#   ... --board --write                           # 顺带把 tools/deploy/board_parity.md5 刷成当前实测状态
-#
-# 说明：manifest 记录的是"最后一次与板端逐文件 md5 比对一致"时的字节；
-#   ① 本地全绿 = 本地没被改过；
-#   ② --board 也全绿 = 板端确实装的就是这份代码。
-#   只读操作：不写板端、不改本地。
 set -u
 # 工程根 = 本脚本目录的上**两**级；清单与驱动脚本同目录（tools/deploy/）
 TOOLS_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -36,9 +25,8 @@ done
 
 [ -f "$MANIFEST" ] || { echo "缺少 $MANIFEST"; exit 2; }
 
-# 「本地≠板端是**故意的**」分叉清单（与 deploy_to_board.sh 读同一个文件）：
-#   ★ 命中的文件不算不一致 —— 否则 --board 永远报 [板端不同] 并 exit 1，
 #     "检查长期红着"就等于没有检查。分叉是有意的，就明确报出来，别报成失败。
+#   （细节与实测见 doc/注释历史.md）
 FORK_FILE="$TOOLS_DIR/board_forks.txt"
 FORKS=""
 if [ -f "$FORK_FILE" ]; then
@@ -83,7 +71,7 @@ while IFS=$'\t' read -r md5 f verified; do
     local_bad=$((local_bad+1))
   fi
   # ⚠️ 无方括号 = 清单里只记了"本地值"，**没有板端核对证据**。
-  #    这类条目比的是"本地 vs 本地"，不能当作"与板端一致"（板端手改过本地是看不见的）。
+#   （细节与实测见 doc/注释历史.md）
   if [ "$verified" != "1" ]; then
     unver=$((unver+1)); unver_list="$unver_list $f"
   fi
@@ -106,21 +94,28 @@ else
   echo "  ✗ 本地有改动/缺失（板端未必同步过）"
 fi
 
-# 1b) **本地有、清单没有**的源文件 —— 这类文件 deploy_to_board.sh **永远不会上传**
-#     ⚠️ 别省掉这段：新文件漏在清单外时，部署会把"新 gate_task.py + 缺 heading_align.py"
-#        这种半套状态推上板 → 板端 import 即崩；而只遍历清单的检查**看不见这些文件**（静默通过）。
-#     收录规则与 --write 里那段 find 保持一致（改了那边记得同步这里）。
+#     ⚠️ 别省掉这段：新文件漏在清单外时，部署会把"新 gate_task.py + 缺 heading_align.py""这种半套状态推上板 → 板端 import 即崩，而只遍历清单的检查看不见它。
+#   （细节与实测见 doc/注释历史.md）
 new_list=""
 while IFS= read -r f; do
   case "$f" in
     *"*"*) continue ;;
   esac
-  grep -qE "[[:space:]]${f}[[:space:]]*\]?[[:space:]]*$" "$MANIFEST" || \
+  awk -v p="$f" '
+      /^[[:space:]]*#/ { next }
+      NF < 2 { next }
+      { line = $0
+        sub(/^[[:space:]]*\[[[:space:]]*/, "", line)      # 去掉可能的 "[ md5  "
+        sub(/^[0-9a-f]+[[:space:]]+/, "", line)            # 去掉 md5
+        sub(/[[:space:]]*\]?[[:space:]]*$/, "", line)      # 去掉尾部 " ]"
+        if (line == p) { found = 1; exit } }
+      END { exit !found }' "$MANIFEST" || \
     new_list="$new_list $f"
 done < <(find . -type f \( -name '*.py' -o -name '*.sh' -o -name '*.md' -o -name '*.yaml' \
       -o -name '*.txt' \) \
     -not -path './.*' \
     -not -path './bak/*' -not -path './log/*' -not -path './rec/*' \
+    -not -path './tools/presets/*' \
     -not -path './models/*' -not -path '*/__pycache__/*' -not -name '*.pyc' \
     -not -name 'check_board_parity.sh' -not -name 'board_parity.md5' \
     -not -name 'deploy_to_board.sh' -not -name 'tidy_board_bak.sh' -not -name 'board_forks.txt' \
@@ -207,10 +202,6 @@ if [ "$BOARD" = "1" ]; then
     while IFS=$'\t' read -r _m f _v; do
       [ -f "$f" ] && echo "$f"
     done < "$TMPL" > "$LIST"
-    # ② 本地源码树里新增的文件
-    #    -not -path './.*' 把**点目录**整个排除（.pytest_cache/、.git/、.vscode/…）：
-    #    它们里面的 README.md 文件名不以点开头，只靠 `-not -name '.*'` 拦不住，
-    #    一旦进清单就会被 deploy 当源码传上板。
     find . -type f \( -name '*.py' -o -name '*.sh' -o -name '*.md' -o -name '*.yaml' \
          -o -name '*.txt' \) \
       -not -path './.*' \

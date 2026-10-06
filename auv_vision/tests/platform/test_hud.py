@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """tests/platform/test_hud.py — HUD 的「偏转角」显示行（`main.psi_line`）。
-1. 还没测到 psi 时必须显示 `--` 而**不是 0**（0 会被当成"已经正了"）；
-2. `hdg_skip` 有值时（这一趟跳过了正航向）必须**变色并写明原因**，"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import os

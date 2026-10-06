@@ -137,24 +137,32 @@ _REL_LUT_CACHE: dict = {}
 
 
 def _rel_lut(rel_min: float) -> np.ndarray:
-    """相对红占优判据的 **256 项 LUT**（按 mx 查出所需的最小 r）。
+    """相对红占优判据的 **256 项 LUT**：按 mx 查出 dom 的**严格下限**。
 
-    要判的是 `(r-mx)/(r+mx+1) >= t`，即 `(1-t)r >= (1+t)mx + t`，整理成 `r >= f(mx)`：
-        f(mx) = ceil( ((1+t)*mx + t) / (1-t) )
-    mx 是 uint8（0..255）=> f 只有 256 种取值 => 查表 + 一次整数比较即可，**与除法版逐位等价**
-    （r 是整数：`7r >= 13mx+3` <=> `r >= ceil((13mx+3)/7)`）。t=0.30 时 f 在 mx>137 后饱和到 255
-    => 那些像素直接判否（r<=255 永不满足），与除法版一致。
+    判据 `rel = dom/(dom+2mx+1) >= t`（把 r = dom+mx 代进去）等价于
+        dom > lut(mx),   lut(mx) = ceil( t·(2mx+1)/(1-t) ) - 1
+    查表 + 一次 `cv2.compare(..., CMP_GT)`（都 uint8 SIMD）。
 
-    为什么绕这一步：板端 A55 上 `cv2.multiply(..., dtype=CV_16U)` 是**标量循环**，
-    实测"2 乘 + 1 加 + 1 比较"要 **30.3 ms**；换成 LUT+比较（都 uint8 SIMD）约 **2 ms**。
+    **为什么用"严格大于"而不是"大于等于"**：t 较大时所需 dom 下限会超过 255（t=0.4 时最大 341），
+    uint8 LUT 表达不了"不可满足"。用 `>` 天然能编码：lut 置 255 ⇒ `dom > 255` 恒假（dom ≤ 255）
+    ⇒ 恰好是"不可满足"，不引入假阳性。`>=` 写法只能 clip 到 255，会把 r=255、mx≥138 的像素
+    （如纯白 dom=0）错误放过。
+
+    为什么绕这一步：A55 上 `cv2.multiply(..., dtype=CV_16U)` 是标量循环，除法判据要 30.3 ms，
+    LUT + compare 只要 ~2 ms。整数 ceil 用整除算：`t=a/b` ⇒ `ceil(a·n/(b-a)) = (a·n+(b-a)-1)//(b-a)`；
+    **别用 float 走 np.ceil**（会重新引入舍入，实测能让 13/65536 个格子差 1 档）。
     """
     key = round(float(rel_min), 6)
     lut = _REL_LUT_CACHE.get(key)
     if lut is None:
-        mx = np.arange(256, dtype=np.float64)
-        t = float(rel_min)
-        need = np.ceil(((1.0 + t) * mx + t) / (1.0 - t))
-        lut = np.clip(need, 0, 255).astype(np.uint8)
+        from fractions import Fraction
+        fr = Fraction(float(rel_min)).limit_denominator(1000)   # 0.30 -> 3/10
+        a, b = fr.numerator, fr.denominator
+        mx = np.arange(256, dtype=np.int64)
+        num = a * (2 * mx + 1)          # t·(2mx+1)（两边同乘 b）
+        den = b - a                     # 1 - t
+        need = (num + den - 1) // den if den > 0 else np.full(256, 256)
+        lut = np.clip(need - 1, 0, 255).astype(np.uint8)
         _REL_LUT_CACHE[key] = lut
     return lut
 
@@ -213,8 +221,8 @@ def red_mask_fast(img: np.ndarray, p: Params) -> tuple[np.ndarray, np.ndarray]:
     redness = dom
     m = cv2.compare(dom, p.dom_min, cv2.CMP_GE)    # 0/255
     if p.use_rel:
-        thr = cv2.LUT(mx, _rel_lut(p.rel_min))     # 每个 mx 对应的最小 r
-        m = cv2.bitwise_or(m, cv2.compare(r, thr, cv2.CMP_GE))
+        thr = cv2.LUT(mx, _rel_lut(p.rel_min))     # 每个 mx 对应的 dom 严格下限
+        m = cv2.bitwise_or(m, cv2.compare(dom, thr, cv2.CMP_GT))
 
     if p.use_hue or p.s_min > 0 or p.v_min > 0:
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)

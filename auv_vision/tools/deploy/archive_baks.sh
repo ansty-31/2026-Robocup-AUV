@@ -2,12 +2,6 @@
 # archive_baks.sh — 把工程内散落的备份文件统一收进 bak/
 #   约定：cfg/ 下的备份 → bak/cfg/ ；其余 → bak/（平铺）
 #   同名冲突自动加序号，不覆盖已归档文件
-#
-# 用法（脚本位置变了也没关系，工程根自动定位；可在任意位置调用）：
-#   bash tools/deploy/archive_baks.sh              # 归档（移动 *.bak* 到 <工程根>/bak/）
-#   bash tools/deploy/archive_baks.sh --dry-run    # 只列出将要移动的文件，不动
-#   bash tools/deploy/archive_baks.sh --list       # 查看 bak/ 现有内容
-#   bash tools/deploy/archive_baks.sh --help
 set -u
 # 工程根 = 本脚本目录的上一级（bak/ 在工程根）
 cd "$(dirname "$0")/../.."

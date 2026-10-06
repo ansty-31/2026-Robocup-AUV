@@ -12,8 +12,8 @@
     /home/ansty/anaconda3/envs/yolov8/bin/python experiment/scripts/small_ball/run_yolo_ball.py \
         --src data/derived/small_ball_selected_700 --weights weights/yolo11n.pt \
         --device 0 --conf 0.25 \
-        --out-json output/preview/small_ball/yolo_ball.json \
-        --sheet-dir output/preview/small_ball/sheets_yolo
+        --out-json output/preview/small_ball/tables/yolo_ball.json \
+        --sheet-dir output/preview/small_ball/renders/sheets_yolo
 
 输出：JSON（逐图框，原图坐标 + 640 坐标）、CSV 汇总、sheet_*.jpg 联系表。
 """

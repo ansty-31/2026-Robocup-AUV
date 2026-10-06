@@ -2,23 +2,6 @@
 # tools/deploy/archive_board_legacy.sh — 把**板端旧布局**的文件先备份、再删除；**不上传任何东西**。
 #
 #   bash tools/deploy/archive_board_legacy.sh --dry-run   # 只列出板端存在、将被归档的旧路径
-#   bash tools/deploy/archive_board_legacy.sh             # 备份 → 校验 → 删除 → 打包归档
-#   KEEP_TAR=0 bash tools/deploy/archive_board_legacy.sh  # 不额外打整包（默认打）
-#
-# 为什么单独一个脚本，而不是直接跑 deploy：
-#   `deploy_to_board.sh` 会**先上传本地文件**。而板端当前带着**本地仓库没有的新功能**
-#   （下位机旋转执行协议 + 冲刺前航向确认锁存 `_hdg_ok`，见 doc/记录/），全量 deploy 会把它们冲掉。
-#   归档旧布局不需要上传，所以这里只做"备份 + 删除"。
-#
-# 旧路径清单的**唯一来源**是 `deploy_to_board.sh` 里的 `DELETED=(...)`：本脚本解析它、不另抄一份
-#   （抄两份必然漂移：deploy 加了、这边没加 = 永远清不干净）。
-#
-# 板端布局（<板端> = AUV_BOARD_DIR，默认 /home/sunrise/Desktop/AUV_New）：
-#   <板端>/bak/legacy_layout_<本地时间戳>/   # 原样保留的旧文件（cp -p，可直接拷回去）
-#   <板端>/bak/archive/legacy_layout_<时间戳>.tar.gz   # 上面那份的压缩包
-#   <板端>/bak/board_state_<时间戳>.tar.gz             # 顺手存的"归档前板端代码全貌"（排除 bak/log/models）
-#
-# 原则：**先备份、再删除、后校验**；只碰 DELETED 清单里的路径与 <板端>/bak/，不动其它代码。
 set -u
 TOOLS_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEPLOY="$TOOLS_DIR/deploy_to_board.sh"
@@ -45,9 +28,6 @@ mapfile -t LEGACY < <(sed -n '/^DELETED=(/,/^)/p' "$DEPLOY" \
 [ "${#LEGACY[@]}" -gt 0 ] || { echo "✗ 没解析出 DELETED 清单"; exit 1; }
 echo "[legacy] 旧路径清单 ${#LEGACY[@]} 条（来自 $(basename "$DEPLOY") 的 DELETED）"
 
-# ---- 护栏：本地存在同名文件 = **活文件**，绝不在板端删它 ----
-#   （2026-10-02 踩过：DELETED 里误列 `gate/gate_task.py`，照单执行把板端生效的编排文件删了，
-#     靠 bak/legacy_layout_*/ 才恢复。DELETED 是人写的清单，会漂；这里的判断来自文件系统。）
 LOCAL_ROOT="$(cd "$TOOLS_DIR/../.." && pwd)"
 GUARD=(); SAFE=()
 for f in "${LEGACY[@]}"; do

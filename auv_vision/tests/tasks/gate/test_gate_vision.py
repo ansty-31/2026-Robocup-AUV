@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """tests/tasks/gate/test_gate_vision.py — gate 视觉侧：PnP 几何往返 / keypoint 解码约定 /
-非等比缩放回投 / mode 降级 / kpt_mem 开关 / GateTask(mock) 无硬件闭环。
-GateTask 相位机（MockGateBackend 无硬件闭环）。"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import numpy as np
 import pytest
 
@@ -176,8 +175,6 @@ def test_gate_task_mock_reaches_through_and_counts_pass(fake_uart, monkeypatch):
             break
 
     assert status == S.STATUS_DONE
-    #  2026-10-02：**1.8 m 外的位姿一概不信**（用户定）⇒ mock 起始距离在 1.8 m 外时，
-    #  开头几帧没有可用位姿 ⇒ 先 SEARCH（靠框占比靠近），进了 1.8 m 才进 ALIGN。
     from gate.gate_task import PH_SEARCH
     assert phases[0] in (PH_ALIGN, PH_SEARCH), phases[:3]
     assert PH_THROUGH in phases and phases[-1] == PH_THROUGH, phases
@@ -193,9 +190,6 @@ def test_gate_task_mock_reaches_through_and_counts_pass(fake_uart, monkeypatch):
     assert fake_uart.neutral_calls >= 1            # 结束时回中性
 
 
-# ==============================================================
-# keypoint 头解码约定（合成张量；训练侧 ONNX 与板端唯一的耦合面）
-# ==============================================================
 G = 80                                   # 用 stride=8 那一层做算术最直观
 STRIDE = 640 / G                         # = 8.0
 INPUT = 640
@@ -206,8 +200,7 @@ LABELS = ["gate"]
 
 
 def _blank_outputs(g=G, nc=1, kpt_dim=KPT_DIM, reg_max=REG_MAX):
-    """一个尺度的空输出：{通道数: [1,g,g,C]}。
-    cls 初值给 -10（sigmoid≈4.5e-5）而不是 0：sigmoid(0)=0.5 会全部越过 conf 阈值，"""
+    """一个尺度的空输出：{通道数: [1,g,g,C]}。"""
     cls = np.full((1, g, g, nc), -10.0, np.float32)
     return {64: np.zeros((1, g, g, 4 * reg_max), np.float32),
             nc: cls,
@@ -228,12 +221,7 @@ def _set_kpt_cell(out, gx, gy, i, cell_x, cell_y, v_logit=6.0):
     a[3 * i + 2] = v_logit
 
 def test_kpt_grid_term_is_plus_index():
-    """网格项必须是 **+索引**，不是 +索引-0.5。
-
-    把角点编码在 cell 坐标 = 网格索引本身（raw=0）处：
-        正确 → 像素 = gx * stride
-        多写 -0.5 → 像素 = (gx-0.5) * stride，即 stride=8 上偏 4 px
-    """
+    """网格项必须是 **+索引**，不是 +索引-0.5。"""
     gx, gy = 10, 20
     out = _blank_outputs()
     _set_score(out, gx, gy)
@@ -338,12 +326,6 @@ def test_low_score_cells_are_filtered_by_conf():
                              input_w=INPUT, input_h=INPUT) == []
 
 
-# ======================================================================
-# 2026-10-02：运行时**可信边界** `z.relock_away_m = 1.2 m`（超出即不采纳该帧位姿）。
-# 本模块绝大多数用例合成的门放在 1.5–3 m，考的是**位姿之后的逻辑**（起转/出口/恢复/SWAY_BACK…），
-# 与"多远才算可信"正交 ⇒ 这里统一把边界放宽到 99（= 关闭），只有专门考这条的用例用真值
-# （用例名里带 jump/relock/far 的自动跳过，不覆盖）。
-# ======================================================================
 @pytest.fixture(autouse=True)
 def _relax_z_trust_boundary(request, monkeypatch):
     name = request.node.name

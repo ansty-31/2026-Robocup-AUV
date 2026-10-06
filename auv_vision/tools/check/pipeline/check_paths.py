@@ -1,21 +1,8 @@
 # -*- coding: utf-8 -*-
 """tools/check/pipeline/check_paths.py — 路径依赖自检（**换拷贝/搬目录后第一件事**）
--------------------------
-规则：cfg 里**一律写仓库内相对路径**（`cfg/front_camera.yaml`、`models/x.bin`），
-运行时由 `base.cfg.settings.resolve_path()` 按工程根解析。
-**甚至空行**都会 `Input file is invalid`（SystemError），而 `calibration_maps`
-检查项
-------
-A 工程根自证：`main.py` / `cfg/` / `models/` 都在同一个根下
-B `cfg/*.yaml` 里**没有绝对路径**（扫文本，不看注释以外的东西）
-C 所有"路径类键"能解析且**文件存在**（用 `base.cfg.settings` 的实际解析结果）
-D 相机标定 yaml：第一个字节是 `%YAML:1.0`，且 cv2 能读、fx 合理
-E 提示同名拷贝（`/home/sunrise/AUV` 之类）存在时的混用风险
 用法（板端/本地都行）
---------------------
-python3 tools/check/pipeline/check_paths.py
-python3 tools/check/pipeline/check_paths.py --quiet      # 只打印失败项
-退出码：0=全部通过 ｜ 1=有失败项（可直接进 CI/部署前检查）"""
+退出码：0=全部通过 ｜ 1=有失败项（可直接进 CI/部署前检查）
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import argparse

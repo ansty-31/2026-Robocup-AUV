@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """tests/platform/test_common.py — common 层：PID / 图像链路（含 NV12 打包与 squish 缩放）/ Det 与目标挑选 /
-cfgnode 配置读取（含 ball·gate 共用的 comm.motion 参数）。"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import numpy as np
 import pytest
 
@@ -71,14 +71,7 @@ def test_preprocess_enhance_shape_dtype_and_gamma():
 
 
 def test_preprocess_is_d_chain_only():
-    """识别链路**只剩 D 链**（A 域/`chain: A` 于 2026-10-01 退役归档，见 bak/retired/Adomain_20261001/）。
-
-    咬两件事：
-    ① **旧开关不许复活**：`ModelPreprocessor(chain=...)` 必须直接 `TypeError`
-       —— 谁把 A 链或"域开关"加回来，这条立刻红（防止两套链路又悄悄并存）；
-    ② **链序真是 D**（缩放 → 画面补偿 → 640 去畸变）：与手工按该顺序拼出来的结果**逐像素相同**
-       —— 顺序被倒成老 A 序（先 remap 再缩放/补偿）就会红。
-    """
+    """识别链路**只剩 D 链**（A 域/`chain: A` 于 2026-10-01 退役归档，见 bak/retired/Adomain_20261001/）。"""
     import os
     import cv2
     from common.vision.preprocess import calibration_maps_640
@@ -131,9 +124,6 @@ def test_det_helpers_and_pick_target():
     assert pick_target([], "red_ball") is None
 
 
-# ==============================================================
-# 图像链路：NV12 打包保真（模型输入的色度）
-# ==============================================================
 H = W = 640
 
 
@@ -158,8 +148,7 @@ def _nv12_to_bgr(packed):
     return cv2.cvtColor(i420.reshape(H * 3 // 2, W), cv2.COLOR_YUV2BGR_I420)
 
 def test_selected_nv12_path_is_color_faithful():
-    """**当前配置选中的**那条 NV12 路径必须是色度忠实的。
-    `vision.model.fast_nv12=false` 会切到 numpy 版，而那一版的色度被放大 4 倍"""
+    """**当前配置选中的**那条 NV12 路径必须是色度忠实的。"""
     fast = bool(S.vision.model.fast_nv12)
     packer = bgr_to_packed_nv12_fast if fast else bgr_to_packed_nv12
     img = _test_frame()
@@ -172,9 +161,6 @@ def test_selected_nv12_path_is_color_faithful():
 
 
 
-# ======================================================================
-# cfgnode：配置节点读取 + **ball/gate 共用运动参数**（comm.motion）
-# ======================================================================
 def test_cfgnode_node_readers(monkeypatch):
     """缺键/类型不对一律兜底，绝不抛异常；flag 按字符串语义解析。"""
     assert sub({"a": 1}, "a") == {}                     # 子节点不是 dict → {}

@@ -5,7 +5,7 @@
 > 1. **权威来源换成 `/home/sunrise/Desktop/AUV_New/`**（在用副本，`deploy_to_board.sh` 的目标）。
 >    以前本文写的 `/home/sunrise/AUV/` 是**旧树（09-17，A 域时代）**，已于 **2026-10-06 归档删除**
 >    （317 MB → `AUV_New/bak/legacy_Adomain_tree_20261006.tar.gz`，md5 `3a7cda63…`），
->    连带影响与恢复方式见 [`../cleanup_record/BOARD_Adomain_retire_20261006.md`](../cleanup_record/BOARD_Adomain_retire_20261006.md)。
+>    连带影响与恢复方式见 [`../cleanup_record/reports/BOARD_Adomain_retire_20261006.md`](../cleanup_record/reports/BOARD_Adomain_retire_20261006.md)。
 > 2. **A 域已彻底退役**：在用副本的 A 分支已于 2026-10-01 移除，旧树被删后**板端已无任何能跑 A 域的地方**。
 >    规矩：识别链路只有 **D + wb**；**夹取小球只做 `resize 640×640` 送 BPU，不做任何图像处理**；
 >    不要再给 `vision.image` 加 `chain` 之类的域开关。
@@ -99,7 +99,7 @@ python scripts/1_prepare/prepare_frames.py <图片目录> --config configs/visio
 > `../runs/auv5/calib/front_camera_good.yaml`、`../runs/auv5/calib/diag_new.json`、
 > `../runs/auv5/calib/diag_old.json`、`../runs/auv5/calib/diag_auv1board.json`、
 > `../runs/auv5/calib/calib.log`、`../runs/auv5/calib/prep_calib.log`（2026-09-26 逐条 `ls` 核实）；
-> 清理记录见 `../cleanup_record/CLEANUP_2026-09-24.md`。要重出对比图，按
+> 清理记录见 `../cleanup_record/reports/CLEANUP_2026-09-24.md`。要重出对比图，按
 > `../experiment/scripts/exp_distortion/make_contact_sheet.py`、`../experiment/scripts/exp_distortion/board/`
 > 下的板端对拍脚本重跑。
 
@@ -151,7 +151,7 @@ python scripts/1_prepare/prepare_frames.py <图片目录> --config configs/visio
 > `../data/frames/AUV_1_rec_front_frames/`、`../data/frames/AUV_2_auv_20260910_172208_frames/`、
 > `../data/frames/AUV_3_auv_20260911_201754_frames/`、`../data/frames/AUV_4_auv_4_frames/`、
 > `../data/frames/AUV_5_gate_calib/`）。AUV_3 现存的 640×640 图是抽样后的
-> `../data/derived/AUV_3_selected_2000/`（2000 张，实测 640×640）；原始 1280×720 帧在
+> `../_archive/auv5/derived_AUV_3_selected_2000/`（2000 张，实测 640×640）；原始 1280×720 帧在
 > `../data/frames/AUV_3_auv_20260911_201754_frames/`（508 张）。**`processed_640` 本身已不在**，
 > 要重跑就 `../scripts/1_prepare/prepare_frames.py` 现生成。
 

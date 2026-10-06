@@ -1,18 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """check_domain.py — 「识别方案」**代次指纹自检（单域 D+wb）**（本地/板端都能跑，不入运行时）
-
-2026-10-01 起本项目**只有一套识别方案**（A 域 / `vision.image.chain` 已退役归档，见
-`bak/retired/Adomain_20261001/`），所以这里守的不再是"两域别混"，而是**同代配对**：
-
-    链路 D（resize640 → enhance → remap@640）＋ 白平衡 wb `[1.0, 1.05, 1.15]`
-    ＋ CLAHE 关（`clahe_clip 0`）＋ gamma 0.85 ＋ **阶段一 v3 门权重** ＋ 水下重标的内参
-
-这四样**必须同代**：换了权重没换标定（或反过来把老 AUV_4 权重配到新链上）都会跨域掉点，
-只看单张图是看不出来的 —— 这就是本脚本存在的理由。
-
 退出码：0 = 指纹自洽；1 = 自相矛盾（终端里会打印该改哪一项）。
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import argparse

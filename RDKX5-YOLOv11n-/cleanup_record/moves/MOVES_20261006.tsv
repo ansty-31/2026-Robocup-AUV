@@ -1,0 +1,183 @@
+from	to	kind	files	bytes	why
+runs/auv6_chain_planC.log	runs/auv6/logs/auv6_chain_planC.log	file	1	84	auv6 线训练/评测日志
+runs/auv6_eval_v3.log	runs/auv6/logs/auv6_eval_v3.log	file	1	2179	auv6 线训练/评测日志
+runs/auv6_train_clear_coco_150ep_aborted.log	runs/auv6/logs/auv6_train_clear_coco_150ep_aborted.log	file	1	2141881	auv6 线训练/评测日志
+runs/auv6_train_clear_coco.log	runs/auv6/logs/auv6_train_clear_coco.log	file	1	19569648	auv6 线训练/评测日志
+runs/auv6_train_clear_only.log	runs/auv6/logs/auv6_train_clear_only.log	file	1	9834322	auv6 线训练/评测日志
+runs/auv6_train_stage1_clear.log	runs/auv6/logs/auv6_train_stage1_clear.log	file	1	5200544	auv6 线训练/评测日志
+runs/auv6_train_stage1_v2.log	runs/auv6/logs/auv6_train_stage1_v2.log	file	1	19039858	auv6 线训练/评测日志
+runs/auv6_train_stage1_v3.log	runs/auv6/logs/auv6_train_stage1_v3.log	file	1	29017807	auv6 线训练/评测日志
+runs/small_ball_cv_cov0.35_a30.log	runs/small_ball/logs/small_ball_cv_cov0.35_a30.log	file	1	877	small_ball 线日志
+runs/small_ball_cv_cov0.45_a40.log	runs/small_ball/logs/small_ball_cv_cov0.45_a40.log	file	1	878	small_ball 线日志
+runs/small_ball_cv_final.log	runs/small_ball/logs/small_ball_cv_final.log	file	1	881	small_ball 线日志
+runs/small_ball_cv_run.log	runs/small_ball/logs/small_ball_cv_run.log	file	1	1028	small_ball 线日志
+runs/small_ball_cv_tune.log	runs/small_ball/logs/small_ball_cv_tune.log	file	1	1238	small_ball 线日志
+runs/small_ball_report.log	runs/small_ball/logs/small_ball_report.log	file	1	591	small_ball 线日志
+runs/small_ball_yolo.log	runs/small_ball/logs/small_ball_yolo.log	file	1	698	small_ball 线日志
+runs/pc_pt_adomain.log	runs/small_ball/logs/pc_pt_adomain.log	file	1	435	small_ball 线日志
+runs/auv6/train/stage1_clear_only	_archive/auv6/void_planB_20260928/train_stage1_clear_only	dir	29	16566845	Plan B——用户 2026-09-28 裁定作废
+runs/auv6/train/stage1_clear_coco2	_archive/auv6/void_planC_20260928/train_stage1_clear_coco2	dir	29	16491919	Plan C——用户 2026-09-28 裁定作废
+runs/auv6/train/stage1_v2	_archive/auv6/superseded_by_v3_20260928/train_stage1_v2	dir	29	16691295	阶段一 v2——用户 09-28 裁定采用 v3
+runs/auv6/train/stage1_clear_coco	_archive/auv6/aborted_stage1_clear_coco/train_stage1_clear_coco	dir	9	34196102	中断的 150ep 尝试（results.csv 仅 32 行；有 _150ep_aborted 日志为证）
+data/raw/samll_ball.mjpeg	data/raw/small_ball.mjpeg	file	1	192367564	笔误 samll→small
+data/frames/samll_ball_frames	data/frames/small_ball_frames	dir	1106	61846438	笔误 samll→small
+data/derived/AUV5_hard282	data/derived/AUV_5_hard282	dir	282	34334651	命名统一：AUV5→AUV_5（与同区其它条目一致）
+data/derived/AUV6_test007	data/derived/AUV_6_test007	dir	7	908630	命名统一：AUV6→AUV_6
+data/datasets/AUV_5_strage1_orign	data/datasets/AUV_5_stage1_origin	dir	2312	140348122	笔误 strage1_orign→stage1_origin
+cleanup_record/BOARD_Adomain_retire_20261006.md	cleanup_record/reports/BOARD_Adomain_retire_20261006.md	file	1	5035	cleanup_record 分类
+cleanup_record/CLEANUP_2026-09-24.md	cleanup_record/reports/CLEANUP_2026-09-24.md	file	1	12350	cleanup_record 分类
+cleanup_record/CLEANUP_2026-09-25.md	cleanup_record/reports/CLEANUP_2026-09-25.md	file	1	7459	cleanup_record 分类
+cleanup_record/MOVES_2026-09-26.md	cleanup_record/reports/MOVES_2026-09-26.md	file	1	42720	cleanup_record 分类
+cleanup_record/RESTRUCTURE_2026-09-25.md	cleanup_record/reports/RESTRUCTURE_2026-09-25.md	file	1	9663	cleanup_record 分类
+cleanup_record/MOVES_20260926b.tsv	cleanup_record/moves/MOVES_20260926b.tsv	file	1	6644	cleanup_record 分类
+cleanup_record/MOVES_20260926.tsv	cleanup_record/moves/MOVES_20260926.tsv	file	1	426	cleanup_record 分类
+cleanup_record/MOVES_archive_20260926.tsv	cleanup_record/moves/MOVES_archive_20260926.tsv	file	1	3385	cleanup_record 分类
+cleanup_record/MOVES_archive_20260928.tsv	cleanup_record/moves/MOVES_archive_20260928.tsv	file	1	2182	cleanup_record 分类
+cleanup_record/MOVES_auv5_pose_20260925.tsv	cleanup_record/moves/MOVES_auv5_pose_20260925.tsv	file	1	5481	cleanup_record 分类
+cleanup_record/MOVES_auv5_pose_20260926.tsv	cleanup_record/moves/MOVES_auv5_pose_20260926.tsv	file	1	8019	cleanup_record 分类
+cleanup_record/MOVES_data_20260925.tsv	cleanup_record/moves/MOVES_data_20260925.tsv	file	1	2606	cleanup_record 分类
+cleanup_record/MOVES_runs_output_20260925.tsv	cleanup_record/moves/MOVES_runs_output_20260925.tsv	file	1	1269	cleanup_record 分类
+data/derived/AUV_2_selected_2000	_archive/auv5/derived_AUV_2_selected_2000	dir	1661	198425802	旧筛图产物（09-10 时代），已被 AUV_5/6 池子取代
+data/derived/AUV_3_selected_2000	_archive/auv5/derived_AUV_3_selected_2000	dir	2000	258455276	旧筛图产物（09-11 时代），同上
+data/datasets/AUV_5_stage1_origin	_archive/auv5/datasets_AUV_5_stage1_origin	dir	2312	140348122	0 引用；修正前的那版（gate-w_clear + v0fix）
+runs/auv6/train/stage1_clear	_archive/auv6/superseded_20261006/train_stage1_clear	dir	9	34238637	COCO 起跑 300ep 只跑到 79 早停，被 clear_only/coco2/v2/v3 取代
+output/quant_records/stage1_v3/gate_kpt_stage1_v3_bayese_640x640_nv12_optimized_float_model.onnx	_archive/quant/stage1_v3_intermediates/gate_kpt_stage1_v3_bayese_640x640_nv12_optimized_float_model.onnx	file	1	10766654	校验用不到（cos 校验只读 original_float + calibrated + quant_info）
+output/quant_records/stage1_v3/gate_kpt_stage1_v3_bayese_640x640_nv12_quantized_model.onnx	_archive/quant/stage1_v3_intermediates/gate_kpt_stage1_v3_bayese_640x640_nv12_quantized_model.onnx	file	1	3040333	校验用不到（cos 校验只读 original_float + calibrated + quant_info）
+output/quant_records/stage1_v3/main_graph_subgraph_0.html	_archive/quant/stage1_v3_intermediates/main_graph_subgraph_0.html	file	1	2299554	同上
+output/quant_records/stage1_v3/main_graph_subgraph_0.json	_archive/quant/stage1_v3_intermediates/main_graph_subgraph_0.json	file	1	90013	同上
+data/derived/tmp6_estimate.csv	_archive/auv6/tmp6_estimate_20260927.csv	file	1	714054	09-27 临时估计表
+data/derived/tmp-AUV-6	data/derived/AUV_6_frames_src	dir	13044	1685084969	名字写着 tmp 但被 auv6_pose 两个工具的 --src 指向；改名去 tmp
+data/raw/AUV6.mjpeg	data/raw/AUV_6.mjpeg	file	1	3757531868	命名统一 AUV6→AUV_6
+data/frames/AUV6-frames	data/frames/AUV_6_frames	dir	13044	3067683109	命名统一 AUV6→AUV_6
+data/derived/AUV_6_frames_src/AUV6-frames	data/derived/AUV_6_frames_src/AUV_6_frames	dir	13044	1685080873	命名统一
+output/preview/small_ball/cv_ball_cov0.35_a30.csv	output/preview/small_ball/tables/cv_ball_cov0.35_a30.csv	file	1	49963	small_ball 分类
+output/preview/small_ball/cv_ball_cov0.45_a40.csv	output/preview/small_ball/tables/cv_ball_cov0.45_a40.csv	file	1	48282	small_ball 分类
+output/preview/small_ball/cv_ball.csv	output/preview/small_ball/tables/cv_ball.csv	file	1	47632	small_ball 分类
+output/preview/small_ball/cv_ball_final.csv	output/preview/small_ball/tables/cv_ball_final.csv	file	1	49376	small_ball 分类
+output/preview/small_ball/cv_tune.csv	output/preview/small_ball/tables/cv_tune.csv	file	1	6069	small_ball 分类
+output/preview/small_ball/pc_pt_on_adomain640.csv	output/preview/small_ball/tables/pc_pt_on_adomain640.csv	file	1	55609	small_ball 分类
+output/preview/small_ball/yolo_ball.csv	output/preview/small_ball/tables/yolo_ball.csv	file	1	50824	small_ball 分类
+output/preview/small_ball/cv_ball_cov0.35_a30.json	output/preview/small_ball/tables/cv_ball_cov0.35_a30.json	file	1	337192	small_ball 分类
+output/preview/small_ball/cv_ball_cov0.45_a40.json	output/preview/small_ball/tables/cv_ball_cov0.45_a40.json	file	1	321521	small_ball 分类
+output/preview/small_ball/cv_ball_final.json	output/preview/small_ball/tables/cv_ball_final.json	file	1	330637	small_ball 分类
+output/preview/small_ball/cv_ball.json	output/preview/small_ball/tables/cv_ball.json	file	1	320163	small_ball 分类
+output/preview/small_ball/cv_tune.json	output/preview/small_ball/tables/cv_tune.json	file	1	824	small_ball 分类
+output/preview/small_ball/pc_pt_on_adomain640.json	output/preview/small_ball/tables/pc_pt_on_adomain640.json	file	1	712365	small_ball 分类
+output/preview/small_ball/summary.json	output/preview/small_ball/tables/summary.json	file	1	232	small_ball 分类
+output/preview/small_ball/yolo_ball.json	output/preview/small_ball/tables/yolo_ball.json	file	1	321067	small_ball 分类
+output/preview/small_ball/board	output/preview/small_ball/renders/board	dir	14	3238747	small_ball 分类
+output/preview/small_ball/compare	output/preview/small_ball/renders/compare	dir	35	30343244	small_ball 分类
+output/preview/small_ball/cvonly	output/preview/small_ball/renders/cvonly	dir	7	5262116	small_ball 分类
+output/preview/small_ball/neither	output/preview/small_ball/renders/neither	dir	8	5770640	small_ball 分类
+output/preview/small_ball/sheets_cv	output/preview/small_ball/renders/sheets_cv	dir	35	29046370	small_ball 分类
+output/preview/small_ball/sheets_cv_final	output/preview/small_ball/renders/sheets_cv_final	dir	35	29110011	small_ball 分类
+output/preview/small_ball/sheets_yolo	output/preview/small_ball/renders/sheets_yolo	dir	35	28952596	small_ball 分类
+output/preview/small_ball/summary.jpg	output/preview/small_ball/renders/summary.jpg	file	1	185223	small_ball 分类
+raw-data/auv_20260926_232927	raw-data/20260926/auv_20260926_232927	dir	2	162330366	按天聚类 → 20260926
+raw-data/auv_20260927_155133	raw-data/20260927/auv_20260927_155133	dir	2	227936	按天聚类 → 20260927
+raw-data/auv_20260927_155144	raw-data/20260927/auv_20260927_155144	dir	2	178729551	按天聚类 → 20260927
+raw-data/auv_20260927_160333	raw-data/20260927/auv_20260927_160333	dir	1	148563613	按天聚类 → 20260927
+raw-data/auv_20260927_161858	raw-data/20260927/auv_20260927_161858	dir	1	81577481	按天聚类 → 20260927
+raw-data/auv_20260927_164807	raw-data/20260927/auv_20260927_164807	dir	1	106610637	按天聚类 → 20260927
+raw-data/auv_20260927_165307	raw-data/20260927/auv_20260927_165307	dir	1	131571793	按天聚类 → 20260927
+raw-data/auv_20260927_172803	raw-data/20260927/auv_20260927_172803	dir	1	199657125	按天聚类 → 20260927
+raw-data/auv_20260927_173057	raw-data/20260927/auv_20260927_173057	dir	1	104621729	按天聚类 → 20260927
+raw-data/auv_20260927_174854	raw-data/20260927/auv_20260927_174854	dir	1	221300801	按天聚类 → 20260927
+raw-data/auv_20260927_175027	raw-data/20260927/auv_20260927_175027	dir	1	141784269	按天聚类 → 20260927
+raw-data/auv_20260927_175234	raw-data/20260927/auv_20260927_175234	dir	1	155205801	按天聚类 → 20260927
+raw-data/auv_20260927_175418	raw-data/20260927/auv_20260927_175418	dir	1	236645557	按天聚类 → 20260927
+raw-data/auv_20260927_175534	raw-data/20260927/auv_20260927_175534	dir	1	396523549	按天聚类 → 20260927
+raw-data/auv_20260927_175844	raw-data/20260927/auv_20260927_175844	dir	1	80577653	按天聚类 → 20260927
+raw-data/auv_20260927_180018	raw-data/20260927/auv_20260927_180018	dir	1	465933633	按天聚类 → 20260927
+raw-data/auv_20260927_180238	raw-data/20260927/auv_20260927_180238	dir	1	70563865	按天聚类 → 20260927
+raw-data/auv_20260927_180335	raw-data/20260927/auv_20260927_180335	dir	1	139917129	按天聚类 → 20260927
+raw-data/auv_20260927_181047	raw-data/20260927/auv_20260927_181047	dir	1	106990441	按天聚类 → 20260927
+raw-data/auv_20260927_183519	raw-data/20260927/auv_20260927_183519	dir	1	229467313	按天聚类 → 20260927
+raw-data/auv_20260927_183649	raw-data/20260927/auv_20260927_183649	dir	1	114455485	按天聚类 → 20260927
+raw-data/auv_20260927_184002	raw-data/20260927/auv_20260927_184002	dir	1	83817093	按天聚类 → 20260927
+raw-data/auv_20260927_184550	raw-data/20260927/auv_20260927_184550	dir	1	95016749	按天聚类 → 20260927
+raw-data/auv_20260927_184837	raw-data/20260927/auv_20260927_184837	dir	1	443465005	按天聚类 → 20260927
+raw-data/auv_20260928_214945	raw-data/20260928/auv_20260928_214945	dir	1	242572845	按天聚类 → 20260928
+raw-data/auv_20260928_215041	raw-data/20260928/auv_20260928_215041	dir	1	196656193	按天聚类 → 20260928
+raw-data/auv_20260928_215404	raw-data/20260928/auv_20260928_215404	dir	2	225853	按天聚类 → 20260928
+raw-data/auv_20260928_215410	raw-data/20260928/auv_20260928_215410	dir	2	206945844	按天聚类 → 20260928
+raw-data/auv_20260928_215656	raw-data/20260928/auv_20260928_215656	dir	2	95277891	按天聚类 → 20260928
+raw-data/auv_20260928_220558	raw-data/20260928/auv_20260928_220558	dir	2	150382215	按天聚类 → 20260928
+raw-data/auv_20260928_222747	raw-data/20260928/auv_20260928_222747	dir	2	212172355	按天聚类 → 20260928
+raw-data/auv_20260928_222845	raw-data/20260928/auv_20260928_222845	dir	2	70042341	按天聚类 → 20260928
+raw-data/auv_20260928_223342	raw-data/20260928/auv_20260928_223342	dir	2	75153657	按天聚类 → 20260928
+raw-data/auv_20260928_223543	raw-data/20260928/auv_20260928_223543	dir	2	628698101	按天聚类 → 20260928
+raw-data/auv_20260928_224000	raw-data/20260928/auv_20260928_224000	dir	2	604400139	按天聚类 → 20260928
+raw-data/auv_20260928_225616	raw-data/20260928/auv_20260928_225616	dir	2	134814444	按天聚类 → 20260928
+raw-data/auv_20260928_225908	raw-data/20260928/auv_20260928_225908	dir	2	155815108	按天聚类 → 20260928
+raw-data/auv_20260928_230104	raw-data/20260928/auv_20260928_230104	dir	2	1143487143	按天聚类 → 20260928
+raw-data/auv_20260928_230806	raw-data/20260928/auv_20260928_230806	dir	2	162718144	按天聚类 → 20260928
+raw-data/auv_20260928_231331	raw-data/20260928/auv_20260928_231331	dir	2	89391131	按天聚类 → 20260928
+raw-data/auv_20260928_231518	raw-data/20260928/auv_20260928_231518	dir	2	141848066	按天聚类 → 20260928
+raw-data/auv_20260928_231907	raw-data/20260928/auv_20260928_231907	dir	2	329137280	按天聚类 → 20260928
+raw-data/auv_20260928_232041	raw-data/20260928/auv_20260928_232041	dir	2	93258838	按天聚类 → 20260928
+raw-data/auv_20260928_232413	raw-data/20260928/auv_20260928_232413	dir	2	571625290	按天聚类 → 20260928
+raw-data/auv_20260928_232706	raw-data/20260928/auv_20260928_232706	dir	2	202762274	按天聚类 → 20260928
+raw-data/auv_20260928_232923	raw-data/20260928/auv_20260928_232923	dir	2	138812312	按天聚类 → 20260928
+raw-data/auv_20261002_225638	raw-data/20261002/auv_20261002_225638	dir	2	162480472	按天聚类 → 20261002
+raw-data/auv_20261002_225857	raw-data/20261002/auv_20261002_225857	dir	2	95628352	按天聚类 → 20261002
+raw-data/auv_20261002_230404	raw-data/20261002/auv_20261002_230404	dir	2	776406654	按天聚类 → 20261002
+raw-data/auv_20261002_230649	raw-data/20261002/auv_20261002_230649	dir	2	104251754	按天聚类 → 20261002
+raw-data/auv_20261002_231051	raw-data/20261002/auv_20261002_231051	dir	2	470155338	按天聚类 → 20261002
+raw-data/auv_20261002_231505	raw-data/20261002/auv_20261002_231505	dir	2	624296030	按天聚类 → 20261002
+raw-data/auv_20261002_232254	raw-data/20261002/auv_20261002_232254	dir	2	116687200	按天聚类 → 20261002
+raw-data/auv_20261002_234943	raw-data/20261002/auv_20261002_234943	dir	2	118255959	按天聚类 → 20261002
+raw-data/auv_20261003_223237	raw-data/20261003/auv_20261003_223237	dir	2	56541	按天聚类 → 20261003
+raw-data/auv_20261003_223242	raw-data/20261003/auv_20261003_223242	dir	2	258884748	按天聚类 → 20261003
+raw-data/auv_20261003_223716	raw-data/20261003/auv_20261003_223716	dir	2	61991478	按天聚类 → 20261003
+raw-data/auv_20261003_225204	raw-data/20261003/auv_20261003_225204	dir	2	9578528	按天聚类 → 20261003
+raw-data/auv_20261003_225544	raw-data/20261003/auv_20261003_225544	dir	2	35178994	按天聚类 → 20261003
+raw-data/auv_20261003_225941	raw-data/20261003/auv_20261003_225941	dir	2	18062421	按天聚类 → 20261003
+raw-data/auv_20261003_230213	raw-data/20261003/auv_20261003_230213	dir	2	2027436	按天聚类 → 20261003
+raw-data/auv_20261003_230439	raw-data/20261003/auv_20261003_230439	dir	2	2422873	按天聚类 → 20261003
+raw-data/auv_20261003_231359	raw-data/20261003/auv_20261003_231359	dir	2	2193303	按天聚类 → 20261003
+raw-data/auv_20261003_231938	raw-data/20261003/auv_20261003_231938	dir	2	3303150	按天聚类 → 20261003
+raw-data/auv_20261003_232244	raw-data/20261003/auv_20261003_232244	dir	2	170075734	按天聚类 → 20261003
+raw-data/auv_20261003_232724	raw-data/20261003/auv_20261003_232724	dir	2	276625353	按天聚类 → 20261003
+raw-data/auv_20261003_233323	raw-data/20261003/auv_20261003_233323	dir	2	113952955	按天聚类 → 20261003
+raw-data/auv_20261003_235321	raw-data/20261003/auv_20261003_235321	dir	2	95820952	按天聚类 → 20261003
+raw-data/auv_20261004_000457	raw-data/20261004/auv_20261004_000457	dir	2	28937805	按天聚类 → 20261004
+raw-data/auv_20261004_000817	raw-data/20261004/auv_20261004_000817	dir	2	324311555	按天聚类 → 20261004
+raw-data/auv_20261004_001114	raw-data/20261004/auv_20261004_001114	dir	2	76574	按天聚类 → 20261004
+raw-data/auv_20261004_223224	raw-data/20261004/auv_20261004_223224	dir	2	255779232	按天聚类 → 20261004
+raw-data/auv_20261004_224451	raw-data/20261004/auv_20261004_224451	dir	2	103913882	按天聚类 → 20261004
+raw-data/auv_20261004_224853	raw-data/20261004/auv_20261004_224853	dir	2	96935412	按天聚类 → 20261004
+raw-data/auv_20261004_225316	raw-data/20261004/auv_20261004_225316	dir	2	151178001	按天聚类 → 20261004
+raw-data/auv_20261004_225432	raw-data/20261004/auv_20261004_225432	dir	2	419919606	按天聚类 → 20261004
+raw-data/auv_20261004_230638	raw-data/20261004/auv_20261004_230638	dir	2	62964309	按天聚类 → 20261004
+raw-data/auv_20261004_235113	raw-data/20261004/auv_20261004_235113	dir	2	266183168	按天聚类 → 20261004
+raw-data/auv_20261005_220719	raw-data/20261005/auv_20261005_220719	dir	2	88793	按天聚类 → 20261005
+raw-data/auv_20261005_220727	raw-data/20261005/auv_20261005_220727	dir	2	92897307	按天聚类 → 20261005
+raw-data/auv_20261005_221646	raw-data/20261005/auv_20261005_221646	dir	2	53289390	按天聚类 → 20261005
+raw-data/auv_20261005_222128	raw-data/20261005/auv_20261005_222128	dir	2	66166273	按天聚类 → 20261005
+raw-data/auv_20261005_222239	raw-data/20261005/auv_20261005_222239	dir	2	398723461	按天聚类 → 20261005
+raw-data/auv_20261005_222609	raw-data/20261005/auv_20261005_222609	dir	2	25549959	按天聚类 → 20261005
+raw-data/auv_20261005_222753	raw-data/20261005/auv_20261005_222753	dir	2	68342474	按天聚类 → 20261005
+raw-data/auv_20261005_223121	raw-data/20261005/auv_20261005_223121	dir	2	119158992	按天聚类 → 20261005
+raw-data/auv_20261005_223952	raw-data/20261005/auv_20261005_223952	dir	2	78141252	按天聚类 → 20261005
+raw-data/auv_20261005_224125	raw-data/20261005/auv_20261005_224125	dir	2	41408725	按天聚类 → 20261005
+raw-data/auv_20261005_225455	raw-data/20261005/auv_20261005_225455	dir	2	681181375	按天聚类 → 20261005
+raw-data/auv_20261005_230245	raw-data/20261005/auv_20261005_230245	dir	2	196497982	按天聚类 → 20261005
+raw-data/auv_20261005_232434	raw-data/20261005/auv_20261005_232434	dir	2	136088879	按天聚类 → 20261005
+raw-data/auv_20261005_232755	raw-data/20261005/auv_20261005_232755	dir	2	1313386321	按天聚类 → 20261005
+raw-data/auv_20261005_233640	raw-data/20261005/auv_20261005_233640	dir	2	28884974	按天聚类 → 20261005
+raw-data/auv_20261005_233746	raw-data/20261005/auv_20261005_233746	dir	2	95981866	按天聚类 → 20261005
+raw-data/auv_20261005_233901	raw-data/20261005/auv_20261005_233901	dir	2	128599008	按天聚类 → 20261005
+raw-data/auv_20261005_234157	raw-data/20261005/auv_20261005_234157	dir	2	116362766	按天聚类 → 20261005
+raw-data/auv_20261005_234427	raw-data/20261005/auv_20261005_234427	dir	2	191941958	按天聚类 → 20261005
+raw-data/auv_20261005_234621	raw-data/20261005/auv_20261005_234621	dir	2	165754788	按天聚类 → 20261005
+raw-data/auv_20261005_235522	raw-data/20261005/auv_20261005_235522	dir	2	192469924	按天聚类 → 20261005
+raw-data/auv_20261005_235522	raw-data/_dups/auv_20261005_235522	dir	2	192469924	与 20261005/auv_20261005_235522 逐字节相同的重复件（同一次录像的两份拷贝）
+raw-data/0926/auv_20260926_221928	raw-data/20260926/auv_20260926_221928	dir	2	159481247	按天聚类（从 0926/ 拉平到日期目录）
+raw-data/0926/auv_20260926_222503	raw-data/20260926/auv_20260926_222503	dir	2	152158953	按天聚类（从 0926/ 拉平到日期目录）
+raw-data/0926/auv_20260926_223854	raw-data/20260926/auv_20260926_223854	dir	2	102594727	按天聚类（从 0926/ 拉平到日期目录）
+raw-data/0926/auv_20260926_224903	raw-data/20260926/auv_20260926_224903	dir	2	171069999	按天聚类（从 0926/ 拉平到日期目录）
+raw-data/0926/auv_20260926_225450	raw-data/20260926/auv_20260926_225450	dir	2	163319750	按天聚类（从 0926/ 拉平到日期目录）
+raw-data/0926/auv_20260926_225637	raw-data/20260926/auv_20260926_225637	dir	2	92665549	按天聚类（从 0926/ 拉平到日期目录）
+raw-data/0926/auv_20260926_231214	raw-data/20260926/auv_20260926_231214	dir	2	3758000493	按天聚类（从 0926/ 拉平到日期目录）
+raw-data/0926/auv_20260926_232527	raw-data/20260926/auv_20260926_232527	dir	2	176109867	按天聚类（从 0926/ 拉平到日期目录）

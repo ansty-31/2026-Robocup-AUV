@@ -1,9 +1,6 @@
 # -*- coding: utf-8 -*-
 """gate/percept/gate_detector.py — 板端相机模型 + gate 后端装配（组合根用，非纯函数）
-
-- board_camera()：按 settings 构造与"检测坐标域"一致的 CameraModel（§4.2）
-- build_gate_backend()：按 model.mode 选择 Mock 或真实 keypoint 后端；
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import os
@@ -33,12 +30,7 @@ def board_camera():
                                cy=float(front.height) / 2.0)
 
 def build_gate_backend(conf=None, vis_thr=None):
-    """返回 gate 检测后端或 None。
-
-    mode=mock → MockGateBackend（无硬件闭环调试）
-
-    conf/vis_thr：显式覆盖（预览工具用，如 `--conf`）；None = 走 cfg
-    """
+    """返回 gate 检测后端或 None。"""
     if S.vision.model.mode == "mock":
         from gate.percept.mock import MockGateBackend
         return MockGateBackend(board_camera())

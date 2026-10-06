@@ -1,23 +1,6 @@
 # -*- coding: utf-8 -*-
-"""
-udp_server.py - RDK-side UDP remote-control bridge for keyboard testing.
-the existing 0xA5 11-byte RC-compatible frame to STM32 through uart.py.
-Packet format:
-surge,sway,heave,yaw
-Each value is a float in [-1.0, 1.0].
-Examples:
-1,0,0,0      forward
-0,-1,0,0     sway left
-0,0,1,0      heave up
-0,0,0.0,0.6  yaw right
-stop         neutral
-Typical RDK command:
-python3 udp_server.py
-Dry run without STM32 serial hardware:
-python3 udp_server.py --sim
-Telemetry (STM32 -> RDK): UartController 收 14B 遥测帧(0xAA55 + 深度/姿态 + 校验和，
-深度 ≤ min_depth_m(默认 0.3m) 时禁止上浮——键盘按"上浮"也不会把机身顶出水面。
-遥测打印：[UART←] depth=...（节流 comm.debug.tel_log_ms）。"""
+"""Examples:
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import os as _os, sys as _sys
 if __package__ in (None, ""):        # 支持直接 python3 manual/xxx.py 运行
     _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))

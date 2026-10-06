@@ -1,15 +1,6 @@
 # -*- coding: utf-8 -*-
 """gate_postproc.py — 检测后处理（解码之后、下游之前）：可信角点 / 几何合法 / 去重 / 选门键
-不是模型契约；模型契约见该文件 §1–§3。
-低 v 角点的**坐标是垃圾**（规范 §7.2）：不参与 PnP、也不用来推"门中心"，但**不能据此丢整帧** ——
-门框不全时该降级处理（`parse_kpt_mode` 已经这么做）。
-2. **L/R 归一 → 几何合法**（顺序见 `apply()`）：先按"门框正反两面一致"把左右标反的实例**换回来**
-（`lr_normalize`，占位 `(0,0)` 不参与、只看到一侧不动），再判几何（`TL.x<TR.x`、`BL.x<BR.x`、
-3. **去重（重复框）**：同一个门被两个尺度各检出一次 → 丢小框。判据 = **小框 conf 更低** 且
-**≥ MIN_EDGES 条边与小框短边在 EDGE_TOL 比例内重合**。
-4. **选门键**（函数在这里，**决策在 `gate_task._pick_gate`**）：
-`near`（默认，规范 §4）= **近距离优先**，用**框宽做测距代理**（`z ≈ fx·W/w`，单调）；
-调用点：`gate_decode.GateKeypointBackend.detect()` 在解码后调 `apply()`（几何 + 去重），"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import numpy as np
@@ -90,9 +81,6 @@ def v_min(conf_thr=None):
     except Exception:
         return _D_VMIN
 
-# ---------------------------------------------------------------------------
-# 1) 可信角点
-# ---------------------------------------------------------------------------
 def trusted_mask(det, conf_thr=None):
     """(K,) bool：本实例里**可信**的角点。无角点信息 → 全 False。"""
     kc = getattr(det, "kpt_conf", None)
@@ -108,11 +96,7 @@ def conf_sum(det):
     return 0.0 if kc is None else float(np.asarray(kc, np.float64).sum())
 
 def vis_thr(conf_thr=None):
-    """**可见性下限**：显式参数 > cfg `vision.gate.keypoint.vis_thr` > V_MIN。
-
-    与 `trusted_mask` 的 V_MIN 口径**不是一个东西**：可见只说明"这个角点有坐标"，
-    几何检验 / L-R 归一看它（最基本的检查，不该被逐角点置信度卡住）。
-    """
+    """**可见性下限**：显式参数 > cfg `vision.gate.keypoint.vis_thr` > V_MIN。"""
     try:
         import base.cfg.settings as S
         v = S.get("vision.gate.keypoint.vis_thr", None)
@@ -123,8 +107,7 @@ def vis_thr(conf_thr=None):
     return v_min(conf_thr)
 
 def visible_mask(det, v_thr=None, frame_wh=None):
-    """(K,) bool：本实例里**可见**的角点 = 置信度 ≥ 阈值 **且坐标不是 `(0,0)` 占位**。
-    模型对没找到的角点会输出 `(0,0)` 而 `v` 仍可能不低 —— 只看 `v` 会把占位当可见，"""
+    """(K,) bool：本实例里**可见**的角点 = 置信度 ≥ 阈值 **且坐标不是 `(0,0)` 占位**。"""
     kc = getattr(det, "kpt_conf", None)
     kp = getattr(det, "kpts", None)
     if kc is None or kp is None:
@@ -159,9 +142,7 @@ def swap_corners(det, pairs=((0, 1), (3, 2))):
     return True
 
 def lr_normalize(det, v_thr=None, frame_wh=None):
-    """**L/R 归一**（用户 2026-09-28 定）：门框正反两面一致 ⇒ 模型把左右标反时**自己换回来**。
-    判据：左列 `TL,BL` 与右列 `TR,BR` **两侧都至少有一个可见角点**，且**左列可见点的 x 均值 > 右列**
-    Returns: True = 检测到标反并已交换；False = 没动。"""
+    """**L/R 归一**（用户 2026-09-28 定）：门框正反两面一致 ⇒ 模型把左右标反时**自己换回来**。"""
     kp = getattr(det, "kpts", None)
     if kp is None:
         return False
@@ -181,9 +162,6 @@ def lr_normalize(det, v_thr=None, frame_wh=None):
         return False                                  # 已经 L 在左
     return swap_corners(det)
 
-# ---------------------------------------------------------------------------
-# 2) 几何合法
-# ---------------------------------------------------------------------------
 def _seg_cross(p1, p2, p3, p4):
     """线段 (p1,p2) 与 (p3,p4) 是否真相交（共线/端点相触不算）。"""
     def cross(o, a, b):
@@ -193,13 +171,7 @@ def _seg_cross(p1, p2, p3, p4):
     return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0))
 
 def quad_legal(kpts, ids=None):
-    """四角是否**顺序合法 + 不自交** —— **只判"两端都可见"的那些关系**（2026-09-28 改）。
-    Args:
-    kpts: (K,2) 像素（顺序 TL,TR,BR,BL）
-    ids:  **可见**角点索引（`None` = 当作全可见）
-    Returns:
-    True = 合法（或点数 ≠ 4 —— 非四角实例不归本函数管）
-    · 自交只在**四角都可见**时判（判不了就不判）。"""
+    """四角是否**顺序合法 + 不自交** —— **只判"两端都可见"的那些关系**（2026-09-28 改）。"""
     if kpts is None:
         return True
     k = np.asarray(kpts, np.float64)
@@ -225,9 +197,6 @@ def quad_legal(kpts, ids=None):
         return False
     return True
 
-# ---------------------------------------------------------------------------
-# 3) 去重（同一个门被两个尺度各检出一次）
-# ---------------------------------------------------------------------------
 def _edge_hits(small, big, tol_px):
     """小框与"对应边"重合的条数（左/上/右/下 各比一次）。"""
     hits = 0
@@ -270,14 +239,8 @@ def dedup(dets, conf_thr=None, cfg=None, log=None):
         out.append(d)
     return out
 
-# ---------------------------------------------------------------------------
-# 统一入口（解码后立刻调用）
-# ---------------------------------------------------------------------------
 def apply(dets, conf_thr=None, cfg=None, log=None, frame_wh=None):
-    """解码后处理（规范 §4 的**固定顺序**）：**① L/R 归一 → ② 几何合法 → ③ 去重**。
-    · ② 只判"两端都可见"的关系（`visible_mask` 口径，**不是** V_MIN 可信口径）；
-    · ③ 重复框去重（小框 conf 更低 且 ≥2 条边重合）。
-    返回新列表（保序）；`Det` 对象本身会被 ① 就地改写（交换角点），因为下游 PnP 要用换好的角点。"""
+    """解码后处理（规范 §4 的**固定顺序**）：**① L/R 归一 → ② 几何合法 → ③ 去重**。"""
     c = postproc_cfg(cfg)
     out = []
     for d in dets:
@@ -294,9 +257,6 @@ def apply(dets, conf_thr=None, cfg=None, log=None, frame_wh=None):
         out.append(d)
     return dedup(out, conf_thr=conf_thr, cfg=cfg, log=log)
 
-# ---------------------------------------------------------------------------
-# 4) 选门键（决策在 gate_task._pick_gate）
-# ---------------------------------------------------------------------------
 def near_key(det, conf_thr=None):
     """规范 §4「近距离优先」：框宽 = 测距代理（`z ≈ fx·W/w`，单调）→ 大的先。"""
     return (int(det.w), n_trusted(det, conf_thr), conf_sum(det), float(det.score))

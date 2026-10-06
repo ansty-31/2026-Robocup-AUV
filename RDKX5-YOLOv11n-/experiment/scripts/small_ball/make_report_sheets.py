@@ -12,9 +12,9 @@
 用法：
     /home/ansty/anaconda3/envs/yolov8/bin/python experiment/scripts/small_ball/make_report_sheets.py \
         --src data/derived/small_ball_selected_700 \
-        --cv output/preview/small_ball/cv_ball_cov0.35_a30.json \
-        --cv-tight output/preview/small_ball/cv_ball_cov0.45_a40.json \
-        --yolo output/preview/small_ball/yolo_ball.json \
+        --cv output/preview/small_ball/tables/cv_ball_cov0.35_a30.json \
+        --cv-tight output/preview/small_ball/tables/cv_ball_cov0.45_a40.json \
+        --yolo output/preview/small_ball/tables/yolo_ball.json \
         --outdir output/preview/small_ball
 """
 

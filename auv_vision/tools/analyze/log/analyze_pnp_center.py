@@ -1,14 +1,7 @@
 # -*- coding: utf-8 -*-
 """tools/analyze/log/analyze_pnp_center.py — 位姿档"居中误差"到底可不可信？（p3p vs full）
-
-动机：位姿档的横向误差 `dxn` 是**把门原点(0,0,0)用解出的位姿投影回图像**算的
-
-本工具用真实录制的角点 dump 对比两套横向误差：
-
-判据：
-
 用法：python3 tools/analyze/log/analyze_pnp_center.py <dump.jsonl> [...]
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import json

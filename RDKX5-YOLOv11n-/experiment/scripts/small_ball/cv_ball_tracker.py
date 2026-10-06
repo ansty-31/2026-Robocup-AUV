@@ -106,7 +106,10 @@ class BallTracker:
             p_use = self.p
             if self.proc_side and max(sub.shape[:2]) > self.proc_side:
                 sc = self.proc_side / float(max(sub.shape[:2]))
-                sub = cv2.resize(sub, (self.proc_side, self.proc_side),
+                # ⚠️ 必须**按同一比例缩两轴**（fx=fy=sc），不能 resize 到 (proc, proc)：
+                # ROI 贴着画面边缘时会被截成非正方形（例：427×360），硬拉成正方形等于改纵横比，
+                # 圆心/半径回算就飘（自测用例抓到过 cy 差 52px）。
+                sub = cv2.resize(sub, None, fx=sc, fy=sc,
                                  interpolation=cv2.INTER_AREA)
                 p_use = replace(self.p, min_area=max(6, int(round(self.p.min_area * sc * sc))),
                                 r_min=max(3.0, self.p.r_min * sc))
@@ -153,7 +156,7 @@ class BallTracker:
         cand = []
         for d in dets:
             edge = min(d.cx - x0, d.cy - y0, x1 - d.cx, y1 - d.cy)
-            if edge < max(self.edge_margin, 6.0 / max(sc, 1e-6)):      # 贴着裁剪边 → 可能被切断，不可信
+            if edge < self.edge_margin + 1.0 / max(sc, 1e-6):      # 贴着裁剪边 → 可能被切断，不可信
                 continue
             jump = np.hypot(d.cx - self.prev.cx, d.cy - self.prev.cy) / max(self.prev.r, 1.0)
             cand.append((jump, d))

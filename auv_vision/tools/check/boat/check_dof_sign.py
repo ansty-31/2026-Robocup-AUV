@@ -1,12 +1,7 @@
 # -*- coding: utf-8 -*-
 """tools/check/boat/check_dof_sign.py — **DOF 通道物理符号自检**（板端真实串口 + 相机）
-转向环极性 σ 是**算出来的**（`common/motion/turn_deg.py::yaw_sign()` =
-这两个符号旋钮只能靠物理世界定一次 —— 相机是唯一不受 DOF/遥测符号影响的量，
-本脚本就是定它们的那把尺子：量一次、写进 cfg，此后 σ 自动跟着走。
-本脚本用**视觉**当独立真值：
 用法（板端、水里、真实串口；**必须显式 --go 才会发推力**）：
-输出：每相位的 dx/psi/遥测 yaw 均值差 → 结论 + 该改哪一行 cfg。
-安全：任何退出路径都会补发中性帧（try/finally + 信号处理）；hold 期间 50Hz 心跳。"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import argparse

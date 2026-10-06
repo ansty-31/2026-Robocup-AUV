@@ -86,3 +86,39 @@ gate:  # 过门
             max_missing_frames: 5, min_frames: 2}
   pnp: {reproj_px: 20.0, z_min: 0.2, z_max: 15.0, refine: true,
         max_z_jump_m: 0.8}
+
+grab:  # 任务三 夹取小球（**纯 CV 感知，不走 BPU**；实测见 grab/README.md）
+  detect: {mode: cv}  # cv | mock（mock = 不注册后端，交回 legacy/mock）
+  kind: red_ball     # 返回的 Det.kind（与 model.labels 对齐）
+  cv:  # 红球检测阈值 = 700 帧扫参 + 板端复核后的工作点；删掉任一键都用代码同值默认
+    dom_min: 30      # R - max(G,B) 下限（绝对红占优）
+    rel_min: 0.30    # (R-max(G,B))/(R+max(G,B)+1) 下限（救水下衰减的暗球）
+    s_min: 40
+    v_min: 60
+    close_k: 9       # 填高光孔的闭运算核
+    open_k: 5
+    min_area: 30
+    circ_min: 0.30
+    cov_min: 0.35
+    min_arc_deg: 150.0
+    r_min: 25.0      # 半径下限：<30px 的检出实测是池底图案红点/瓦缝红光
+  # ★ 目标色集合（用户 2026-10-06 定）：**比赛用粉球与黄球**；现在先用红球测逻辑与运动。
+  #   "红球外的可以都毙了" ⇒ 现在 `active: [red]`，其余色**根本不参与检测**（红掩膜天然只认红）。
+  #   红球阈值 = 上面的 `grab.cv`（700 帧真图已标定，单一来源，别搬）。
+  #   其余颜色必须 `enable: true` + `calibrated: true` + 关键键写全，才会被 `Params.from_target`
+  #   认下来（否则返回 None = "这个颜色还不存在"）—— **绝不用红球的默认值冒充**。
+  #   ⚠️ 黄球不能照抄红那套判据：`dom = R − max(G,B)` 对黄色恒 ≈0 ⇒ 判据形式本身要重新定
+  #      （候选：① 色相带 + s/v 门限；② 换成"反色通道"的 min(R,G)−B 形式）。**实测后再选。**
+  #   量法（待做）：录真图 → 量目标区内的 dom/rel/HSV 分布 → 填分位值（如 dom 的 p10）。
+  targets:
+    active: [red]            # 生效顺序（检测与验色都用它）；比赛前改成 [pink, yellow]
+    pink:   {enable: false, calibrated: false, dom_min: null, rel_min: null, use_rel: null,
+             use_hue: null, h_lo: null, h_hi: null, h_hi2: null, s_min: null, v_min: null}
+    yellow: {enable: false, calibrated: false, dom_min: null, rel_min: null, use_rel: null,
+             use_hue: null, h_lo: null, h_hi: null, h_hi2: null, s_min: null, v_min: null}
+    #   ↑ 全 null = **还没量**（"准备阈值"= 槽位 + 闸 + 量法；数值等素材）
+  track:  # 流式 ROI 跟踪（关掉=每帧全图，板端 15 FPS；打开=跟踪稳态 ~39 FPS）
+    enable: true
+    margin: 64       # ROI 在球外每边多留的像素（实测最大帧间位移 ≈40px）
+    proc_side: 256   # 0 = 关尺度归一化；>0 = ROI 缩到该边长再检测（成本与球大小无关）
+    max_lost: 3      # 连续丢几帧后回全图搜索

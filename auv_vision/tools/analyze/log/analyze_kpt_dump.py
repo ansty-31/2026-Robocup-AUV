@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 """tools/analyze/log/analyze_kpt_dump.py — 从 preview_detect --dump 的 JSONL 看角点可得率与 PnP 命中率。
-
-用途：回答"放宽哪个阈值能真正提高位姿可用率"（conf_thr / vis_thr / reproj_px）。
 用法：python3 tools/analyze/log/analyze_kpt_dump.py <dump.jsonl> [more.jsonl ...]
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import collections

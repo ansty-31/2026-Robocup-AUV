@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""板端测试的汇总面板 + 可视化 sheet（产出到 output/preview/small_ball/board/）。
+"""板端测试的汇总面板 + 可视化 sheet（产出到 output/preview/small_ball/renders/board/）。
 
 面板内容：三条输入链路的**阶段耗时堆叠**、端到端 FPS、命中率对比、以及板端 CV 的对照。
 sheet：把**板端 none-stretch 链**的框画在原始 720p 上（该链路的框就在原图坐标，可直接叠）。
@@ -29,7 +29,8 @@ STAGES = [("preprocess_A", "preprocess"), ("nv12", "nv12"), ("bpu_run", "BPU"),
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dir", default="output/preview/small_ball")
+    ap.add_argument("--dir", default="output/preview/small_ball/renders",
+                        help="工作区根（board/ 与拼版图写在这里；2026-10-06 分类后为 …/small_ball/renders")
     ap.add_argument("--src", default="data/derived/small_ball_selected_700")
     ap.add_argument("--yolo-conf", type=float, default=0.25)
     args = ap.parse_args()

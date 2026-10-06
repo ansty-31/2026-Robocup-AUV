@@ -1,23 +1,6 @@
 # -*- coding: utf-8 -*-
 """gate/percept/kpt_memory.py — 门角点"逐点软融合"（抗水面倒影：小漂移/短消失/偶发鬼点）
-**设计原则**（按使用要求收敛）：
-* **不硬判无效**：每个角点始终输出"融合后的状态"（位置 + 连续置信度），
-把"信不信这一帧"变成权重的连续变化，而不是"有效/无效"的二值切换 ——
-这样状态机不会因为单点抖动而翻来覆去（少掉 full↔p3p↔coarse 的抖动），
-也不至于把信息量本来就不多的 4 个点滤没了。
-* **逐点自身信息融合**：各角点独立维护 位置/速度/置信度/残差尺度，
-σ_i 是该点残差分布的尺度（残差慢跟踪，会自适应：点安静→半径小；
-* **软几何权重**：w_geo = 1 / (1 + (d/R)²)（柯西权重，越小越不可信，连续无跳变）；
-一帧鬼点（d ≫ R）权重≈0 → 对融合几乎无影响，但**该点仍然有效**、状态不丢。
-* **不影响速度**：α-β 时间加权平均带匀速补偿（稳态滞后≈0），不做窗口算术平均，
-不引入额外确认延迟。
-* **短消失回忆 / 长丢失衰减**：短时没打到 → 用融合状态外推并保持 recall_conf；
-连续缺失超限或超 valid_ms → 置信度按 conf_decay 衰减，最终自然低于 keypoint.conf_thr，
-让 mode 照常降级（不瞎编）。
-全部参数可调（`vision.yaml → gate.kpt_mem`）。**本功能是可选开关，默认开启**（= 周一 09-14 原行为）：
-`enable=true`（默认）或 `AUV_GATE_KPT_MEM=1` = 打开融合；
-`enable=false` 或 `AUV_GATE_KPT_MEM=0` = 角点单帧直用，与没集成本功能时逐字节同行为。
-开关判定见 `kpt_mem_enabled()`，构造统一走 `build_kpt_memory()`（关闭时返回 None）。"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import os
@@ -41,13 +24,7 @@ def _env_flag(name):
     return str(v).strip().lower() in ("1", "true", "yes", "on", "enable", "enabled", "y")
 
 def kpt_mem_enabled(cfg=None, force=False):
-    """kpt_mem 是可选功能：这里决定本进程要不要用它。
-
-    优先级：force（调用方显式要求，如 preview_detect.py --fuse）
-          > 环境变量 AUV_GATE_KPT_MEM
-          > cfg["enable"]
-          > 默认 False（cfg 里没写 enable 时的兜底；本工程 cfg 写的是 true）
-    """
+    """kpt_mem 是可选功能：这里决定本进程要不要用它。"""
     if force:
         return True
     env = _env_flag(ENV_ENABLE)
@@ -64,10 +41,7 @@ def enable_source(cfg=None):
     return "cfg 没写 enable → 兜底 false"
 
 def build_kpt_memory(cfg=None, n_kpt=4, force=False):
-    """按 cfg 构造 KptMemory；未启用 / 参数不可用 → None（调用方按"单帧直用"处理）。
-
-    唯一构造入口（gate_task 与 preview_detect 共用），保证"关掉"时两边行为一致。
-    """
+    """按 cfg 构造 KptMemory；未启用 / 参数不可用 → None（调用方按"单帧直用"处理）。"""
     cfg = cfg or {}
     if not kpt_mem_enabled(cfg, force=force):
         return None
@@ -150,10 +124,7 @@ class KptMemory(object):
 
     # ------------------------------------------------------------------ 对外
     def update(self, kpts, conf, now_ms):
-        """当帧 (kpts, kpt_conf) → 融合后的 (kpts, kpt_conf)。
-
-        始终返回 4 个点的融合状态；置信度是连续的（低到一定程度后由
-        """
+        """当帧 (kpts, kpt_conf) → 融合后的 (kpts, kpt_conf)。"""
         cur = _as_kpts(kpts, self.n)
         cconf = np.zeros(self.n, np.float64)
         if cur is not None and conf is not None:
@@ -206,8 +177,6 @@ class KptMemory(object):
                 self._last_seen[i] = float(now_ms)
                 self._miss[i] = 0
             else:
-                # 没打到：用融合状态外推；短期"回忆"（保持可用的置信度），
-                # 长期则按 conf_decay 衰减，最终自然低于 conf_thr
                 self._miss[i] += 1
                 self._pos[i] = pred
                 recent = self._seen_n[i] >= self.min_frames and \

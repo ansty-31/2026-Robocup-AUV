@@ -15,8 +15,8 @@
 用法：
     /home/ansty/anaconda3/envs/yolov8/bin/python experiment/scripts/small_ball/tune_cv_ball.py \
         --src data/derived/small_ball_selected_700 --sample 200 \
-        --yolo-json output/preview/small_ball/yolo_ball.json \
-        --out output/preview/small_ball/cv_tune.csv
+        --yolo-json output/preview/small_ball/tables/yolo_ball.json \
+        --out output/preview/small_ball/tables/cv_tune.csv
 """
 
 from __future__ import annotations
@@ -123,7 +123,7 @@ def main():
     ap.add_argument("--yolo-json", required=True)
     ap.add_argument("--sample", type=int, default=200, help="调参用子集大小（等间隔抽，保证覆盖全序列）")
     ap.add_argument("--ref-conf", type=float, default=0.5)
-    ap.add_argument("--out", default="output/preview/small_ball/cv_tune.csv")
+    ap.add_argument("--out", default="output/preview/small_ball/tables/cv_tune.csv")
     ap.add_argument("--rounds", type=int, default=2)
     ap.add_argument("--fields", default=",".join(FIELDS))
     args = ap.parse_args()

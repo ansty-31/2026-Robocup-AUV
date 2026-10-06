@@ -2,31 +2,9 @@
 # manual.sh — 手动模式一键启动（板端）：串口遥控桥 + 画面推流
 #   录像默认放在**水面 PC**（板端只推流，省板端 CPU、不受写盘拖累）：
 #       PC 端: python3 -m manual.stream view --record      # 存到 PC 的 record/ 目录
-#   确需板端本地录像时再加 --record（例如 PC 不在场）。
-#   三件套在 manual/：manual/udp_server.py（遥控桥）· manual/recorder.py（录像）· manual/stream.py（推流/接收库）
-#
-# 推流是"零转码"的：base/hw/camera.py 打开相机时顺手把原始 MJPEG 交给 manual/stream.py 发出，
-# 所以**推流与录像共用同一路采集，互不抢相机**（UVC 只允许一个进程取流）。
-#
-# 用法（在工程根目录执行）：
-#   ./manual.sh                          # 遥控桥 + 推流（录像在 PC 端做）
-#   ./manual.sh --sim                    # 无串口硬件时：遥控桥只打印
-#   ./manual.sh --no-udp                 # 只推流
-#   ./manual.sh --record --seconds 60 --out rec.mp4    # 额外做板端本地录像
-#   ./manual.sh --host 192.168.137.2 --port 5000 --stream-fps 30
-#   遥控包额外支持相机切换（PC 端发到端口 9000）：cam:front / cam:down / cam（前后切换）
-#   ./manual.sh --help
-#
-# 水面 PC 端看画面（任选）：
-#   ffplay -fflags nobuffer -flags low_delay -framedrop -f mjpeg "udp://@:5000"
-#   python3 -m manual.stream view --record # 本仓库自带：看画面 + 存到 PC 的 record/ 目录
-#   python3 -m manual.stream view --ctrl-host 192.168.137.10  # 看画面，按 Tab 切主视/下视
-#   浏览器（板端另开 HTTP 时）：python3 -m manual.stream push --host <PC> --http 8080
 set -u
 cd "$(dirname "$0")"
 
-# 手动接管前先清理残留的视觉任务：main.py 会持续向串口发帧并占用相机，
-# 导致手动遥控帧被压掉 / 推流打不开（表现为“切成手动也没法控制”）。
 if pkill -f "python3 main.py --task" 2>/dev/null; then
   echo "[clean] 已停止残留的 main.py（释放串口/相机）"
   sleep 1
@@ -134,8 +112,8 @@ if [ "${USE_UDP}" = "1" ]; then
   fi
 fi
 
-# 2) 录像（前台；推流由 camera.py 钩子顺带完成）或纯推流
 #    注意：这里不用 exec —— 要让本脚本的 EXIT trap 有机会停掉后台的 udp_server
+#   （细节与实测见 doc/注释历史.md）
 RC=0
 if [ "${USE_REC}" = "1" ]; then
   set -- --camera "${CAMERA}" --out "${OUT}"

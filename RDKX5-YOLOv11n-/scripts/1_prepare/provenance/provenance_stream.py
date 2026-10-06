@@ -45,8 +45,8 @@ SOURCES = {
     "AUV_4": ("mjpeg", "data/raw/AUV_4_auv_4.mjpeg"),
     "AUV_4dir": ("dir", "data/frames/AUV_4_auv_4_frames"),
     "AUV_1board": ("dir", "data/calib/AUV_1_board"),
-    "AUV_2sel": ("dir", "data/derived/AUV_2_selected_2000"),
-    "AUV_3sel": ("dir", "data/derived/AUV_3_selected_2000"),
+    "AUV_2sel": ("dir", "_archive/auv5/derived_AUV_2_selected_2000"),
+    "AUV_3sel": ("dir", "_archive/auv5/derived_AUV_3_selected_2000"),
 }
 
 _MAPS = {}

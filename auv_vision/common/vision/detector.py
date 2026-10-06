@@ -1,22 +1,6 @@
 # -*- coding: utf-8 -*-
 """detector.py — 目标识别（RDK X5，单权重多类别）
-
-三目标（red_ball / blue_ball / gate）共用一个模型（cfg/vision.yaml model.path），
-一次前向输出所有类别，由 DetectorHub 按任务取所需类别：
-  - 撞球 ball  → mission.target_color 对应类别（red_ball / blue_ball）
-  - 过门 gate  → gate
-  - 返回 back 走颜色逻辑（不加载模型）
-
-模型文件（RDK X5）：
-  - 必须是 X5 OE 工具链（OpenExplorer，hb_mapper makertbin，march: bayes-e）产出的 **.bin**
-  - 名称 hbm_runtime 只是包名传承：X5 上它加载的仍是 .bin；
-    .hbm 属车载 J5/J6/S100(Nash-e/m) 路线，X5 无法解析 → 代码会直接拒绝并提示
-
-DETECTOR 模式（vision.yaml model.mode）：
-  mock        虚拟测试（无权重；按任务分别模拟）
-  hbm_runtime RDK X5 BPU 推理：packed NV12 → model.run()
-  onnx        CPU onnxruntime 调试（.onnx 不经过工具链，仅联调用）
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import os
 
 import numpy as np
@@ -32,8 +16,6 @@ class Det(object):
         self.kind = kind
         self.score = float(score)
         self.x, self.y, self.w, self.h = int(x), int(y), int(w), int(h)
-        # keypoint 扩展（gate 用；bbox 任务为 None，向后兼容）：
-        #   kpts: (K,2) 像素坐标，顺序=训练顺序；kpt_conf: (K,) 每点置信度
         self.kpts = None if kpts is None else np.asarray(kpts, np.float32)
         self.kpt_conf = None if kpt_conf is None else np.asarray(kpt_conf, np.float32)
 
@@ -60,9 +42,6 @@ class DetectorBase(object):
         raise NotImplementedError
 
 
-# ---------------------------------------------------------------------------
-# 预处理 / 后处理
-# ---------------------------------------------------------------------------
 def bgr_to_packed_nv12(bgr, out_w, out_h):
     """BGR→packed NV12(Y+UV 拼接)。要求分辨率==模型输入。"""
     if bgr.shape[1] != out_w or bgr.shape[0] != out_h:
@@ -117,8 +96,7 @@ def _nms(boxes, scores, iou_th):
 
 def decode_yolov8(output, labels, frame_w, frame_h,
                   conf=None, iou=None, input_w=None, input_h=None):
-    """YOLOv8 多类别解码：输出 [1,4+nc,N] 或 [1,N,4+nc] → Det 列表（按分降序）。
-    labels：类别名列表，顺序须与训练/导出一致（决定 kind）。"""
+    """YOLOv8 多类别解码：输出 [1,4+nc,N] 或 [1,N,4+nc] → Det 列表（按分降序）。"""
     conf = conf if conf is not None else S.vision.model.score_threshold
     iou = iou if iou is not None else S.vision.model.nms_threshold
     input_w = input_w or S.vision.model.input_size
@@ -161,12 +139,7 @@ def decode_yolov8(output, labels, frame_w, frame_h,
 def decode_yolo11_split(outputs, labels, frame_w, frame_h,
                         conf=None, iou=None, input_w=None, input_h=None,
                         reg_max=16):
-    """YOLO11(X5 .bin split-head) 解码。
-
-    X5 编译产物把检测头拆成每尺度两个 tensor：reg 64ch(DFL 4xreg_max, logits) +
-    cls nc ch(logits)，concat/softmax/sigmoid/DFL 均未包含，需在此还原。
-    outputs: {输出名: ndarray (1,g,g,C)}；返回 Det 列表（按分降序）。
-    """
+    """YOLO11(X5 .bin split-head) 解码。"""
     conf = conf if conf is not None else S.vision.model.score_threshold
     iou = iou if iou is not None else S.vision.model.nms_threshold
     input_w = input_w or S.vision.model.input_size
@@ -230,9 +203,6 @@ def decode_yolo11_split(outputs, labels, frame_w, frame_h,
     return out
 
 
-# ---------------------------------------------------------------------------
-# X5 模型文件校验
-# ---------------------------------------------------------------------------
 def check_x5_model(path):
     """RDK X5 只认 OE 工具链 .bin；.hbm（车载 Nash）拒绝并给正确链路提示。"""
     if str(path).lower().endswith(".hbm"):
@@ -245,9 +215,7 @@ def check_x5_model(path):
         raise FileNotFoundError("权重不存在: %s（先放好 X5 工具链产出的 .bin）" % path)
 
 
-# ---------------------------------------------------------------------------
 # 真机后端（单权重多类别）
-# ---------------------------------------------------------------------------
 class _RealBase(DetectorBase):
     def __init__(self):
         path = S.vision.model.path
@@ -356,9 +324,7 @@ class OnnxDetector(_RealBase):
                              input_w=self._iw, input_h=self._ih)
 
 
-# ---------------------------------------------------------------------------
 # Mock（虚拟测试：按任务模拟单一类别序列）
-# ---------------------------------------------------------------------------
 class MockDetector(DetectorBase):
     """按 vision.yaml sim.ball 序列模拟 远→近→越球消失。"""
 
@@ -409,9 +375,7 @@ class MockDetector(DetectorBase):
         return [Det(self.kind, 0.9, x0, y0, x1 - x0, y1 - y0)]
 
 
-# ---------------------------------------------------------------------------
 # 指令优先：按任务/目标类别挑选（绝不因“别的类分更高”换目标）
-# ---------------------------------------------------------------------------
 def pick_target(dets, want):
     """在 dets 中选 kind==want 且置信度最高的 Det；want 缺失或无目标返回 None。"""
     best = None
@@ -421,9 +385,7 @@ def pick_target(dets, want):
     return best
 
 
-# ---------------------------------------------------------------------------
 # 工厂：单权重共享后端；按任务取类别
-# ---------------------------------------------------------------------------
 def _want_label(task):
     """任务 → 所需类别名（labels 里没有则返回 None）。"""
     labels = list(S.vision.model.labels)
@@ -458,8 +420,6 @@ class DetectorHub(object):
                     continue
                 if task in S.comm.tasks.enabled and _want_label(task):
                     self._mocks[task] = MockDetector(_want_label(task))
-        # 非 mock：**不在此处加载** model.path。单独跑 gate 时无需 ball 权重，
-        # 首次真正用到（detect/detect_all/ready(ball)）时才构造，见 _ensure_real()。
 
     def _ensure_real(self):
         """惰性构造单权重检测器（失败只提示一次，返回 None）。"""
@@ -496,13 +456,19 @@ class DetectorHub(object):
 
     # ------------------------------------------------------------ 任务专用后端
     def register(self, task, backend):
-        """装配层注册任务专用后端（如 gate keypoint / gate mock）。
-
-        backend 需提供 detect(frame) -> [Det]；传 None 表示该任务无后端。"""
+        """装配层注册任务专用后端（如 gate keypoint / gate mock）。"""
         self._extra[task] = backend
 
     def has_extra(self, task):
         return task in self._extra and self._extra[task] is not None
+
+    def extra(self, task):
+        """任务专用**后端对象**（未注册 → None）。
+
+        给需要后端专属接口的决策层用：夹取真正要的是**圆心与半径**，走
+        `backend.circles(frame)`；`Det` 的 bbox 只是与工程其它任务对齐用的外接方框。
+        """
+        return self._extra.get(task)
 
     def detect_list(self, task, frame):
         """任务专用后端整帧检测列表；未注册时退化为 legacy 单模型全量。"""
@@ -523,10 +489,7 @@ class DetectorHub(object):
         return self._ensure_real() is not None and _want_label(task) is not None
 
     def detect(self, task, frame):
-        """指令优先：只返回任务所需类别（want）中最高分的 Det。
-
-        例如撞球按 mission.target_color 打蓝球：画面里红球分再高也不选，
-        蓝球缺席则返回 None（继续搜索），绝不自动换目标。"""
+        """指令优先：只返回任务所需类别（want）中最高分的 Det。"""
         want = _want_label(task)
         if want is None:
             return None

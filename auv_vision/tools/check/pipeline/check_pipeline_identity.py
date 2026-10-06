@@ -1,11 +1,8 @@
 # -*- coding: utf-8 -*-
 """tools/check/pipeline/check_pipeline_identity.py — "域自证"脚本（本地/板端都能跑；不入运行时）
-python3 tools/check/pipeline/check_pipeline_identity.py
-1. 声明项：undistort=true、input_size=640、标定分辨率==配置帧尺寸、纯拉伸（无 letterbox/crop）；
 必须与 gate.percept.geometry.CameraModel(rectified=True) 的 K 一致；
-3. 域恒等式：A⁻¹(A·new_K)==K_full；detector decode 的逆缩放 == 1/resize 缩放
-（"关键点回缩域"与"PnP 域"必须是同一个域）。
-退出码：0=一致；1=不一致（部署脚本可据此报警）。"""
+退出码：0=一致；1=不一致（部署脚本可据此报警）。
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import argparse

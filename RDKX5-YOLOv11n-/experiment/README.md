@@ -22,10 +22,10 @@
 >
 > | 旧路径 | 现在的位置 |
 > |---|---|
-> | `data/AUV_x/*_frames` | `data/frames/AUV_1_rec_front_frames` … `data/frames/AUV_4_auv_4_frames`（见 `cleanup_record/MOVES_data_20260925.tsv`） |
+> | `data/AUV_x/*_frames` | `data/frames/AUV_1_rec_front_frames` … `data/frames/AUV_4_auv_4_frames`（见 `cleanup_record/moves/MOVES_data_20260925.tsv`） |
 > | `data/AUV_1_board` | `data/calib/AUV_1_board` |
-> | `data/exp_distortion/...` | **已不存在**（早期畸变实验的中间产物，见 `cleanup_record/CLEANUP_2026-09-24.md`） |
-> | `runs/auv5/eval/pose_B` / `pose_C` / `pose_D` / `pose_AOLD` | **已不存在**（2026-09-24 删除，见 `cleanup_record/CLEANUP_2026-09-24.md`；同一位置现存 `runs/auv5/eval/pose_D_wb`） |
+> | `data/exp_distortion/...` | **已不存在**（早期畸变实验的中间产物，见 `cleanup_record/reports/CLEANUP_2026-09-24.md`） |
+> | `runs/auv5/eval/pose_B` / `pose_C` / `pose_D` / `pose_AOLD` | **已不存在**（2026-09-24 删除，见 `cleanup_record/reports/CLEANUP_2026-09-24.md`；同一位置现存 `runs/auv5/eval/pose_D_wb`） |
 > | `experiment/runs/domain/label_audit_B.csv`、`experiment/runs/domain/label_audit_sheet.jpg` | `experiment/runs/domain/audit/label_audit_B.csv`、`experiment/runs/domain/audit/label_audit_sheet.jpg` |
 
 这个目录装的是**为了回答「去畸变该放在哪一步 / 要不要 enhance」这一个问题而临时产生的一切**：
@@ -39,7 +39,7 @@
 
 > **2026-09-24 更新**：`data/mapped/`（含 `pose_D_wb`）与 `experiment/data/pose_*` 对照集**已按决定清理**，
 > 去畸变位置已收口为 **D 域 + LUT 白平衡（无 CLAHE）**。数据集按 §8 可重建；
-> 清理与重建清单见 [`../cleanup_record/CLEANUP_2026-09-24.md`](../cleanup_record/CLEANUP_2026-09-24.md)。
+> 清理与重建清单见 [`../cleanup_record/reports/CLEANUP_2026-09-24.md`](../cleanup_record/reports/CLEANUP_2026-09-24.md)。
 > **结论、报告与权重都没有删**（`weights/domain_*.pt` 保留）。
 
 结论本身不在这里，而在 [`experiment/runs/domain/reports/EXPERIMENT_REPORT_20260923.md`](runs/domain/EXPERIMENT_REPORT_20260923.md)
@@ -121,7 +121,7 @@ setsid nohup bash experiment/scripts/run_mix3000.sh > experiment/logs/mix3000.lo
 ## 3. `experiment/data/` — 6 个对照数据集（**已于 2026-09-24 删除**，见 `experiment/data/README.md`）
 
 > 域实验收口后，这 6 个可再生数据集（909 MB）已删；重建命令在
-> [`experiment/data/README.md`](data/README.md) 与仓库根 [`cleanup_record/CLEANUP_2026-09-24.md`](../cleanup_record/CLEANUP_2026-09-24.md)。
+> [`experiment/data/README.md`](data/README.md) 与仓库根 [`cleanup_record/reports/CLEANUP_2026-09-24.md`](../cleanup_record/reports/CLEANUP_2026-09-24.md)。
 > 以下描述保留作索引。
 
 
@@ -182,7 +182,7 @@ setsid nohup bash experiment/scripts/run_mix3000.sh > experiment/logs/mix3000.lo
 | `provenance_*.py` / `map_pose_dataset.py` / `make_mixed_gate_set.py` / `prepare_frames.py` | `scripts/1_prepare/` | 流水线（会长期用） |
 | `exp_distortion/*` / `train_domain_arms.sh` / `dedup_ceiling.py` | `experiment/scripts/` | 实验 |
 | `data/derived/AUV_5_selected_3000_Dwb/`、`data/datasets/AUV_5_gate-pose.yolov8/`、`data/derived/AUV_5_label_candidates_Dwb/` | `data/` | 流水线 |
-| `data/mapped/*`（含 `pose_D_wb`） | ~~已清理~~ | 流水线（**按 §8 可重建**；本次清理见 `../cleanup_record/CLEANUP_2026-09-24.md`） |
+| `data/mapped/*`（含 `pose_D_wb`） | ~~已清理~~ | 流水线（**按 §8 可重建**；本次清理见 `../cleanup_record/reports/CLEANUP_2026-09-24.md`） |
 | `experiment/data/pose_{B,C,D}{,_noenh}` | ~~已清理~~ | 实验对照集（**按 §8 可重建**） |
 | `runs/prov/provenance_*.csv`、`runs/auv5/eval/`、`runs/auv5/calib/` | `runs/` | 流水线（溯源表 + 回归评估集 + 标定记录） |
 | `experiment/runs/domain/`、`experiment/runs/exp_distortion/` | 本目录 | 实验 |

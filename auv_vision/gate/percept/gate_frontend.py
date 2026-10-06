@@ -1,11 +1,6 @@
 # -*- coding: utf-8 -*-
 """gate/percept/gate_frontend.py — keypoint→2D/3D 对应与 mode 判定（§4.3 前端适配层）
-
-与几何内核解耦：本模块只负责把"一次检测（bbox + 4 角点 + 每点置信度）"翻译成
-下游可用的 (mode, img2, obj3) 或粗对准信息；位姿解算交给 gate.percept.geometry。
-
-mode 定义（对应 §4.6 降级表 / §5.3 子状态）：
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import numpy as np
@@ -20,10 +15,7 @@ MODE_NONE = "none"
 _ID_TL, _ID_TR, _ID_BR, _ID_BL = 0, 1, 2, 3
 
 def parse_kpt_mode(kpts, kpt_conf, conf_thr=0.5, min_pair_ok=True):
-    """由检测的角点/置信度判定 mode 与有效角点 id 列表。
-
-    Returns:
-    """
+    """由检测的角点/置信度判定 mode 与有效角点 id 列表。"""
     kpts = np.asarray(kpts, np.float32)
     conf = np.asarray(kpt_conf, np.float32)
     if kpts.ndim != 2 or kpts.shape[0] < 4:

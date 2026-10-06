@@ -1,27 +1,6 @@
 # -*- coding: utf-8 -*-
 """tools/analyze/calib/label_corners.py — 手工标注门框 4 角 → 与 `preview_detect --dump` **同格式**的 JSONL
-------------
-PnP / 深度标定要的是「**像素角点 + 卷尺真值**」，检测器只是自动产出角点的手段。
-做完 —— 手工点 4 个角。
-坐标域（**最容易错的一点**）
-----------------------------
-· 用 `--capture` 采的图**已经过去畸变**（本工具按同一套标定做 remap，与运行时同源）；
-· 用 `--images` 指自己拍的**原图**时，要加 `--undistort` 让工具先 remap 再显示/标注。
-用法
-----
---out log/pnp_0922/pnp_z150.jsonl
-键盘：左键落点 ｜ u 撤销 ｜ r 重来 ｜ s 保存并下一张 ｜ n/空格 跳过 ｜ q 退出(保存已标)
-m 放大镜开关 ｜ + / - 放大镜倍率
-在 640 的画面上会盖掉约 87%，把图挡死。现在按 `m` 才显示，且以 0.65
-不透明度叠加（底下的画面仍可见）。`--loupe` 可让它启动即开。
-③ 标完喂标定工具（文件名里的真值照旧生效）：
-离线/脚本模式（不起窗口，便于批量与用例）：`--coords "x,y;x,y;x,y;x,y"`
-**点在哪一条线上（直接决定标定口径）**
-而 `snap_to_red` 只在 **±6 px** 邻域里找最红的像素 —— 近距档管子宽（2 m 处约 28 px），
-四角都偏"同一侧"会变成一个 3% 量级的**系统性宽度偏差**（正对时 = 3% 深度偏差）。
-判据：标完看 `Δu/Δv`，应落在 0.77/0.56 = **1.375** 附近（正对档）；明显偏离就先查是不是点偏了。
-然后按 **q** 退出（**不要**存 jsonl —— 那不是门角点，喂给 `pnp_calib` 只会得到垃圾位姿）。
-比检测结果更可信，正是标定 PnP 想要的输入。"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import argparse
@@ -69,10 +48,7 @@ def rectify(frame, calib=None):
 
 # ------------------------------------------------------------------ 纯函数（可测）
 def snap_to_red(img, x, y, r=6, min_gain=25.0):
-    """把点击吸到附近「最红」的像素，返回 (x, y)。
-    红度 = R − max(G, B)（BGR 输入）。邻域内最大红度比点击处高出 `min_gain` 才吸附，
-    搜索半径只有 `r=6` px，而近距档红管宽约 28 px
-    想标准，自己把十字压到管中线（配合放大镜）。四角都偏同一侧 = 系统性宽度偏差。"""
+    """把点击吸到附近「最红」的像素，返回 (x, y)。"""
     h, w = img.shape[:2]
     x0, x1 = max(0, int(x) - r), min(w, int(x) + r + 1)
     y0, y1 = max(0, int(y) - r), min(h, int(y) + r + 1)
@@ -111,13 +87,7 @@ def make_record(idx, kpts, src=None, t=None, score=1.0):
 
 # ------------------------------------------------------- 卷尺靶子（§A0b/§B4，纯函数可测）
 def span_stats(pts):
-    """3 个**刻度点**（依次：起点刻度 / 中间刻度 / 终点刻度）→ 跨度统计。
-    **任意方向都成立**（横着、竖着、斜着量都行）：
-    · 靶面只要**与光轴垂直**，`z=const` 平面到图像就是**均匀缩放** `f/z`（小孔模型下严格成立），
-    —— 用坐标轴投影会白丢一个 `cosθ`（竖着量更是直接得 0）。
-    `skew = (后半 − 前半)/du`：靶面绕竖轴/横轴偏了就会偏（近侧半段更长）。
-    `off_mid`：中点离 `P₁P₃` 连线的**垂距(px)** —— 点错刻度/卷尺有折角时会变大。
-    返回 dict：`du`(px, 欧氏)、`du_l/du_r`(px)、`skew`、`mid_frac`(应 ≈0.5)、"""
+    """3 个**刻度点**（依次：起点刻度 / 中间刻度 / 终点刻度）→ 跨度统计。"""
     p = np.asarray(pts, dtype=np.float64).reshape(-1, 2)
     if p.shape[0] != 3:
         raise ValueError("span_stats 需要 3 个点（起/中/终刻度），收到 %d" % p.shape[0])
@@ -152,8 +122,7 @@ def make_ruler_record(src, pts, z_tape=None, span_m=1.0, ticks=None):
     return rec
 
 def _z_from_name(path):
-    """从图名/档名里抠 z 真值（`...z150...` → 1.50 m）。
-    既覆盖 `pnp_z150.jsonl`，也覆盖 `ruler_z200/cap_001.jpg`。"""
+    """从图名/档名里抠 z 真值（`...z150...` → 1.50 m）。"""
     import re
     parts = [p for p in str(path or "").replace("\\", "/").split("/") if p]
     tail = "/".join(parts[-2:]) if len(parts) >= 2 else (parts[0] if parts else "")
@@ -161,8 +130,7 @@ def _z_from_name(path):
     return (int(m.group(1)) / 100.0) if m else None
 
 def load_done(out_path):
-    """已测/已标的**去重键**集合（用于 `--resume`）。
-    只有老记录（没有 `src_path`）才退回 basename。"""
+    """已测/已标的**去重键**集合（用于 `--resume`）。"""
     paths, legacy = set(), set()
     if not out_path or not os.path.exists(out_path):
         return {"paths": paths, "legacy": legacy}
@@ -190,10 +158,7 @@ def is_done(done, key, src=None):
     return bool(src) and src in done["legacy"] and key not in done["paths"]
 
 def remove_src(out_path, src):
-    """删掉某个图的旧记录（重标/重测时用，避免同一张图出现两行）。
-
-    `src` 传**完整路径**优先按 `src_path` 匹配；老记录（只有 basename）按名字匹配。
-    """
+    """删掉某个图的旧记录（重标/重测时用，避免同一张图出现两行）。"""
     if not out_path or not os.path.exists(out_path) or not src:
         return 0
     base = os.path.basename(src)
@@ -387,8 +352,7 @@ def label(paths, out_path, do_undistort=False, snap=True, resume=False, zoom=4,
 # ------------------------------------------------- 卷尺靶子测量（§A0b / §B4）
 def measure(paths, out_path, do_undistort=False, resume=False, zoom=4, span_m=1.0,
             ticks=None, loupe=False):
-    """点 3 个刻度（0 / 50 / 100 cm）→ 自动算 `Δu`/半跨/斜视诊断 → 追加一行 JSONL。
-    记录 schema 见 `make_ruler_record`（`kind: "ruler"`，**别**喂给 `pnp_calib`）。"""
+    """点 3 个刻度（0 / 50 / 100 cm）→ 自动算 `Δu`/半跨/斜视诊断 → 追加一行 JSONL。"""
     import cv2
     done = load_done(out_path)          # 去重键 = 完整路径（basename 会跨目录撞车）
     ticks_tag = ticks

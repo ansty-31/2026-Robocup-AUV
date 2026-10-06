@@ -1,19 +1,13 @@
 # -*- coding: utf-8 -*-
 """settings.py — YAML 参数加载（全部参数见 cfg/vision.yaml 与 cfg/comm.yaml）
-
 用法（代码与 YAML 一一对应）：
-    import base.cfg.settings as S
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import os
 
 # ---- 代码级常量（非参数；参数一律在 cfg/*.yaml）----
 PROJECT_NAME = "AUV"
 SIM_MODE = True          # 无硬件调试：串口仅打印（板上置 False）
-#   本地 True（只打印）/ 板端 False（真发串口）；deploy 对本文件整份跳过、两边不互相覆盖。
 #   台架只想打印时用运行期覆盖，别改这份文件：AUV_SIM_MODE=1 python3 main.py --task gate
-# 运行期可覆盖（默认行为不变）：AUV_SIM_MODE=0 真正发串口 / =1 只打印
-#   AUV_SIM_MODE=0 python3 main.py --task gate      ← 下水真实驱动
-#   AUV_SIM_MODE=1 python3 main.py --task gate      ← 台架只打印（默认）
 if os.environ.get("AUV_SIM_MODE") is not None:
     SIM_MODE = os.environ["AUV_SIM_MODE"].strip().lower() not in \
         ("0", "false", "no", "off", "sim_off")
@@ -23,6 +17,8 @@ LOG_FPS = True
 STATE_IDLE = "IDLE"
 STATE_BALL = "BALL"
 STATE_GATE = "GATE"
+STATE_GRAB = "GRAB"          # 任务「夹取」（handling，mode=grab）
+STATE_PLACE = "PLACE"        # 任务「放置」（handling，mode=place）
 STATE_DONE = "DONE"
 STATE_ESTOP = "ESTOP"
 STATUS_RUNNING = "RUNNING"
@@ -77,11 +73,6 @@ _DEFAULT_COMM = os.path.join(_ROOT, "cfg", "comm.yaml")
 vision = _load(_resolve(os.environ.get("AUV_VISION_CFG"), _DEFAULT_VISION))
 comm = _load(_resolve(os.environ.get("AUV_COMM_CFG"), _DEFAULT_COMM))
 
-# --------------------------------------------------------------- 路径解析
-# cfg 里的文件路径**一律写仓库内相对路径**（`cfg/front_camera.yaml`、`models/x.bin`），
-#   板端有两份拷贝（`/home/sunrise/AUV` 旧副本 与 `~/Desktop/AUV_New` 在用副本），
-#   写成相对路径后，**整棵树搬到哪都能跑**（本地 / AUV_New / 旧副本 / U 盘）。
-# 绝对路径仍然接受（老配置不改也能跑），但不推荐。
 def project_root():
     """工程根（含 `main.py`/`cfg/`/`models/` 的那一层）。"""
     return _ROOT

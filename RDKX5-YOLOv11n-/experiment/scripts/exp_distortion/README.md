@@ -177,7 +177,7 @@ $PY experiment/scripts/exp_distortion/make_contact_sheet.py \
 > ⚠️ **路径迁移说明（2026-09 目录归整）**：本文件 §3、§6 里的 `data/exp_distortion/...`
 > （`data/exp_distortion/picked/...`、`data/exp_distortion/processed`、`data/exp_distortion/labels_*`）
 > **均已不存在** —— 它们是这次早期畸变实验的中间产物，2026-09-24 已清理
-> （`cleanup_record/CLEANUP_2026-09-24.md`；`experiment/data/exp_distortion/` 亦不存在）。
+> （`cleanup_record/reports/CLEANUP_2026-09-24.md`；`experiment/data/exp_distortion/` 亦不存在）。
 > 下文保留原命令以便复算，**重跑会重新生成这些目录**；现状映射见 `experiment/README.md` 的迁移表。
 
 挑图口径：门框四角都在画面内；**不同画面位置**（中心/偏左/偏右/偏上/偏下）与

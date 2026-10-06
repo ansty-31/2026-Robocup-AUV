@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 """tools/check/vision/auv_kpt_meter.py — 距离-响应阶梯实测表（只读相机 + 只跑推理；**不碰串口、不驱动船**）
-用途：**换水 / 换光 / 换门之后的第一件事** —— 量出"这个权重在这种环境下、几米内还能出角点"，
 用法（板端，**工程根下**，先确认没有别的 preview/main.py 占着相机）：
-每 ~4.5s 打印一行：
-改判据请用 `tools/check/vision/check_kpt_decode.py`（它连原始 logit 一起报）。"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import os
 import sys
 import time

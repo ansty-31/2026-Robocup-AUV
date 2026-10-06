@@ -1,28 +1,7 @@
 # -*- coding: utf-8 -*-
 """telemetry.py — 下位机**遥测上行**帧（15B：0xAA55 + 5×int16 + 校验和）
-
-下位机(STM32)按下面的格式持续回传**深度**等状态；`base/hw/uart.py` 在每次发帧时顺带
-读空串口接收缓冲，把最新深度交给"不得浮出水面"的限深保护（`comm.depth_guard`）。
-
-帧格式（与下位机固件、`manual/udp_server.py` 的旧解析保持一致，**小端**）：
-
-    byte0..1   : 0xAA 0x55            帧头
-    byte2      : turn_id：接受的旋转编号，0=同步/无任务
-    byte3..4   : depth_cm   int16     当前深度（cm，正=水面以下）→ /100 = m
-    byte5..6   : target_cm  int16     下位机目标深度（cm）→ /100 = m
-    byte7..8   : roll_cd    int16     横滚（0.01°）→ /100 = °
-    byte9..10  : pitch_cd   int16     俯仰（0.01°）→ /100 = °
-    byte11..12 : yaw_cd     int16     航向（0.01°）→ /100 = °
-    byte13     : turn_done    0=未完成，1=完成
-    byte14     : checksum = sum(byte0..13) & 0xFF
-
 用法：
-    rx = TelemetryReceiver()
-    rx.feed(ser.read(ser.in_waiting))      # 原始字节（可任意切分）
-    rx.depth_m                             # 最新深度(m)；None = 还没收到过
-    rx.fresh(stale_ms=500)                 # 数据是否新鲜（限深保护据此决定是否生效）
-    build_telemetry_frame(0.42)            # 造帧（测试/台架模拟下位机用）
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import json
 import struct
 import time
@@ -69,14 +48,7 @@ def decode_telemetry(frame):
 
 
 def parse_telemetry_frames(buf, stats=None):
-    """从字节缓冲 buf 解析出所有完整遥测帧（**就地消费** buf）。
-
-    返回 [(depth_m, target_m, roll_deg, pitch_deg, yaw_deg, turn_done, turn_id), ...]。
-    stats（可选 dict）：累计统计 `ok`（解析成功帧数）/ `bad`（丢弃的坏帧头/校验错次数）。
-
-    同步策略：逐字节搜 0xAA55；校验错只丢 1 字节继续搜（不整段丢），
-    错位/半帧后能自己重新对齐；末尾可能是半个帧头的 1 字节(0xAA)会留下等下一批。
-    """
+    """从字节缓冲 buf 解析出所有完整遥测帧（**就地消费** buf）。"""
     out = []
     while True:
         pos = buf.find(TEL_HEADER)
@@ -103,10 +75,7 @@ def parse_telemetry_frames(buf, stats=None):
 
 
 class TelPlayback(object):
-    """把一段**录制的遥测**（task jsonl 里的 `tdep/tyaw/trol/tpit`）按**真实时间**回放。
-    用途（离线复现闭环）：视觉来自视频（`AUV_CAM_VIDEO=<clip>`），航向/深度来自**当时的真实遥测**
-    启用：`AUV_SIM_TEL_JSONL=<当时的 task.jsonl>` + `AUV_SIM_MODE=1`。
-    时间轴：以 jsonl 第一条的 `t` 为 0 点，按真实经过时间线性插值；超出末尾就夹在末值。"""
+    """把一段**录制的遥测**（task jsonl 里的 `tdep/tyaw/trol/tpit`）按**真实时间**回放。"""
 
     def __init__(self, path):
         self.path = str(path)
@@ -166,10 +135,7 @@ class TelPlayback(object):
 
 
 class TelemetryReceiver(object):
-    """串口字节流 → 最新一帧遥测（深度等）+ 新鲜度判定。
-
-    只在 `UartController` 的发送路径里被调用（单线程），无需加锁。
-    """
+    """串口字节流 → 最新一帧遥测（深度等）+ 新鲜度判定。"""
 
     def __init__(self):
         self.buf = bytearray()
@@ -193,9 +159,6 @@ class TelemetryReceiver(object):
             self.buf.extend(data)
         stats = {"ok": 0, "bad": 0}
         rows = parse_telemetry_frames(self.buf, stats)
-        # 姿态符号归一（`comm.telemetry.yaw_sign`，默认 +1 = 不改行为）。
-        #   "物理转向→遥测符号"之积 g·s；g·s=-1 时闭环**仍然稳定**（都收敛在遥测上），
-        #   反而不平行）。归一后探向应报 `imag_sign=+1`、`[HDG] 转向后 |psi| 应变小`。
         try:
             import base.cfg.settings as _S
             sign = float(_S.get("comm.telemetry.yaw_sign", 1.0) or 1.0)

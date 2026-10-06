@@ -1,14 +1,7 @@
 # -*- coding: utf-8 -*-
 """main.py — 任务主程序（状态机调度；可选本次要执行的任务）
-
-状态流：IDLE → [选定任务依次] → DONE；任意时刻 Ctrl-C/SIGTERM → 急停。
-
-任务分工（按目录分区）：
-  - 任务一 撞球          task1_2/ball.py（BallTask）—— 前视相机
-  - 任务三 过门          gate/（keypoint 四角 + PnP，相位机见 gate/gate_task.py（总调度））
-
 用法：
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import argparse
 import json
 import os
@@ -28,20 +21,31 @@ except ImportError:
 from base.hw.camera import create_camera
 from base.hw.uart import UartController, install_signal_handlers, _D_MIN_DEPTH_M
 from common.vision.detector import DetectorHub
-from task1_2.ball import BallTask
+from task.ball import BallTask
 from gate.gate_task import GateTask
+from handling.handling_task import HandlingTask
 from gate.percept.gate_detector import build_gate_backend
 
 TASK_CLASS = {"ball": BallTask, "gate": GateTask}
-TASK_CAM = {"ball": "front", "gate": "front"}
-STATE_TASK = {S.STATE_BALL: "ball", S.STATE_GATE: "gate"}
-TASK_STATE = {"ball": S.STATE_BALL, "gate": S.STATE_GATE}
+# 夹取/放置是**同一个调度**的两种模式（`handling/`）：名字 → mode
+TASK_MODE = {"grab": "grab", "place": "place", "handling": "full"}
+
+
+def build_task(name, uart, hub, w, h):
+    """按名字造任务：夹取/放置走同一个 `HandlingTask`，只差 mode。"""
+    if name in TASK_MODE:
+        return HandlingTask(uart, hub, w, h, mode=TASK_MODE[name])
+    return TASK_CLASS[name](uart, hub, w, h)
+TASK_CAM = {"ball": "front", "gate": "front",
+            "grab": "down", "handling": "down", "place": "front"}
+STATE_TASK = {S.STATE_BALL: "ball", S.STATE_GATE: "gate",
+              S.STATE_GRAB: "grab", S.STATE_PLACE: "place"}
+TASK_STATE = {"ball": S.STATE_BALL, "gate": S.STATE_GATE,
+              "grab": S.STATE_GRAB, "place": S.STATE_PLACE,
+              "handling": S.STATE_GRAB}      # full：先占夹取段，交接后由任务自己推进
 
 class DownCamFeeder(threading.Thread):
-    """后台读下视相机、只存**最新一帧**；主循环绝不阻塞在下视 read 上。
-
-    —— 下视 USB read 可能 50~120ms，若放进主循环会把前视(主视)显示一起拖卡/冻死。
-    """
+    """后台读下视相机、只存**最新一帧**；主循环绝不阻塞在下视 read 上。"""
 
     def __init__(self):
         super().__init__(daemon=True)
@@ -98,8 +102,7 @@ class DownCamFeeder(threading.Thread):
 
 
 def psi_line(info, tol_deg=8.0):
-    """HUD 的「偏转角」一行（**纯函数**，便于用例）。返回 `(文本, BGR 颜色)`。
-    `psi`（`last_info["hdg"]`）= **门法向相对光轴的夹角**：0 = 机身正对门；"""
+    """HUD 的「偏转角」一行（**纯函数**，便于用例）。返回 `(文本, BGR 颜色)`。"""
     psi = info.get("hdg")
     st = info.get("hdg_state") or ""
     it = info.get("hdg_i")
@@ -137,7 +140,7 @@ class AppController(object):
         self.tasks = {}
         for name in tasks:
             cam = self.cams[TASK_CAM[name]]
-            self.tasks[name] = TASK_CLASS[name](self.uart, self.hub,
+            self.tasks[name] = build_task(name, self.uart, self.hub,
                                                 cam.width, cam.height)
         self.state = S.STATE_IDLE
         self.queue = [TASK_STATE[n] for n in (tasks or S.comm.tasks.enabled)]
@@ -146,9 +149,6 @@ class AppController(object):
         self._frame_seq = 0          # 采集序号（逐帧日志用）
         self._log_t = time.time()
         self._video_on = self._init_video()
-        # 任务逐帧日志（AUV_TASK_LOG=<path>）：把 last_info 每帧存一行 JSON，
-        # 供 tools/analyze/log/analyze_task_log.py 离线判读（phase/action/z/dx/dy/kpt/ratio/pass…）；
-        # 默认不开，不影响运行。
         self._task_log_path = os.environ.get("AUV_TASK_LOG")
         self._task_log_fh = None
 
@@ -190,10 +190,7 @@ class AppController(object):
             return False
 
     def _feed_down(self, task):
-        """gate 需要下视时（coarse/width）才让后台 feeder 开/读下视；不需要就释放。
-
-        —— 主循环只取**最新帧**（非阻塞），绝不被下视相机 read 拖卡，不碰前视(主视)显示。
-        """
+        """gate 需要下视时（coarse/width）才让后台 feeder 开/读下视；不需要就释放。"""
         if not (hasattr(task, "set_down_frame") and hasattr(task, "wants_down")):
             return
         if self._down_feeder is None:
@@ -202,11 +199,7 @@ class AppController(object):
         task.set_down_frame(self._down_feeder.latest())
 
     def _uart_status(self):
-        """画面监控行：下位机深度遥测 + 限深保护（无遥测显示 n/a）。
-
-        深度来自下位机 14B 遥测帧（base/hw/telemetry.py）；`guard` 用 comm.depth_guard：
-        开启且当前深度 ≤ min_depth_m 时禁止上浮（base/hw/uart.py::_apply_depth_guard）。
-        """
+        """画面监控行：下位机深度遥测 + 限深保护（无遥测显示 n/a）。"""
         d = getattr(self.uart, "depth_m", None)
         lim = float(S.get("comm.depth_guard.min_depth_m", _D_MIN_DEPTH_M) or 0.0)
         on = bool(S.get("comm.depth_guard.enable", True))
@@ -217,8 +210,7 @@ class AppController(object):
                    else ""))
 
     def _draw(self, frame, dets):
-        """叠加 识别框/角点/中心线 + 状态信息 后显示。
-        dets 用**当前任务本帧已算出的检测结果**（见各 task.last_dets），"""
+        """叠加 识别框/角点/中心线 + 状态信息 后显示。"""
         img = frame.copy()
         h, w = img.shape[:2]
         fs = max(0.45, w / 900.0)
@@ -353,10 +345,6 @@ class AppController(object):
             for k, v in info.items():
                 if isinstance(v, bool) or v is None or isinstance(v, (int, float, str)):
                     rec[k] = v
-            # 下位机遥测也写进日志：**转向方向/摆动极性这些只能靠"命令 vs 遥测 vs 视觉"
-            # 三者对齐来判**，stdout 的 `[UART←]` 没有时间戳、事后对不上帧；写进 JSONL 后
-            # 就能逐帧核对（`tyaw`=遥测绝对航向(°)、`ttel`=遥测帧年龄(ms)、`tdep`=深度(m)、
-            # `trol`/`tpit`=横滚/俯仰）。
             try:
                 tel = getattr(getattr(task, "uart", None), "telemetry", None)
                 if tel is not None:
@@ -438,8 +426,6 @@ class AppController(object):
                     print("[MAIN] E-STOP，退出")
                     break
                 time.sleep(period)
-            # 任务全部结束：再持续发 stop 保持 done_hold_ms，确保"稳定保持停止"后才退出
-            # （撞球命中后不会刚停就关串口；DASH 后的 STOP 相位已在任务内保持）
             hold_ms = int(S.get("comm.tasks.done_hold_ms", 0) or 0)
             if self.state == S.STATE_DONE and hold_ms > 0 \
                     and not self.uart.estop_active:
@@ -460,7 +446,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--task", default="all",
-                    help="本次任务: all|ball|gate（默认 all=comm.yaml enabled）")
+                    help="本次任务: all|ball|gate|grab|place|handling（默认 all=comm.yaml enabled）；grab/place/handling=同一调度三种模式")
     args = ap.parse_args()
     tasks = list(S.comm.tasks.enabled) if args.task == "all" else [args.task]
     for t in tasks:

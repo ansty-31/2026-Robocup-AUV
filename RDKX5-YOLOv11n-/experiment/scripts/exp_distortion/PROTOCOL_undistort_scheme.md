@@ -269,5 +269,5 @@ $PY experiment/scripts/exp_distortion/compare_kpt_spacing.py \
 
 1304 张标注帧已全部溯源到裸流原始帧（`runs/prov/provenance_final_PNP.kpt4.yolov8.csv`），
 可重投影到任意域而**无需重新标注**。关键事实：**标注文件名里的编号就是裸流帧序号**；
-`data/frames/AUV_*_frames`（原 `data/AUV_x/*_frames`，2026-09-25 归整；见 `cleanup_record/MOVES_data_20260925.tsv`）是「每 25 帧取 1 帧 + 重编号」的残片，不能当全量帧用。
+`data/frames/AUV_*_frames`（原 `data/AUV_x/*_frames`，2026-09-25 归整；见 `cleanup_record/moves/MOVES_data_20260925.tsv`）是「每 25 帧取 1 帧 + 重编号」的残片，不能当全量帧用。
 工具见 `scripts/1_prepare/provenance/` 与 `map_pose_dataset.py`。

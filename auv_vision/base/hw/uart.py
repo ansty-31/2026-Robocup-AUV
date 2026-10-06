@@ -1,11 +1,6 @@
 # -*- coding: utf-8 -*-
 """uart.py — 串口 v2：11B 帧(0xA5+7轴+3键)；上层 DOF 目标→DOF_MAP 真值表→轴字节(速度平滑)，
-模拟遥控输出；心跳 ≥20Hz；急停=连发中性帧。帧语义见 README 与 docs/CUP_AUV。
-
-上行（下位机 → 上位机）：`base/hw/telemetry.py` 的 15B 遥测帧（0xAA55 + 深度/姿态 + 校验和），
-每次发帧时顺带读空接收缓冲 → `self.telemetry.depth_m`；`comm.depth_guard` 据此**禁止上浮**
-（深度 ≤ min_depth_m 时把 heave 清零、heave 轴立刻回中），保证机身不冒出水面。
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import math
 import os
 import sys
@@ -22,18 +17,39 @@ except ImportError:
     HAS_SERIAL = False
 
 # 限深保护的兜底阈值（m）：**必须与 cfg/comm.yaml 的 `depth_guard.min_depth_m` 同值**。
-#   兜底值 —— **露出水面 = 本次比赛立即停止**。
-#   有不变量用例 `test_base.py::test_depth_guard_fallback_matches_cfg` 钉住两者相等。
 _D_MIN_DEPTH_M = 0.55
+
+# 指定角度轴（协议 byte[7]）：0=不发起新任务, 1=yaw, 2=pitch, 3=roll。
+# 帧布局 / 编码 / 执行帧语义见 doc/记录/README_COMMUNICATION.md §2、§2.1、§2.3。
+# `comm.frame.turn_axis` 可覆盖这张表；删掉该键也不崩（用这里的同值兜底）。
+_D_TURN_AXIS = {"yaw": 1, "pitch": 2, "roll": 3}
+
+
+def turn_axis_id(axis=1):
+    """轴名（`yaw`/`pitch`/`roll`）或编号 → byte[7]（1/2/3）。非法值抛 ValueError。"""
+    table = dict(_D_TURN_AXIS)
+    try:
+        for k, v in (S.get("comm.frame.turn_axis", None) or {}).items():
+            table[str(k)] = int(v)
+    except Exception:
+        pass
+    if isinstance(axis, str):
+        key = axis.strip().lower()
+        if key not in table:
+            raise ValueError("未知指定角度轴：%s（可选 %s）"
+                             % (axis, "/".join(sorted(table))))
+        a = int(table[key])
+    else:
+        a = int(axis)
+    if a not in (1, 2, 3):
+        raise ValueError("指定角度轴只能是 1=yaw / 2=pitch / 3=roll，收到 %r" % (axis,))
+    return a
 
 
 def _now_ms():
     return int(time.time() * 1000)
 
 
-# ---------------------------------------------------------------------------
-# 运动状态描述（把 11B 帧翻译成人类可读的运动）
-# ---------------------------------------------------------------------------
 _CHAN_NAMES = [  # (通道名, 正向标签, 反向标签)
     ("surge", "前进", "后退"),
     ("sway", "右移", "左移"),
@@ -64,9 +80,6 @@ def describe_motion(frame=None, axes=None):
     return "停止" if not parts else ", ".join(parts)
 
 
-# ---------------------------------------------------------------------------
-# 帧构建（纯函数，测试可直接使用）
-# ---------------------------------------------------------------------------
 def _axis_of(name, default):
     """DOF 通道名 → 轴字节下标（缺映射时用 default）。"""
     ch = S.comm.dof_map.get(name)
@@ -122,12 +135,20 @@ def encode_turn_angle(angle_deg):
     return int(math.floor((angle + 180.0) * 32767.0 / 360.0 + 0.5))
 
 
-def build_turn_frame(angle_deg, turn_id=1):
-    """带编号的可重发执行帧；四个手动运动轴回中。"""
+def build_turn_frame(angle_deg, turn_id=1, axis=1):
+    """带编号的可重发执行帧；四个手动运动轴回中。
+
+    `axis` 显式写入 byte[7]（1=yaw / 2=pitch / 3=roll）。协议要求**执行帧自己覆盖该字节**
+    （doc/记录/README_COMMUNICATION.md §2、§6-1），不能只靠 `frame.aux_axis` 的默认值 ——
+    否则把中性帧的 byte[7] 改成 0 就会静默变成"不发起任务"。默认 1(yaw) 与既有 yaw 路径
+    **逐字节一致**（`aux_axis[6]` 现为 1）。
+    """
     if not 1 <= turn_id <= 255:
         raise ValueError("旋转编号必须在 1～255")
+    a = turn_axis_id(axis)
     code = encode_turn_angle(angle_deg)
     frame = bytearray(build_neutral_frame())
+    frame[7] = a
     frame[8] = 0x80 | ((code >> 8) & 0x7f)
     frame[9] = code & 0xff
     frame[10] = turn_id
@@ -146,9 +167,6 @@ def build_turn_cancel_frame(turn_id=0):
     return bytes(frame)
 
 
-# ---------------------------------------------------------------------------
-# 控制器
-# ---------------------------------------------------------------------------
 class UartController(object):
     def __init__(self, dev=None, baud=None, sim=None):
         self.dev = dev if dev is not None else S.comm.serial.device
@@ -161,6 +179,7 @@ class UartController(object):
         self._turn_phase = None
         self._turn_counter = 0
         self._turn_id = None
+        self._turn_axis = 1                      # 本次指定角度任务的轴（1=yaw/2=pitch/3=roll）
         self._turn_retry_at = 0.0
         self._sync_frames = 0
         self._sync_sent = False
@@ -173,8 +192,6 @@ class UartController(object):
         self._last_tx_log = 0
         # ---- 下位机遥测（深度等）与限深保护状态 ----
         self.telemetry = TEL.TelemetryReceiver()
-        # 离线复现用：`AUV_SIM_TEL_JSONL=<当时的 task.jsonl>` ⇒ 不发串口，改为回放那段遥测
-        #   （视觉来自 `AUV_CAM_VIDEO` 的视频，航向/深度来自当时的真值 ⇒ 闭环才有机会复现）
         self._tel_playback = None
         _tp = os.environ.get("AUV_SIM_TEL_JSONL")
         if _tp:
@@ -192,6 +209,7 @@ class UartController(object):
         self._warned_no_tel = False
         self.guard_active = False      # 最近一帧是否因限深压掉了上浮（供叠加/日志）
         self.guard_blocks = 0          # 累计被限深压掉的上浮帧数
+        self.extra_min_depth_m = 0.0   # 任务级**只抬不降**的有效限深下限（set_extra_min_depth）
         self._dof_log_f = None
         self._last_dof_t = time.monotonic()
         self._tx_lock = threading.Lock()   # 串口写锁：看门狗线程也要写（硬停），不能与主线程交错
@@ -248,16 +266,11 @@ class UartController(object):
                      [0, 0, S.comm.frame.btn_values[2]])
 
     def _ramp_step(self):
-        """轴字节级平滑（模拟摇杆手感）：
-        按 `ramp.speed_per_s`(字节/秒) 让输出连续逼近目标，避免速度直接激增；
-        `<=0` 直通。
-        继续往上浮，等不到下一帧就已经冒出水面了。"""
+        """轴字节级平滑（模拟摇杆手感）："""
         now = _now_ms()
         dt = max(0.0, (now - self._last_update_ms) / 1000.0)
         self._last_update_ms = now
         self._dof_out = self._apply_depth_guard(*self._dof_target, now_ms=now)
-        # 下潜动力放大（底层共用，gate/ball 都吃）：放在限深之后——限深只压上浮(heave>0)，
-        # 本项只放大下潜(heave<0)，两者互不干涉。
         self._dof_out = self._apply_dive_boost(*self._dof_out)
         tgt = dof_to_axis_bytes(*self._dof_out)
         step_max = (256.0 if S.comm.ramp.speed_per_s <= 0
@@ -279,8 +292,7 @@ class UartController(object):
 
     # ---------------- 接收：下位机遥测（深度等） ----------------
     def _drain_rx(self):
-        """读空串口接收缓冲 → 遥测解析（深度/姿态）。无串口、无数据 = 空操作。
-        SIM + `AUV_SIM_TEL_JSONL`：不发串口，改为**回放一段录制的遥测**（离线复现闭环用）。"""
+        """读空串口接收缓冲 → 遥测解析（深度/姿态）。无串口、无数据 = 空操作。"""
         if self._tel_playback is not None:
             return self._tel_playback.pump(self.telemetry)
         if self.sim or self._ser is None:
@@ -299,10 +311,7 @@ class UartController(object):
         return self.feed_telemetry(data)
 
     def feed_telemetry(self, data, now_ms=None):
-        """喂入下位机上行字节（15B 遥测帧，可任意切分）→ 更新深度等。
-
-        真串口由 `_drain_rx` 调用；测试/台架模拟下位机可直接调它。返回有效帧数。
-        """
+        """喂入下位机上行字节（15B 遥测帧，可任意切分）→ 更新深度等。"""
         got = self.telemetry.feed(data, now_ms=now_ms)
         if got:
             self._log_telemetry(now_ms)
@@ -333,12 +342,32 @@ class UartController(object):
         stale = float(S.get("comm.depth_guard.stale_ms", 500) or 0)
         return self.telemetry.fresh(stale, now_ms)
 
+    @property
+    def effective_min_depth_m(self):
+        """本帧真正生效的限深下限(m) = `max(cfg 的 min_depth_m, 任务级 extra)`。
+
+        ⚠️ `comm.depth_guard.min_depth_m`(现场定死 0.55) **不因任务级下限而改变** ——
+        两者取 max，所以任务级下限只能把保护**收紧**、永远不能放宽。
+        """
+        base = float(S.get("comm.depth_guard.min_depth_m", _D_MIN_DEPTH_M) or 0.0)
+        return max(base, float(getattr(self, "extra_min_depth_m", 0.0) or 0.0))
+
+    def set_extra_min_depth(self, m):
+        """任务级有效限深下限（m）：**只抬不降**。返回生效后的 `effective_min_depth_m`。
+
+        用途：pitch 抬头之类的姿态动作会把机身最高点抬高（**没有 heave 指令也会靠近水面**），
+        此时需要的是"更深才允许上浮"，而不是放宽保护。传 0 或比 cfg 更小的数 = 撤回请求，
+        保护值仍是 cfg 的 `min_depth_m`。`estop`/`neutral` 不重置它，任务结束由调用方显式清零。
+        """
+        try:
+            v = float(m)
+        except (TypeError, ValueError):
+            v = 0.0
+        self.extra_min_depth_m = max(0.0, v) if math.isfinite(v) else 0.0
+        return self.effective_min_depth_m
+
     def _apply_dive_boost(self, surge, sway, heave, yaw):
-        """**下潜动力单独放大**（底层共用机制，撞球/过门都吃）。
-        只处理 `heave < 0`（下潜）：乘上 `dive_scale` 后夹到 [-1, 0]；上浮/悬停/平移/转向
-        使实际推力远小于 DOF 数字；下潜偏弱时就把这一路放大，比在任务层加补偿/脉冲简单得多。
-        注：很小的下潜指令（如 −0.05）即使放大也仍可能落在死区(<0.138)内 —— 要连很小的
-        指令也变成有效推力，`dive_scale` 得给足（≈3~4）。"""
+        """**下潜动力单独放大**（底层共用机制，撞球/过门都吃）。"""
         c = S.get("comm.dof_comp", None) or {}
         if not bool(c.get("enable", True)) or heave >= 0.0:
             return (surge, sway, heave, yaw)
@@ -348,12 +377,10 @@ class UartController(object):
         return (surge, sway, max(-1.0, heave * k), yaw)
 
     def _apply_depth_guard(self, surge, sway, heave, yaw, now_ms=None):
-        """上浮(heave>0)限深：当前深度 ≤ `min_depth_m` → 本帧禁止上浮。
+        """上浮(heave>0)限深：当前深度 ≤ 有效下限 → 本帧禁止上浮。
 
-        只改 heave，**不动 surge/sway/yaw**（别让保护破坏对准/前进）；
-        `heave<=0`（下潜/悬停）与深度充足时原样放行。
-        遥测缺失/超时：按 `depth_guard.stale_action` 处理——`pass`(默认)放行，
-        `block_up` 连"盲上浮"也不许（要求下位机持续回传；SIM/无串口始终放行，免得台架被锁死）。
+        有效下限 = `max(comm.depth_guard.min_depth_m, extra_min_depth_m)`（见
+        `effective_min_depth_m` / `set_extra_min_depth`）。
         """
         self.guard_active = False
         if heave <= 0.0 or not bool(S.get("comm.depth_guard.enable", True)):
@@ -372,13 +399,15 @@ class UartController(object):
             self.guard_blocks += 1
             self._log_guard(heave, now_ms, why="无新鲜深度遥测")
             return (surge, sway, 0.0, yaw)
-        limit = float(S.get("comm.depth_guard.min_depth_m", _D_MIN_DEPTH_M) or 0.0)
+        limit = self.effective_min_depth_m
         if self.telemetry.depth_m > limit:
             return (surge, sway, heave, yaw)
         self.guard_active = True
         self.guard_blocks += 1
-        self._log_guard(heave, now_ms,
-                        why="depth=%.2fm ≤ %.2fm" % (self.telemetry.depth_m, limit))
+        why = "depth=%.2fm ≤ %.2fm" % (self.telemetry.depth_m, limit)
+        if getattr(self, "extra_min_depth_m", 0.0) > 0.0:
+            why += "（含任务级下限 %.2fm）" % self.extra_min_depth_m
+        self._log_guard(heave, now_ms, why=why)
         return (surge, sway, 0.0, yaw)          # 上浮清零，其余照旧
 
     def _log_guard(self, heave, now_ms=None, why=""):
@@ -391,11 +420,7 @@ class UartController(object):
         print("[UART] 限深保护：%s → 禁止上浮(heave %.2f→0)" % (why, heave))
 
     def _log_tx(self, frame, now_ms=None):
-        """终端打印发出的运动帧：发一次打一次；帧后附[运动状态]。
-
-        sim 沿用全局 DEBUG；真串口按 comm.debug.tx_frame_hex，
-        若配置了 tx_frame_log_ms>0 则按该毫秒数节流。
-        """
+        """终端打印发出的运动帧：发一次打一次；帧后附[运动状态]。"""
         if self.sim and not S.DEBUG:
             return
         if not self.sim and not S.get("comm.debug.tx_frame_hex", True):
@@ -456,10 +481,7 @@ class UartController(object):
         return self._write(frame, force=force)
 
     def send_motion(self, name=None, force=False):
-        """按当前平滑后的轴输出一帧（心跳节流）。
-
-        发帧**前**先收一次遥测：限深保护要用最新深度判定（发完再收就慢一帧）。
-        """
+        """按当前平滑后的轴输出一帧（心跳节流）。"""
         if self._estop:
             return False
         if name is not None:
@@ -483,9 +505,16 @@ class UartController(object):
         self.last_motion = "dof"
         return self.send_motion(name="dof", force=force)
 
-    def request_turn(self, angle_deg):
-        """先同步，再按100ms重发同一编号；写失败保留请求供重试。"""
+    def request_turn(self, angle_deg, axis=1):
+        """先同步，再按100ms重发同一编号；写失败保留请求供重试。
+
+        `axis`：1=yaw（既有路径，默认）/ 2=pitch / 3=roll —— 也接受 `"pitch"` 这类轴名。
+        pitch/roll 的 `angle_deg` 是**相对角**，符号含义 = 下位机 IMU 测量值的增减方向
+        （正值使 IMU pitch/roll 增大），**不保证等于物理抬头/向左倾**，物理方向以现场实测为准
+        （doc/记录/README_COMMUNICATION.md §2.2）。
+        """
         encode_turn_angle(angle_deg)
+        a = turn_axis_id(axis)
         if self._estop or self._turn_phase is not None:
             return False
         self._drain_rx()
@@ -493,7 +522,8 @@ class UartController(object):
         self._cancel_turn_id = None
         self._turn_counter = self._turn_counter % 255 + 1
         self._turn_id = self._turn_counter
-        self._turn_frame = build_turn_frame(angle_deg, self._turn_id)
+        self._turn_axis = a
+        self._turn_frame = build_turn_frame(angle_deg, self._turn_id, a)
         self._turn_phase = "sync"
         self._sync_frames = self.telemetry.frames
         self._sync_sent = False
@@ -548,15 +578,7 @@ class UartController(object):
 
     def stop_hard(self, dt=0.05, verify=True, settle_s=0.6, tol_deg=2.0,
                   max_extra=3, quiet=False):
-        """**真正停住**：连发中性帧走完 ramp，再用遥测 yaw 验证它停下来了。
-        平滑，`force=True` 只绕过心跳节流、**不绕过 ramp** → 单帧发出时轴字节还在半路；
-        而下位机**没有无帧超时停车**，随后的 `close()` 一关串口，船就锁在"最后一个还在转的
-        做法：① 连发中性帧，次数按 `ramp.speed_per_s` 与"最大偏离 127 字节"算够；
-        ② 静置 `settle_s` 期间继续发中性，同时用**遥测 yaw** 看有没有还在转；
-        仍在转 → 再补 `max_extra` 轮（打印告警）。
-        Returns:
-        True  = 已回到中位（遥测确认停了；**无遥测时返回 True 但会打印"未验证"**）
-        False = 遥测显示仍在转（推进器/水流顶着，或下位机没跟上）"""
+        """**真正停住**：连发中性帧走完 ramp，再用遥测 yaw 验证它停下来了。"""
         self.cancel_turn()
         mid = int(S.comm.frame.axis_mid)
         spd = float(S.comm.ramp.speed_per_s or 0.0)
@@ -657,15 +679,7 @@ class UartController(object):
 
 
 class _AxisWatchdog(object):
-    """**轴饱和看门狗**（用户 2026-09-27 定，阈值 5.0s）：**只看 yaw 轴** —— 同一方向**连续**发 yaw ≥
-    · yaw 是**闭环收敛量** —— 正常的转向应当越转误差越小，同一个方向连续满舵 5s 只可能是
-    "反馈卡住/舵效不对/在自转"，这才需要掐死；
-    · surge/sway/heave 是**可以合法长同向**的：冲刺(through)本来就是几秒直行、扫视/横向对中是
-    · 想看哪些轴由 `comm.watchdog.axes`（轴名列表，缺省 `[yaw]`）决定；判据本身通用。
-    那时根本跑不到；只有独立线程 + 串口这个唯一出口拦得住。
-    · 只看**实际下发的轴字节**（`uart._axes`，已过 ramp），不关心是谁发的（任务/手动/脚本）。
-    · 越界时**必须先硬停再退出**：下位机没有"无帧超时停车"，直接退出/关串口会把船锁在
-    再补一串中性帧，最后才强制退出。"""
+    """**轴饱和看门狗**（用户 2026-09-27 定，阈值 5.0s）：**只看 yaw 轴** —— 同一方向**连续**发 yaw ≥"""
 
     AXES = ("yaw", "surge", "heave", "sway")
 

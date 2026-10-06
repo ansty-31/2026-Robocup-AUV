@@ -1,7 +1,8 @@
-# tools — 工程工具（**按用途分三类**）
+# tools — 工程工具（**按用途分三类 + `presets/`**）
 
 这里放**离线**工具：部署/对齐板端、上板前自检、下水后的日志判读与标定。
 它们**不参与运行时**（`main.py` / 各 task 不会 import 这里的东西）。
+另有 `presets/`：DSH agent 预设 bundle（**不上板**，见下文该段）。
 
 ```bash
 # 按类跑：三个目录都可以独立工作（每个脚本自己定位工程根，在哪个 cwd 跑都行）
@@ -46,11 +47,15 @@ tools/
         ├── ruler_calib.py        #     靶子读数 → 等效焦距 fx/fy 与距离口径 c（--gate 与门框联立）
         ├── tape_ticks.py         #     刻度周期法：卷尺自带 1cm 刻度测像素比例
         └── pnp_calib.py          #     **PnP 位姿/深度标定**：真值 dump → 误差表 + 门框尺寸反演 + cfg 建议
+
+presets/                          # ④（**不上板**）DSH agent 预设 bundle：package.json + cordis.patch.yml + skills/
+└── auv-grab/                     #   「AUV 夹取工程师」预设（极简底架 + auv-grab-engineering playbook）
 ```
 
 > `tools/` 现在是一个 **Python 包**（`tools/__init__.py` + 三个子目录的 `__init__.py`），
 > 这样 `tests/tooling/test_pnp_calib.py` 可以 `from tools.analyze import pnp_calib` 直接测工具。
 > **那几个 `__init__.py` 不是装饰品，别删。**
+> （`presets/` 不是 Python 包，也不进部署清单，见下方 `presets/` 段。）
 
 **怎么选**：
 
@@ -77,6 +82,22 @@ tools/
 >
 > PnP/深度标定的完整实验流程（怎么摆、录多久、判据、记录表、报告模板）见
 > `doc/记录/实验待测-runbook.md`；`pnp_calib.py` 只负责「把 dump + 真值变成误差表和参数建议」。
+
+> **`presets/`**（第四类，**不上板、不参与运行时**）：DeepSeek Harness 的 agent 预设 bundle
+> （`package.json` + `cordis.patch.yml` + 随预设携带的 skill）。
+> `deploy_to_board.sh` 只按 `board_parity.md5` 清单上传，清单里没有 `tools/presets/`；
+> `check_board_parity.sh` 也显式 `-not -path './tools/presets/*'` ⇒ 两边都不会把它当成"漏传的源文件"，
+> 也不会推上板端。放在工程里是因为预设的人格与 playbook 本身就是本项目的工程纪律，跟着代码一起版本化。
+>
+> | 预设 | 内容 | 底架 |
+> |---|---|---|
+> | `auv-grab/` | `auv-grab`「AUV 夹取工程师」：人格（两阶段 —— 先夹小球、再夹小环）+ 自带 `auv-grab-engineering` playbook（现状与缺口 / 代码地图 / 算法 / 参数与实测基线 / 验证阶梯 / 已知坑） | 官方**极简模式**：`complete` 人格 + 常驻 pty shell；工具面只留 bash + read/write/edit/glob/grep + read_image + skill + ask_user + present + 自动压缩 |
+>
+> 安装/更新：用 `plugin_manager` 的 `install_bundle`，`target` 指到 bundle 目录
+> （`…/tools/presets/auv-grab`）；装完在 `list_plugins` 里应看到 `include:preset-auv-grab`
+> （`enabled: true`、`fiberPhase: active`）。**改了 `cordis.patch.yml` 或 skill 文件要重新 install 才生效。**
+> ⚠️ 该 bundle 是**按绝对路径** link 进 profile 的（`~/.dsh/profiles/web/package.json`），
+> `cordis.patch.yml` 里的 `customSkillDirs` 也是绝对路径 ⇒ **移动或改名这个目录会让预设失效**。
 
 > **过门**：当前在用的是 `gate/` **扁平 v1.2 版**（`gate/` 下 1 个总调度 + `gate/percept/`、`gate/motion/` 若干模块），
 > `kpt_memory` 是**可选开关、2026-09-18 起默认关闭**

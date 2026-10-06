@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """tests/conftest.py — 公共装置：工程根入 sys.path + 无硬件 SIM 默认值。
-* AUV_SIM_MODE=1 → S.SIM_MODE=True（UartController 默认只打印，不发串口）
-* AUV_STREAM=0   → SimCamera.read() 不新建 UDP 推流器（测试不碰网络）"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import os
 import sys
 
@@ -16,11 +15,7 @@ import pytest  # noqa: E402  (必须放在环境变量设置之后，语义上�
 
 
 class _FakeTelemetry(object):
-    """假遥测。`yaw_deg=None` = **没有遥测**（与加这个属性之前的行为一致 ⇒ 不影响既有用例）。
-
-    要用闭环的用例显式置 `uart.telemetry.yaw_deg = 0.0`；此后 `send_dof` 会按
-    "固件约定：+yaw = 右转 ⇒ 回传 yaw 减小"（σ=-1）积分。
-    """
+    """假遥测。`yaw_deg=None` = **没有遥测**（与加这个属性之前的行为一致 ⇒ 不影响既有用例）。"""
 
     def __init__(self):
         self.yaw_deg = None

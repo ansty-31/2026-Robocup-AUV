@@ -2,30 +2,6 @@
 # tools/deploy/tidy_board_bak.sh — 整理**板端** bak/：按时间归档压缩 + 去冗余，只留最近 K 个快照可直接回滚
 #
 #   bash tools/deploy/tidy_board_bak.sh --dry-run     # 只打印将做什么（不动板端）
-#   bash tools/deploy/tidy_board_bak.sh               # 执行
-#   KEEP=5 bash tools/deploy/tidy_board_bak.sh        # 保留最近 5 个快照不解压（默认 3）
-#   BIG_FILES=10 bash tools/deploy/tidy_board_bak.sh  # 文件数 ≥ 它的算"大改动"，也保留（默认 10）
-#
-# 整理后的板端布局（<板端> = AUV_BOARD_DIR，默认 /home/sunrise/Desktop/AUV_New）：
-#   <板端>/bak/
-#   ├── README.md                      # 自动生成的索引（含每个归档的内容 + 恢复方法）
-#   ├── rollback/deploy_MMDD_HHMMSS/   # 值得留着回滚的**原样**快照：cp -p 回去即可
-#   │                                  #   = 最近 KEEP 个 ∪ 文件数 ≥ BIG_FILES 的大改动
-#   └── archive/
-#       ├── deploy_YYYY-MM-DD.tar.gz   # 该天其余 deploy_* 快照（按目录名里的 MMDD 归类）
-#       ├── legacy_YYYY-MM-DD.tar.gz   # 散落的 *.bak_* 文件 + bak/cfg（archive_baks.sh 的产物）
-#       └── *.tgz                      # 板端原有归档，原样移入
-#
-# 原则：
-#   * **先打包再删**：除"空目录"外，任何内容都不会被丢掉（要彻底释放空间就手工删 archive/）；
-#   * 日期一律用**本地时间**：板端 RTC 常年不准（`deploy_*` 目录名是本地时间生成的，
-#     板端 `date`/mtime 却是 2000-01-01 那一类），所以归档名 = 目录名 MMDD + 本地年份；
-#   * 幂等：可随时重跑；新的 `bak/deploy_<stamp>/`（deploy_to_board.sh 每次同步前生成）会被
-#     自动归入 rollback/ 或 archive/；
-#   * 只操作板端 `<板端>/bak/`，不动代码目录。
-#
-# SSH 走与 deploy_to_board.sh 相同的包装器（默认 /home/ansty/RDKX5/.ssh_x5*.sh）：
-#   AUV_SSH / AUV_STREAM / AUV_BOARD_DIR / AUV_HELP_DIR
 set -u
 TOOLS_DIR="$(cd "$(dirname "$0")" && pwd)"
 HELP_DIR="${AUV_HELP_DIR:-/home/ansty/RDKX5}"

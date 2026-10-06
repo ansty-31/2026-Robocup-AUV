@@ -1,11 +1,7 @@
 # -*- coding: utf-8 -*-
 """tools/analyze/log/analyze_task_log.py — 分析 main.py 的逐帧任务日志（AUV_TASK_LOG 产出的 JSONL）
-
-用途：下水/台架跑完后，判断"到底是识别、位姿、还是决策在卡"。
-
 用法：
-    python3 tools/analyze/log/analyze_task_log.py <log.jsonl> [--task gate]
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 
 from __future__ import annotations
 

@@ -1,10 +1,7 @@
 # -*- coding: utf-8 -*-
 """gate/percept/mock.py — MockGateBackend：脚本化进近/穿门检测序列（SIM/测试）
-
-按帧序号推进一段"进近门"虚拟轨迹（可用 pose_fn 注入自定义），输出带 4 角点的
-
 用法示例：
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import numpy as np

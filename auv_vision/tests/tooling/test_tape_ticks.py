@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """tests/tooling/test_tape_ticks.py — 卷尺刻度周期测焦距（`tools/analyze/calib/tape_ticks.py`）的校验。
-工具测出的 `f` 必须对得上。另加"透视梯度"用例（靶面没正对时，光轴处的局部比例才对）。"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import os

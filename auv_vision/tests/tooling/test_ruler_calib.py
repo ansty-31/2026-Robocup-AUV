@@ -1,11 +1,6 @@
 # -*- coding: utf-8 -*-
 """tests/tooling/test_ruler_calib.py — 「卷尺刻度靶子」测量与解算（§A0b / §B4）的校验。
-覆盖：
-1. `span_stats`：3 个刻度点的跨度/半跨/斜视诊断（含正对 vs 斜视）；
-2. `make_ruler_record` schema（`kind: "ruler"`，含 z 真值解析）；
-3. `load_records`：z 从 `src` 兜底解析、跳过非靶子行；
-5. `report`：含 fx/c 与 `k_med = fx_cfg/fx`，skew 超 2% 会告警；
-6. 端到端：JSONL → `main()` → 报告落盘。"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import json

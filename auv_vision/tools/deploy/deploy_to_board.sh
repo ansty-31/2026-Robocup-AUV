@@ -2,22 +2,6 @@
 # tools/deploy/deploy_to_board.sh — 按 tools/deploy/board_parity.md5 **批量**增量同步到板端 + 板端自检
 #
 #   bash tools/deploy/deploy_to_board.sh              # 全流程（同步+删除+编译+pytest+终检）
-#   bash tools/deploy/deploy_to_board.sh --no-test    # 跳过板端 pytest（最快，秒级）
-#   bash tools/deploy/deploy_to_board.sh --dry-run    # 只报告将上传/删除哪些文件
-#
-# 退出码：0 = 同步完成且板端自检通过；1 = 同步完成但**板端 pytest 未全绿**（末尾 ⚠️ 会说明）。
-#   ⚠️ 板端"多出来的旧文件"（本地已删/改名的用例等）不会自动消失，全量 pytest 会因
-#      import 已删除模块而收集报错 → 把这类文件补进下面的 DELETED 列表（会先备份再删）。
-#
-# SSH 包装器默认在 /home/ansty/RDKX5/（含密码的 askpass 不进仓库），可用环境变量改：
-#   AUV_SSH / AUV_SCP / AUV_STREAM / AUV_ASKPASS
-#
-# 为什么快：① 板端 md5 **一次 SSH 批量取**；② 只把变化的文件打成一个 tar 传过去；
-#           ③ 备份/删除各一次 SSH。每一步都打印累计耗时，慢在哪一眼能看到。
-#
-# 注：md5 只比对内容、**看不见文件权限**；而 tar 只上传"内容变化"的文件，
-#     所以内容没变但权限丢了的（如 scp 覆盖掉 manual.sh 的 +x）永远不会被修。
-#     这里在收尾步骤顺手对板端 *.sh 统一 chmod +x，杜绝 "./manual.sh: Permission denied"。
 set -u
 TOOLS_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOCAL="$(cd "$TOOLS_DIR/../.." && pwd)"       # 工程根 = tools/deploy 的上两级（含 cfg/、main.py）
@@ -38,16 +22,25 @@ done
 
 # 板端已废弃、需要删掉的文件（先备份到 bak/deploy_<stamp>/）
 DELETED=(
+  # 2026-10-06 `grab/`+`place/` 合并为 `handling/`：板端旧包要清
+  grab/README.md
+  grab/__init__.py
+  grab/percept/__init__.py
+  grab/percept/ball_tracker.py
+  grab/percept/cv_ball.py
+  grab/percept/grab_detector.py
+  # 2026-10-02 `task1_2/` → `task/` 改名：板端旧目录要清
+  task1_2/__init__.py
+  task1_2/run_ball_reverse.sh
+  task1_2/run_gate.sh
   # 2026-09-30 gate_task 上移 + hdg/heading_align 合并：旧路径在板端要删
   gate/motion/gate_task.py
   gate/motion/heading_align.py
   task1_2/ball_forward.py
   task1_2/run_ball_forward.sh
   tests/test_ball_forward.py
-  # 按角度原地转的实现在 common/motion/turn_deg.py（脚本与 gate 正航向共用），
   # 板端旧的 task1_2/turn_deg.py 必须删掉，否则"两个同名脚本、行为不同"必然踩坑。
-  # 转向调用日志 `turn_log` 已从 common/ 挪到 base/（用户 2026-09-27 定：它是排查工具，
-  # 不属 common/ 的共用运动/检测逻辑）→ 板端旧位置必须删掉，否则"两份同名模块"必然踩坑。
+#   （细节与实测见 doc/注释历史.md）
   common/turn_log.py
   task1_2/turn_deg.py
   # 工程根旧副本：这些工具已迁到 tools/ 或已删除，板端根目录的同名旧文件要删
@@ -57,8 +50,6 @@ DELETED=(
   work/gate_pnp-before-guidance.zip
   work/verification-before-guidance.json
   work/verify_and_package.py
-  # v1.3/v1.4 分层版 gate/ **已确定不需要、已删除**：
-  # 板端把分层目录删掉，回到扁平 gate/（扁平那 8 个文件在清单里，会自动上传）
   gate/README.md
   gate/vision/gate_decode.py
   gate/vision/gate_detector.py
@@ -73,8 +64,6 @@ DELETED=(
   gate/motion/phase_degrade.py
   gate/motion/phase_recover.py
   gate/motion/phases.py
-    # [REMOVED 2026-10-04] gate/motion/__init__.py  ← 是活文件（本地存在+在清单里），列在 DELETED 会被误删
-  # 分层版专用工具/测试/文档（板端旧副本一并删）
   tools/watch_quality.py
   tools/check_cue_geometry.py
   tools/analyze_quality_dump.py
@@ -82,8 +71,8 @@ DELETED=(
   tests/test_gate_enhance.py
   tests/test_gate_cue_lead.py
   doc/算法说明-gate-v1.4-分层与质量分.md
-  # 分类重整：tests/tools 下移到子目录后，**旧扁平路径必须删掉**
-  # （否则板端会同时存在新旧两份：pytest 收集到重名模块会 import-mismatch 报错）
+  # 分类重整：tests/tools 下移到子目录后，**旧扁平路径必须删掉**（否则板端新旧两份并存 → pytest 收集到重名模块会 import-mismatch）
+#   （细节与实测见 doc/注释历史.md）
   tools/analyze_heading.py
   tools/analyze_kpt_dump.py
   tools/analyze_pnp_center.py
@@ -101,10 +90,6 @@ DELETED=(
   tests/test_gate_flow.py
   tests/test_motion.py
   tests/test_pnp_calib.py
-  # 板端遗留的**旧版/已合并**用例（合并成 6 个文件时的旧名）
-  # 板端这些更早的拆分文件不在清单里、会 import 已删除模块（gate.vision/gate.data/
-  # common.ramp/build_frame_with_header…）→ 板端 pytest 收集即报错、把全量自检搞红。
-  # 先备份到 bak/deploy_<stamp>/ 再删，保证"板端 == 清单"。
   tests/test_gate_dash.py
   tests/test_gate_decode.py
   tests/test_preprocess_rt.py
@@ -115,10 +100,8 @@ DELETED=(
   tests/test_ball_port.py
   tests/test_ball_search.py
   tests/test_detector.py
-  # ⚠️ 反面教材（别再犯）：`tests/test_gate_flow.py` 曾经既是"被删的分层版用例"、又是
-  #    "活文件"的同名路径 —— 那种情况下把它列进 DELETED 会把刚上传的文件再删掉。
-  #    分类重整后活文件是 `tests/tasks/gate/test_gate_flow.py`，扁平路径 `tests/test_gate_flow.py`
-  #    才是要清的旧位置（见上面的"分类重整"段）；两者同名不同路径，**加 DELETED 时看清层级**。
+  # ⚠️ 反面教材（别再犯）：`tests/test_gate_flow.py` 曾经既是"被删的分层版用例"、又是 "活文件"的同名路径 ⇒ 列进 DELETED 会把**刚上传的**文件再删掉。
+#   （细节与实测见 doc/注释历史.md）
   tests/test_gate_geometry.py
   tests/test_gate_kpt_memory.py
   tests/test_gate_standalone.py
@@ -130,19 +113,13 @@ DELETED=(
   tests/test_return_handover.py
   tests/test_settings.py
   tests/test_uart.py
-  # 2026-09-27 文档归位：记录类文档从 doc/ 移到 doc/记录/，板端旧路径的副本要删
-  # （新路径已在清单里 → 会自动上传；不删的话板端会同时留两份同名文档）
   doc/2026-09-22-改动记录-review.md
   doc/2026-09-23-改动记录-review.md
   doc/2026-09-26-改动记录-review.md
   doc/psi测量步骤_20260923.txt
   # gate/过门-状态机与参数.md 已归位到 doc/记录/过门-状态机与参数.md（来源见 doc/记录/README.md）
   gate/过门-状态机与参数.md
-  # 板端遗留的改名文件：本地是 doc/记录/psi测量步骤_20260923.txt（无下划线、已在 doc/记录/），
-  # 板端 doc/ 下还多一个 `psi_测量步骤_20260923.txt`（旧名 + 多一个下划线）→ 先备份再删。
   doc/psi_测量步骤_20260923.txt
-  # 2026-09-30 目录两层分级：**旧扁平路径全部要清**（否则板端新旧两份并存，
-  # pytest 收集到重名模块会 import-mismatch，脚本也会指错路径）。
   base/settings.py
   base/camera.py
   base/uart.py
@@ -183,8 +160,6 @@ DELETED=(
   tests/test_common.py
   tests/test_paths.py
   tests/test_hud.py
-    # [REMOVED 2026-10-04] tests/tasks/test_ball.py  ← 是活文件（本地存在+在清单里），列在 DELETED 会被误删
-    # [REMOVED 2026-10-04] tests/tasks/test_motion.py  ← 是活文件（本地存在+在清单里），列在 DELETED 会被误删
   tests/tasks/test_gate_flow.py
   tests/tasks/test_gate_vision.py
   tests/tasks/test_gate_postproc.py
@@ -254,14 +229,8 @@ while read -r m p; do RM["$p"]="$m"; done < "$TMPD/remote"
 
 n_same=0; n_new=0; n_diff=0; n_miss_local=0; n_skip=0
 : > "$CHANGED"
-# ---- 「本地/板端故意分叉」的跳过表 ----
-#   ⚠️ 别把"cfg 不要整份推板端"只写在文档里、靠人工记着排除：漏一次就把现场值冲掉
-#      （那些现场值没有任何本地副本）。
-#   ⚠️ 清单的**唯一来源是 tools/deploy/board_forks.txt**（check_board_parity.sh 读同一个文件）。
-#     别改回"只在这个脚本里写数组"：那边不知道分叉，--board 检查会永远红着。
-#   换目标仓库时可用 AUV_FORKS_FILE 指向另一个分叉清单（A 域那份已随 A 域退役归档）：
-#     那个仓库的"故意分叉"和本仓库无关（它的 base/cfg/settings.py 也要跟着传）。
-#   cfg/comm.yaml 曾按"统一为本地值"处理，现在已不在分叉清单里。
+#   ⚠️ 别把"cfg 不要整份推板端"只写在文档里、靠人工记着排除：漏一次就把现场值冲掉（那些现场值没有本地副本）
+#   （细节与实测见 doc/注释历史.md）
 FORK_FILE="${AUV_FORKS_FILE:-$TOOLS_DIR/board_forks.txt}"
 SKIP_FILES=()
 if [ -f "$FORK_FILE" ]; then
@@ -315,10 +284,6 @@ fi
 # ---- 4) 删除已废弃文件（一次 SSH，先备份）----
 { echo "cd $BOARD"; echo "mkdir -p bak/deploy_$STAMP";
   for f in "${DELETED[@]}"; do
-    # ★ 活文件保护（2026-10-04）：清单里的文件是活文件，绝不能被这里删掉。
-    #   历史坑：gate/gate_task.py、gate/motion/__init__.py、tests/tasks/test_ball.py、
-    #   tests/tasks/test_motion.py 既在 board_parity.md5 又在 DELETED 里，
-    #   跑一次 deploy 就会把板端活文件删掉（且因"已一致"不会重传）→ gate 任务直接崩。
     if awk -v p="$f" '{ sub(/[[:space:]]*\]$/, ""); n=split($0, a, /[[:space:]]+/); if (a[n]==p) { found=1; exit } } END { exit !found }' "$MANIFEST"; then
       echo "[skip-live] $f（在清单里 = 活文件，不删）"
       continue
@@ -364,10 +329,8 @@ PYEOF
 timeout 900 "$STREAM" "bash -s" < "$TMPD/check.sh" 2>&1 | grep -v "Warning: Permanently" | tee "$TMPD/selfcheck.log"
 step "板端自检完成"
 
-# ---- 6) 终检 + 刷新清单（一次 SSH 批量 md5）----
 # ⚠️ `board_parity.md5` **只对应默认目标（在用副本 AUV_New）**。
-#    给别的仓库同步时（AUV_BOARD_DIR 改了）必须 AUV_PARITY_WRITE=0：
-#    否则会把那个仓库的字节写进清单，在用副本的对照当场变红。
+#   （细节与实测见 doc/注释历史.md）
 if [ "${AUV_PARITY_WRITE:-1}" = "1" ]; then
   AUV_SSH="$SSH" bash "$TOOLS_DIR/check_board_parity.sh" --board --write 2>&1 | tail -4
 else
@@ -375,8 +338,6 @@ else
 fi
 step "完成：上传 ${n_new}/${n_diff} 新/改，已一致 ${n_same}"
 
-# 板端 pytest **未全绿要吼出来**（以前是静默放过：红着也照样"完成"，很容易误判）
-# 清单已按 md5 刷新（那是"板端字节 == 本地"，与测试无关）；这里只把退出码拉红。
 if [ "$NO_TEST" != "1" ] && grep -q PYTEST-FAIL "$TMPD/selfcheck.log" 2>/dev/null; then
   echo "[deploy] ⚠️ 板端 pytest 未全绿（见上面 tail -3）：代码已同步，但**板端自检不算通过**。"
   echo "         常见原因：板端还留着旧用例（import 已删除模块）→ 加进本脚本 DELETED 列表后重跑。"

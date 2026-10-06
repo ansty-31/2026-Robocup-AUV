@@ -33,7 +33,7 @@
 >   `gate/motion/params.py::_D_KPT`（`gate_task` 再导出）同值。0.8 = 规范 `doc/设计/gate_pose_decode_spec.md` §6 的 `V_MIN`（旧值 0.9/0.7 是给
 >   **上一代**权重现场试出来的）；`vis_thr` 刻意更低，只为让低 v 角点留在画面/日志里做诊断 ——
 >   它进不了 mode/PnP。**cfg 不要整份推板端**（`comm.yaml` 仍有 4 处台架分叉）。
-> - **任务三 过门（gate）= 扁平 v1.2 版**（`gate/` 两层结构；源自 v1.2 原版 + 2026-09-18 新增正航向 + 2026-09-26 新增后处理，
+> - **任务二 过门（gate）= 扁平 v1.2 版**（`gate/` 两层结构；源自 v1.2 原版 + 2026-09-18 新增正航向 + 2026-09-26 新增后处理，
 >   2026-09-30 把相位机按方法簇拆分、`gate_task.py` 提到 `gate/` 作总调度），
 >   这是**定版方案**，不再有分层结构。
 > - `kpt_memory`（门角点逐点软融合）是**可选开关、2026-09-18 起默认关闭**：
@@ -85,14 +85,16 @@ auv_vision/
 │   └── log/             #   turn_log.py(转向调用日志：只写字、不参与控制)
 ├── common/              # 跨任务公共件（**两层**）：vision/ 图像 · motion/ 运动 · cfg/ 配置读取
 │   ├── vision/          #   detector.py(检测) · preprocess.py(图像链路)
-│   ├── motion/          #   PID.py · turn_deg.py(按角度原地转：遥测 yaw 闭环 + 硬停)
+│   ├── motion/          #   PID.py · turn_deg.py(指定角度轴：yaw/pitch/roll，遥测完成标志 + 硬停)
+│   │                    #   search_scan.py(公共慢扫) · axis.py(轴动作/下潜到位/定时推力)
+│   │                    #   drop.py(**横倾放球/倒球序列**：任务三倒错球、任务四放球共用)
 │   └── cfg/             #   cfgnode.py(cfg 节点读取 + **ball/gate 共用参数的唯一入口**)
 ├── task1_2/             # 任务一（撞球）：
 │   ├── ball.py          #   任务一 撞球 BallTask
 │   ├── run_ball_reverse.sh  #   编排（8 步）：待机→(可选)下潜→(可选)前进→撞球→倒车→
 │   │                        #     前进 2s→**左转 90°（遥测闭环）**→过门任务（可 AUV_GATE_AFTER=0 截断）
 │   └── run_gate.sh      #   只跑过门（下水专测 gate 用；参数见脚本头部注释）
-├── gate/                # 任务三 过门（**两层**：percept/ 感知 · motion/ 运动）
+├── gate/                # 任务二 过门（**两层**：percept/ 感知 · motion/ 运动）
 │   ├── percept/         #   gate_decode.py(keypoint 解码) · gate_detector.py(组合根) · gate_frontend.py(mode 判定)
 │   │                    #   gate_postproc.py(后处理：可信角点/几何合法/去重/选门) · geometry.py(CameraModel/PnP/反投影)
 │   │                    #   kpt_memory.py(角点逐点软融合，**默认关**) · mock.py(仿真后端)
@@ -105,6 +107,11 @@ auv_vision/
 #              **没有"航向优先"**（旧 `entry_psi_first` 已删）
 │                        #   另有一个更粗的变体 B（4 文件）与对比：`bash bak/migration/_gate_split/switch.sh A|B`、bak/migration/SPLIT-AB.md
 │                        #   （gate 的**逐状态导读**在 doc/记录/过门-状态机与参数.md；改 gate 前先看）
+├── handling/            # **任务「夹取 + 放置」**（同一总调度 `handling_task.py`，mode=grab|place|full）
+│                        #   motion/  motion/{params,actions,phases}.py —— 兜底值 / 关键动作 / 相位（与 gate/ 同规）
+│                        #   percept/ 纯 CV 红球检测与 ROI 跟踪（下视；不走 BPU）
+│                        #   `full` = 夹取完成后**同一实例交接**给放置（限深与收尾由本任务持有）
+│                        #   感知全程用**下视**（`wants_down()`：grab/full 为真、place 为假）
 ├── bak/                 # 归档（gitignored，不上板）：**按用途分 8 类**（snapshots/ weights/ trees/ retired/\n│                        #   trials/ files/ migration/ + README.md 索引与旧→新映射表）
 ├── tools/               # 工具（**按用途分三类**；除注明外都是本机驱动、不传板端，见 tools/README.md）
 │   ├── deploy/          #   部署与一致性：deploy_to_board.sh(烧录) · check_board_parity.sh + board_parity.md5(清单)
@@ -133,7 +140,8 @@ auv_vision/
 │   │                    #     2026-09-2X-改动记录-review.md（逐日全记录）· 过门-状态机与参数.md（逐状态导读 + §9 实测）
 │   │                    #     实验待测-runbook.md（PnP 标定实验）· 算法说明-gate-PnP移植方案.md
 │   │                    #     算法说明-gate-角点逐点融合滤波.md · 前视USB相机低延迟推流方案.md · psi测量步骤_20260923.txt
-│   └── 注释历史.md      #   按文件/按键的历史索引：**实测数字 / 试错 / 参数沿革 / 注意事项**
+│   ├── 注释历史.md      #   按文件/按键的历史索引（**入口**）：实测数字 / 试错 / 参数沿革 / 注意事项
+│   └── 注释历史/        #   索引的正文，按域分 7 个文件（cfg/gate/base-common/grab-task-manual/tools/tests/misc）
 ├── models/ · tests/     # 权重(.bin) · 无硬件测试套件（**按层分子目录**，见 tests/README.md）
 │                        #   tests/：**216 例**（以 `pytest tests/ -q` 输出为准）
 │                        #     platform/  test_base   平台：settings/11B 帧/遥测/限深保护/硬停
@@ -154,13 +162,16 @@ auv_vision/
 │                        #   分层块：`pytest tests/platform -q` / `tests/tasks` / `tests/tooling`
 ```
 
-分区语义：`base`（平台基础设施）/ `common`（跨任务公用）/ `task1_2`（任务一）/ `gate`（任务三）。
+分区语义：`base`（平台基础设施）/ `common`（跨任务公用）/ `task1_2`（任务一 撞球）/ `gate`（任务二 过门）/
+`grab`（任务三 夹取）/ `place`（任务四 放置）。
 依赖规则：任务代码只 import `base`/`common` 与同级任务模块；`main.py` 是唯一装配点。
+⚠️ **任务三与任务四并列，谁也不 import 谁** —— 两者共用的动作必须在 `common/motion/`
+（例：横倾放球/倒球 = `common/motion/drop.py`；`tests/tasks/place` 有用例钉着这条）。
 
 ## 快速开始（本机，无硬件）
 
 ```bash
-python3 -m pytest tests/ -q              # 无硬件测试（**216 例**，2026-10-01 实测；platform/tasks/tooling 三层）
+python3 -m pytest tests/ -q              # 无硬件测试（**318 例**，2026-10-06 实测；platform/tasks/tooling 三层）
 python3 main.py --task ball              # 只跑撞球（SIM/mock）
 python3 main.py --task gate              # 试跑过门（cfg model.mode: mock）
 python3 preview_detect.py --gate-kpt     # 下水前：门框 + 4 角点 + 置信度（船不动）
@@ -205,7 +216,7 @@ python3 preview_detect.py --gate-kpt         # 下水前：门框 + 4 角点 + �
   总时限 `comm.ball.timeout_ms`）；
 - **撞球之后**（`task1_2/run_ball_reverse.sh`）：**定时直线倒车**（开环、不依赖视觉）→ 前进 2s
   → **按角度左转 90°**（`common/motion/turn_deg.py`，遥测 yaw 闭环 + 转完硬停）→ 过门任务；
-- **任务三 过门**（`gate/gate_task.py` 只有编排；**两层结构** `gate/percept/` 感知 + `gate/motion/` 决策，
+- **任务二 过门**（`gate/gate_task.py` 只有编排；**两层结构** `gate/percept/` 感知 + `gate/motion/` 决策，
   2026-09-30 按方法簇拆分；**逻辑图见 `doc/设计/过门逻辑树.md`**，细则/参数见 `doc/记录/算法说明-gate-PnP移植方案.md`）：
   keypoint 四角 → IPPE 6-DoF，深度 `Z=tvec.z`；
   ALIGN 子状态 GOLDEN/**HDG(正航向)**/**SWAY_BACK(转后回找)**/CREEP/HOLD/REACQUIRE → APPROACH → THROUGH（机身过门判据）。

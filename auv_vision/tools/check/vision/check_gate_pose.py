@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 """tools/check/vision/check_gate_pose.py — 查"为什么位姿被拒"（只读相机，不驱动推进器）。
-
-打印每帧：角点置信度 / mode / 候选解数量 / 最佳候选的 RMS 与 tz / gate_pose 最终结果。
 用法（板端）：python3 tools/check/vision/check_gate_pose.py [秒数]
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import os
 import sys
 import time

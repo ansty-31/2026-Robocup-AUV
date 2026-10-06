@@ -1,12 +1,7 @@
 # -*- coding: utf-8 -*-
 """feature_coverage.py — 从逐帧任务日志整理「哪些功能在最近的下水测试里根本没被用到」。
-用途：下水几轮之后，回答「我调的那些开关/分支，到底跑过没跑过」。
 用法：python3 tools/analyze/log/feature_coverage.py log/*.jsonl [--json]
-判定分三类（**只看日志与配置，不做推测**）：
-· 用到了   = 日志里出现了该分支特有的字段取值（phase/substate/action/mode/命令非零…）
-· 没用到   = 该轮日志里**一次都没出现**
-· 未部署   = 代码/配置里存在，但该轮日志时间之后才加（由 --after-ms 或人工判断）
-需要下位机告警行/遥测细节的，标记为「需控制台日志」，不在这里下结论。"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import argparse

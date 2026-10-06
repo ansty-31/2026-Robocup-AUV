@@ -1,11 +1,7 @@
 # -*- coding: utf-8 -*-
 """tools/analyze/log/analyze_heading.py — 从角点 dump 估「机身正不正」能不能测（航向估计的噪声底）。
-问题：ALIGN 里 yaw 可以用 `dxn` 驱动 —— 那是**方位控制器**
-理论上位姿档能测：门法向 n = R·[0,0,1]（相机系），
-**但能不能用取决于噪声**：角点 RMS 有 10~18px，平面目标的转角对像素噪声很敏感。
-* 噪声 << 待修的角度（~10°）→ 可以加"航向 → yaw"通道；
-* 噪声同量级 → 测不准 → 老老实实以 sway 为主（并把估计打进日志继续观察）。
-用法：python3 tools/analyze/log/analyze_heading.py <dump.jsonl> [...]"""
+用法：python3 tools/analyze/log/analyze_heading.py <dump.jsonl> [...]
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import json

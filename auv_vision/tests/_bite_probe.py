@@ -1,19 +1,18 @@
 # -*- coding: utf-8 -*-
 """tests/_bite_probe.py — 临时文件：**"会咬"自检**（跑完即删，不属于交付套件）。
-
-每条探针 = 「在内存里改一个 cfg 值 → 直接调用目标用例 → 它必须变红」。
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import pytest
 
 import base.cfg.settings as S
 
-def test_bite__loiter_timeout_is_used(monkeypatch):
-    """改 comm.gate.loiter.timeout_ms → 门口兜底用例必须红。"""
-    from tests.tasks.gate.test_gate_flow import test_loiter_timeout_commits_through as target
+def test_bite__loiter_center_window_is_used(monkeypatch):
+    """改 `comm.gate.loiter.dx_max`（门口"安全带"宽）→ 门口兜底用例必须红。"""
+    from tests.tasks.gate.test_gate_flow import (
+        test_loiter_timeout_commits_with_loosened_criteria as target)
     monkeypatch.setitem(S.comm.gate, "loiter",
-                        S.Y(dict(S.comm.gate.loiter, timeout_ms=10 ** 9)))
+                        S.Y(dict(S.comm.gate.loiter, dx_max=0.0)))   # 安全带收成 0 ⇒ 永远不算"在门口"
     with pytest.raises(AssertionError):
-        target()
+        target(monkeypatch)          # 新用例签名带 fixture
 
 def test_bite__search_sweep_value_is_pinned(monkeypatch):
     """改 comm.gate.search.sweep_s → 配置守卫用例必须红（波形用例只验形状，验不了数值）。"""
@@ -52,22 +51,18 @@ def test_bite__ball_dash_ratio_is_used(monkeypatch):
         target(FakeUart())
 
 def test_bite__hdg_measure_needs_trusted_full_frame(monkeypatch):
-    """改 `vision.gate.keypoint.conf_thr` → "psi 只来自被采信的 full 帧"用例必须红。
-
-    （原探针改的是 `hdg.fresh_ms`；那个旋钮 2026-09-30 已随"航向优先"一起删除，
-      现在的"新鲜度"机制是"转向之后必须有一次新的 ψ 测量"，由 turn 计数/时刻驱动。）
-    """
+    """改 `vision.gate.keypoint.conf_thr` → "psi 只来自被采信的 full 帧"用例必须红。"""
     from tests.tasks.test_motion import test_p3p_frames_do_not_feed_the_filter as target
     monkeypatch.setitem(S.vision.gate["keypoint"], "conf_thr", 0.99)   # 高于用例里 full 帧的 0.95
     with pytest.raises(AssertionError):
         target()
 
 
-def test_bite__per_gate_turn_cap_is_used(monkeypatch):
-    """改 `comm.gate.hdg.max_turns` → 逐小步收敛用例必须红（它要转 ≥2 次）。"""
+def test_bite__turn_scale_shapes_the_issued_angle(monkeypatch):
+    """改 `comm.gate.hdg.turn_scale` → 下发角成形用例必须红。"""
     from tests.tasks.gate.test_gate_flow import (
-        test_small_steps_converge_toward_the_target_after_the_once_per_gate_removal as target)
-    monkeypatch.setitem(S.comm.gate["hdg"], "max_turns", 1)            # 只许转一次
+        test_turn_scale_and_max_step_shape_the_issued_angle as target)
+    monkeypatch.setitem(S.comm.gate["hdg"], "turn_scale", 1.0)   # 不再缩放 ⇒ 下发角变了
     with pytest.raises(AssertionError):
         target()
 

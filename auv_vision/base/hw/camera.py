@@ -1,9 +1,6 @@
 # -*- coding: utf-8 -*-
 """camera.py — 相机：前视 / 下视分离，各自可 sim 或真机，真机失败可软回退 sim
-配置：cfg/vision.yaml camera.front / camera.down（各自 type/device/宽高/fps/标定）。
-调用：create_camera("front" | "down")；返回对象仅实现 read()。
-**视频回放**（离线复现/回归；默认行为不变，只在设了环境变量时生效）：
-保证时间基与真机一致（HDG 的 PID/超时都按真实时间算）。"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import os
 import time
 
@@ -31,13 +28,8 @@ class Camera(object):
         pass
 
 
-# ---------------------------------------------------------------------------
-# 视频文件回放（离线复现：把一段录制视频当成前视相机）
-# ---------------------------------------------------------------------------
 class VideoFileCamera(Camera):
-    """把视频文件当相机用（见模块头「视频回放」）。**只用于离线复现/回归**。
-    要点：
-    · 读完返回 None（只打印一次），主循环空转直到任务自身超时/过门结束。"""
+    """把视频文件当相机用（见模块头「视频回放」）。**只用于离线复现/回归**。"""
 
     def __init__(self, cfg, path, fps=None):
         if not HAS_CV2:
@@ -94,9 +86,6 @@ class VideoFileCamera(Camera):
             pass
 
 
-# ---------------------------------------------------------------------------
-# 虚拟相机（前视/下视各自仿真；下视带红色标示线供 back 真实颜色逻辑测试）
-# ---------------------------------------------------------------------------
 class SimCamera(Camera):
     def __init__(self, which, stream=True):
         cfg = S.vision.camera[which]
@@ -130,15 +119,7 @@ class SimCamera(Camera):
         return base
 
 
-# ---------------------------------------------------------------------------
-# 推流（可选）：把相机原始 MJPEG 帧零转码转发给水面 PC
-#   开关：cfg/vision.yaml 顶层 stream.*（手动模式由根目录 manual.sh 用环境变量覆盖）
-#   实现：manual/stream.py
 #   关键点：推流不另外开相机（UVC 只允许一个进程取流），而是"谁在用相机谁顺带推"，
-#   因此识别（main.py）与录像（recorder.py）各自跑时都能同时推流，互不冲突。
-#   环境变量覆盖：AUV_STREAM=1/0、AUV_STREAM_HOST、AUV_STREAM_PORT、
-#                AUV_STREAM_FPS、AUV_STREAM_PKT
-# ---------------------------------------------------------------------------
 _stream_pusher = None
 
 
@@ -183,9 +164,6 @@ def get_stream_pusher():
     return _stream_pusher
 
 
-# ---------------------------------------------------------------------------
-# 真机后端
-# ---------------------------------------------------------------------------
 class UsbCamera(Camera):
     def __init__(self, cfg, stream=True):
         if not HAS_CV2:
@@ -195,8 +173,6 @@ class UsbCamera(Camera):
         self._cap = cv2.VideoCapture(self.dev, getattr(cv2, "CAP_V4L2", 0))
         if not self._cap.isOpened():
             raise RuntimeError("无法打开相机 %s" % self.dev)
-        # OpenCV 的 V4L2 后端默认协商 YUYV：本相机 720p YUYV 只有 **9 fps**，
-        # MJPG 有 60 fps。所以显式选 MJPG，并用 CONVERT_RGB=0 直接拿原始 JPEG
         # （退流零转码；识别侧再 cv2.imdecode 成 BGR，代价与让 OpenCV 内部解码相同）。
         self._raw = False
         try:
@@ -215,8 +191,6 @@ class UsbCamera(Camera):
             self._raw = False
         if not self._raw:
             self._cap.set(cv2.CAP_PROP_CONVERT_RGB, 1)
-        # 以驱动实际协商结果为准（本相机 720p MJPG 只有 60fps 档，写 30 也按 60 出）；
-        # self.fps 保持配置值不变，避免影响 recorder.py 的落盘帧率语义。
         self.width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.negotiated_fps = float(self._cap.get(cv2.CAP_PROP_FPS)) or 0.0
@@ -256,9 +230,6 @@ class MipiCamera(Camera):
             "下视 MIPI 相机尚未接入：确认 CSI 驱动节点后实现本类")
 
 
-# ---------------------------------------------------------------------------
-# 工厂：front/down 各自按 yaml type 实例化；真机失败按 fallback_sim 软回退
-# ---------------------------------------------------------------------------
 def create_camera(which, fallback_sim=None, stream=True):
     cfg = S.vision.camera[which]
     typ = cfg.type
@@ -294,10 +265,7 @@ def create_camera(which, fallback_sim=None, stream=True):
         raise
 
 def _camera_holders(dev):
-    """谁占着这个视频设备（相机是独占的，手动推流会抢走它）。
-
-    返回 ["PID(命令)", ...]；`dev` 支持 "0" 与 "/dev/video0" 两种写法；没装 fuser 时返回 []。
-    """
+    """谁占着这个视频设备（相机是独占的，手动推流会抢走它）。"""
     if not dev:
         return []
     path = dev if str(dev).startswith("/dev/") else "/dev/video%s" % dev

@@ -2,19 +2,6 @@
 # run_gate.sh — 过门单任务：待机 → (可选下潜/前进) → (转指定角度 → 过门)×N → 转指定角度
 #
 # 只跑 gate、不撞球；每次"过门"都是单门（pass_target=1，见 cfg/comm.yaml），
-# 转角由脚本机械控制、按固定序列执行 —— "四个门当一个门四次过"。
-#
-# 用法：  ./task1_2/run_gate.sh
-# 可调（环境变量，默认值在括号里）：
-#   AUV_WAIT_S(10)        待机秒数
-#   AUV_DESCEND_S(0)      下潜秒数（0=不下潜）
-#   AUV_FWD_S(0)          下潜后前进秒数（0=不前进）
-#   AUV_FWD_SURGE(0.35)   前进速度
-#   AUV_TURN_ANGLES       转角序列（空格分隔，带符号：正=左转 / 负=右转）
-#                         如 AUV_TURN_ANGLES="90 -45 90 30"；个数=过门次数
-#   AUV_TURN_TIMEOUT(20)  转向等完成反馈超时（秒）
-#   AUV_LOG_TAG(run)      日志前缀（区分轮次，别用 date）
-#                         → log/<tag>gate_<N>.jsonl
 set -u
 cd "$(dirname "$0")/.."
 
@@ -24,8 +11,6 @@ WAIT_S="${AUV_WAIT_S:-0}"
 DESCEND_S="${AUV_DESCEND_S:-0}"
 FWD_S="${AUV_FWD_S:-0}"
 FWD_SURGE="${AUV_FWD_SURGE:-0.35}"
-# ============ ★ 现场代填：每一次"转角度→过门"的转角（度）============
-# 数组长度 = 过门次数；四扇门可以填四个不同的角度。
 TURN_ANGLES=(
    0   # 第 1 次：第 1 扇门前转角（正=左转）
    0   # 第 2 次

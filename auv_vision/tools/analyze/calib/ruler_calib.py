@@ -1,22 +1,6 @@
 # -*- coding: utf-8 -*-
 """tools/analyze/calib/ruler_calib.py — 「卷尺刻度靶子」解算器：从靶子读数求**等效焦距 fx 与距离口径 c**
-要解决的问题
-------------
-PnP 的深度 `z_meas = fx_cfg·W_cfg/Δu` 里有两个未知量在只看门框时**简并**：
-· 相机/介质带来的有效焦距 `fx_med`（罩外是空气还是水，差 ~1.4×）；
-· 门框的真实口径 `W_true`（外缘 0.77 还是管子中线 0.72）。
-用**已知长度的卷尺刻度**当靶子就与门无关了 —— 但还需要一个距离口径 `c`：
-Δu = fx·L / (z_tape + c)      L = 刻度跨度(m)，z_tape = 从固定零点量到的读数
-`c` 的物理含义：**光心相对你那个零点标记的偏置**（镜头/入瞳在零点前方则 c>0）。
-输入
-----
-`z_tape` 优先取记录字段，缺了就从 `src`/文件名里解析（`ruler_z200` → 2.00 m）。
-用法
-----
-python3 tools/analyze/calib/ruler_calib.py log/pnp_0922/ruler.jsonl
-判据（runbook §A0b / §B4）
--------------------------
-· `c` 的用途：之后所有卷尺读数都按 `z_true = z_tape + c` 换算。"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import argparse
@@ -54,9 +38,7 @@ def du_from_points(p):
 
 
 def axis_of(rec):
-    """这条读数量到的是 `fx` 还是 `fy`。
-    判据用 `label_corners --measure` 记下的 `theta_deg`（画面里的倾角）。
-    没有 theta（手写记录）时按 `axis` 键，再不行默认 x。"""
+    """这条读数量到的是 `fx` 还是 `fy`。"""
     th = rec.get("theta_deg")
     if th is not None:
         th = abs(float(th)) % 180.0
@@ -141,11 +123,7 @@ def _du(r):
 
 
 def solve(recs):
-    """最小二乘解 (fx, c)。模型 `z + c = fx·L/Δu` 对 (fx, c) 线性。
-
-    `recs` 里的每条记录兼容 `load_records` 的产物（`z/du/span/skew`）与手写形式
-    （`z_tape/du(|p)/span_m`）。返回 dict：fx, c, rms_m, rms_px, 逐档预测, 条件数。
-    """
+    """最小二乘解 (fx, c)。模型 `z + c = fx·L/Δu` 对 (fx, c) 线性。"""
     norm = []
     for r in recs:
         z, du = _z(r), _du(r)
@@ -236,11 +214,7 @@ def fx_cfg(default=None):
 
 # ---------------------------------------------- 门框 dump（联立用）
 def load_gate(paths):
-    """读门框 dump：文件名 `...z<厘米>...` 即真值；每档取**门宽像素中位数**。
-
-    复用 `pnp_calib.parse_gt_from_name` 的命名约定（`pnp_z150.jsonl` → 1.50 m）。
-    返回 [{src, z, du, n}]，`du` = 每帧 `|x_TR − x_TL|` 的中位数（门框横向跨度）。
-    """
+    """读门框 dump：文件名 `...z<厘米>...` 即真值；每档取**门宽像素中位数**。"""
     from tools.analyze.calib.pnp_calib import parse_gt_from_name
     out = []
     for pat in paths:
@@ -274,11 +248,7 @@ def load_gate(paths):
 
 
 def solve_joint(ruler, gate, ratio=1.0, c_grid=None):
-    """靶子 + 门框**联立**解 `(fx, fy, c, W_eff)`。
-    靶子 `Δu = f_轴·L/(z+c)`（水平靶线给 `fx`、竖直给 `fy`）；门 `Δu = fx·W/(z+c)`。
-    未知量按手头数据自动决定：
-    · 靶子只有竖向档 → `(fy, fx·W)`，并用 `fx = ratio·fy` 联结（`ratio` = cfg 的 fx/fy）；
-    门框的几档提供额外的"比例"信息，把 `c` 与 `W_eff` 一起压出来。"""
+    """靶子 + 门框**联立**解 `(fx, fy, c, W_eff)`。"""
     if not gate:
         raise ValueError("联立解需要门框 dump（--gate）")
     if not ruler:

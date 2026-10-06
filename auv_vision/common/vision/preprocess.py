@@ -1,10 +1,6 @@
 # -*- coding: utf-8 -*-
 """preprocess.py — 目标识别前的图像预处理（推理链路，**单域 D+wb**）
-raw → 缩放到模型方形输入（默认 640x640）→ 画面补偿 enhance(WB→CLAHE→gamma)
-→ 640 上去畸变 remap（可选，需标定 yaml；与训练链路 prepare_frames.py 一致）
-（A 域那条链 `remap@720p → resize640 → enhance` 已于 2026-10-01 退役归档，见 bak/retired/Adomain_20261001/）
-（训练数据集制作在 PC 工程 RDKX5-YOLOv11n- 中完成，不在本工程范围）
-参数源：cfg/vision.yaml（image.* / camera.*_calibration / model.input_size）"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import os
 
 import numpy as np
@@ -19,9 +15,6 @@ def _cv2():
         raise RuntimeError("本链路需要 opencv：pip install opencv-python"
                            "（板端: sudo apt install python3-opencv）")
 
-# ---------------------------------------------------------------------------
-# 链路步骤（纯函数，与板端逐条一致）
-# ---------------------------------------------------------------------------
 def calibration_maps(path, width, height):
     """由标定 yaml 生成去畸变 remap 映射（camera_matrix/distortion_coefficients）。"""
     cv2 = _cv2()
@@ -41,12 +34,7 @@ def calibration_maps(path, width, height):
 RAW_W, RAW_H = 1280, 720          # 标定 yaml 的原生分辨率（yaml 未写时的缺省）
 
 def calibration_maps_640(path, size=640):
-    """640 域去畸变映射：dest(去畸变 size×size) ← src(畸变 size×size)
-    与 PC 工程 `scripts/1_prepare/map_pose_dataset.py` 的「D 域」严格同式：
-    S = diag(size/RAW_W, size/RAW_H, 1)
-    nk640 = S @ nk720 ;  K640 = S @ K
-    initUndistortRectifyMap(K640, dist, None, nk640, (size,size))
-    几何上与「先 remap@720p 再缩放」等价（因为 nk640 = S·nk720）。"""
+    """640 域去畸变映射：dest(去畸变 size×size) ← src(畸变 size×size)"""
     cv2 = _cv2()
     fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_READ)
     if not fs.isOpened():
@@ -105,9 +93,7 @@ def _fused_luts(gains, gamma):
     return luts
 
 def enhance(frame, gains, clip, gamma):
-    """画面补偿：白平衡通道增益 → LAB-L CLAHE(clip>0 时) → gamma LUT。
-    融合进同一张 LUT，每通道只做一次 cv2.LUT。
-    CLAHE 对象与 gamma LUT 缓存复用（原先每帧 createCLAHE / 重建 LUT）。"""
+    """画面补偿：白平衡通道增益 → LAB-L CLAHE(clip>0 时) → gamma LUT。"""
     cv2 = _cv2()
     if clip <= 0:                      # 无 CLAHE：WB 与 gamma 融合，单次 LUT
         w = _fused_luts(gains, gamma)
@@ -123,9 +109,6 @@ def enhance(frame, gains, clip, gamma):
         f = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
     return cv2.LUT(f, _gamma_lut(gamma))
 
-# ---------------------------------------------------------------------------
-# 统一入口
-# ---------------------------------------------------------------------------
 class ModelPreprocessor(object):
     """推理链路预处理对象（缓存去畸变映射）。"""
 
@@ -141,10 +124,7 @@ class ModelPreprocessor(object):
 
 
     def process(self, frame_bgr):
-        """raw(BGR,任意尺寸) → 缩放 → 画面补偿 → 去畸变(640 域)，即 **D 链**（单域，2026-10-01 起）。
-        顺序有讲究：enhance 本来就在 640 上做（与训练链路一致，PC 工程只产 D+wb）。
-        几何：kpt 回缩放后落在**去畸变 720p** 空间，相机模型一律 `rectified=True` 的 nk720，
-        **不要**改成 raw K/D。（改链路前先看 doc/设计/gate_pose_decode_spec.md 与权重代次。）"""
+        """raw(BGR,任意尺寸) → 缩放 → 画面补偿 → 去畸变(640 域)，即 **D 链**（单域，2026-10-01 起）。"""
         cv2 = _cv2()
         h, w = frame_bgr.shape[:2]
         f = frame_bgr

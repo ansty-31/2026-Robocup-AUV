@@ -1,16 +1,6 @@
 # -*- coding: utf-8 -*-
-"""gate/gate_task.py — **任务三（过门）总调度**：GateTask 相位机编排
-
-门 = 对称平面矩形门框，悬空、无朝向要求；任务 = 机身穿过开口。
-相位：SEARCH → ALIGN → APPROACH → THROUGH(计数) → (下一门)/DONE；ALIGN 子状态：
-GOLDEN 位姿对准 · CREEP 慢速靠近 · HOLD 保持对中 · REACQUIRE 后退重取 · HDG 离散正航向 · SWAY_BACK 转后回找。
-直冲出口**两条**（任一成立即进 THROUGH）：① `z.cross` 连续确认 ③ 门口超时兜底 `loiter.*`；
-两条都要先过 `through.require_align_deg` 的航向闸门；位姿跳变用 `pnp.max_z_jump_m` 弃帧防错解。
-（原第②条「近距丢门判过门」已按用户要求移除，`_near_lost()` 不再驱动相位 —— 见 doc/设计/过门逻辑树.md §7.1。）
-
-**本文件只留编排**（`__init__` / `reset_state` / `process` / `_step` / `_finish` / `ready`）；其余按方法簇拆在 `gate/motion/`：`params.py`(常量与兜底表) · `channels.py`(通道与小件) ·
-`hdg.py`(正航向对齐：先居中→转向→反向平移+后退) · `modes.py`(各档位) · `exits.py`(出口与终局)。
-"""
+"""gate/gate_task.py — **任务二（过门）总调度**：GateTask 相位机编排
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import numpy as np
@@ -68,8 +58,6 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         self.body_center_offset = float(geo["body_center_offset"])
         self.obj3 = object_points(self.frame_w_m, self.frame_h_m)
         self.camera = board_camera()
-        # 抗水面倒影，避免"点不全/姿态不稳"误触发 REACQUIRE 后退。
-        # 临时开启：AUV_GATE_KPT_MEM=1（优先级高于 vision.gate.kpt_mem.enable）。
         km = V.get("kpt_mem", None) or {}
         order = S.get("vision.model.task_models.gate.kpt_order", None) or \
             sub(V, "keypoint").get("kpt_order") or [0, 1, 2, 3]
@@ -92,15 +80,10 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
                   "请按当前分辨率重新标定 (cfg/front_camera.yaml)"
                   % (self.camera.width, self.camera.height, self.w, self.h))
 
-        # ---- 修正增益：**共用 comm.motion 那两套 PID**（同船/同推进器，实船实测过）----
-        # 两层：comm.gate.pid_sway/pid_heave（一般都不写，只在确实要单独一套时才写）
-        #   兜底 → comm.motion.pid_sway / pid_heave（**与撞球共用同一份**，一处调两处生效）。
         G_sway, G_heave = sub(G, "pid_sway"), sub(G, "pid_heave")
         self._gain_src = "gate(显式覆盖)" if (G_sway or G_heave) else "motion(共用)"
         self._pid_sway_kw = pid_kw(G_sway, motion_node("pid_sway"))
         self._pid_heave_kw = pid_kw(G_heave, motion_node("pid_heave"))
-        # sway / heave 各一套增益；**全档位共用同一对像素 PID**（一套阈值 + 一套控制器，
-        # 不会随 mode 在 full↔coarse 间跳而交替工作）。居中只有 sway（见 `_lateral_out`）。
         self._pid_sway_px = PID(**self._pid_sway_kw)
         self._pid_heave_px = PID(**self._pid_heave_kw)
         _ks = ("kp", "ki", "kd", "out_max", "deadzone")
@@ -147,8 +130,6 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         self._lock_k_ref = None           # ★ 锁定门的 k 参照（k=z×框占比）——"保护锁定"①用
         self._lock_ratio_ref = None       # ★ 锁定门的**面积**参照（框占比）——"保护锁定"②用
         self._lock_k_bad = 0
-        # ★ 旋转搜索（2026-10-04 用户定）：公共慢扫（左 span→右 2span→…），手动 DOF+遥测 yaw 闭环、
-        #   睁眼非阻塞、有防转圈预算。**只在还没稳定锁上门时**驱动；与 hdg 完全无关。
         self._scan = Scan()
 
         self.last_info = {"phase": PH_ALIGN, "substate": "", "mode": "",
@@ -207,11 +188,7 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         """每帧由装配层(main)写入下视帧；下视处理只在 coarse/width 门口时读它。"""
         self._down_frame = frame
     def wants_down(self):
-        """本帧是否需要下视帧：下视开关开 且 当前档位是 coarse/width（门口过门才用下视判断）。
-
-        只在这两种档位才让 main 开/读下视相机，其余时间释放 —— 别让第二路 USB 相机抢带宽、
-        影响前视（自动挡主视）的显示。
-        """
+        """本帧是否需要下视帧：下视开关开 且 当前档位是 coarse/width（门口过门才用下视判断）。"""
         return self._down_enabled and self.mode in ("coarse", "width")
     @property
     def ready(self):
@@ -219,8 +196,6 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
     def process(self, frame, now_ms):
         self.frames += 1
         self._now_ms = now_ms        # 本帧时基：`_set_info` 里推进「反向平移」状态要用
-        # 本帧**没有跑视觉**时（转向期间 / 还没走到检测）不许沿用上一帧的门：
-        #   否则"转完那一帧"会拿着上一帧的门当作"门还在画面里"，反向平移状态刚进就退。
         self._det_now = None
         if self._start_ms is None:
             self._start_ms = now_ms
@@ -236,8 +211,6 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
             return S.STATUS_DONE
 
         if (self._hdg.turning and not self._hdg.finished()):
-            #   转向期间**连检测都不做**（画面丢了/门转出视野/水花糊了都不影响它），
-            #   按 `gate.hdg.turn_period` 跑完再回主循环。
             self.last_dets = []            # 本帧没有视觉结果 → 叠加层不许画上一帧的框
             self._turn_blocking(now_ms)
         else:
@@ -246,7 +219,6 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
             fw = frame.shape[1] if frame is not None and hasattr(frame, "shape") else 0
             det = self._gate_lock(dets, fw)
             # ★ 2026-10-04 用户定：**锁定本轮的门之后，画面只打锁定那扇门的框**（别的门不画，
-            #   免得看着像"要过那一扇"）。没锁到就不画（不沿用上一帧的框）。
             self.last_dets = [det] if det is not None else []
             self._step(det, now_ms)
 
@@ -257,20 +229,7 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
             else S.STATUS_RUNNING
         return self.last_info["status"]
     def _gate_lock(self, dets, frame_w):
-        """选门 + **锁定**（★ 2026-10-04 用户定："可以锁定，但锁定前务必做好检查 ——
-        锁定**稳定**后再进行不参与选门"）。
-
-        两段式：
-        · **未稳定**（连续跟住同一扇 < `lock.stable_frames` 帧）：仍正常 `_pick_gate` 选门，
-          选到别的门就换锁、重新计数 —— 头几帧选错了必须能纠正。
-        · **已稳定**：锁定门**不再参与选门**，别的门抢不走。只要它**还被检测到**
-          （哪怕没 z、没角点、只有框 —— 贴到门口时正是这样）就继续追它；
-          只有**连续 `lock.miss_frames` 帧完全检测不到**才解锁重选。
-
-        为什么必须做在选门层（实船 `log/rungate_1.jsonl`）：第一扇门贴到门口时角点出画、
-        `_z_est` 返回 None，而远处第三扇还能算出一个（崩小的）z ⇒ 老逻辑"有 z 的才参与比较"
-        直接选走第三扇；`_relock_guard` 也拦不住 —— 它只看**已采纳**的位姿，而近门压根没有位姿。
-        """
+        """选门 + **锁定**（★ 2026-10-04 用户定："可以锁定，但锁定前务必做好检查 ——"""
         Lc = merge(sub(self._G, "lock"), _D_LOCK)
         gates = [d for d in dets if getattr(d, "kind", None) == "gate"]
         miss_max = int(num(Lc, "miss_frames", _D_LOCK["miss_frames"]))
@@ -289,11 +248,7 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
             self._lock_ratio_ref = (float(self._locked_det.w) / float(self.w)) \
                 if (self._locked_det is not None and self.w and getattr(self._locked_det, "w", 0)) else None
             return self._locked_det
-        # ★ 锁定保护前移：先按 k/面积 把所有"不是锁定那扇门"的候选排除掉（见 _lock_guard_reject）。
         #   ⚠️ 只在**锁定已稳定**时启用：稳定之前参照还在建立（头几帧的框/姿态都还没定），
-        #   此时动筛会误杀正常门（实测：转完那一帧门被筛掉 ⇒ `_det_now=None` ⇒
-        #   转完反向平移的 sway 窗口永远收不掉）。稳定后的锁定才需要这层防"被别的门顶掉"。
-        #   ② 解锁重选也必须再过一次闸 —— 重选结果仍与参照不符 ⇒ 不采纳，继续 hold。
         kept = ([d for d in gates if not self._lock_guard_reject(d)]
                 if self._lock_stable else list(gates))
         if not kept:
@@ -317,9 +272,6 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
             if best is None or dd < best_d:
                 best, best_d = d, dd
         matched = best if (best is not None and thr > 0 and best_d <= thr) else None
-        # ★ 2026-10-05 用户定：**k 一致性检验与跳变保护同性质 —— 都是"选完锁定后"的保护闸**，
-        #   所以放在这里、不在 _pick_gate 里。同一扇门 k = z×框占比 ≈ 常数；候选的 k 离
-        #   锁定参照太远 ⇒ 这个框**不是锁定那扇门**（哪怕框中心恰好靠得近）⇒ 判没匹配上。
         if matched is not None:
             kz = self._k_of(matched)
             if self._lock_k_ref is None:
@@ -359,23 +311,12 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         return matched
 
     def _lock_guard_reject(self, det):
-        """**锁定保护**（★ 2026-10-05 用户定：k 一致性检验与跳变保护**同一个位置**，
-        "能测出来就用"）。返回 True = 这个框**不是锁定那扇门**，直接排除。
-
-        判据（按可测性选，不是两条并列规则）：
-          · **k 能算**（有 z）⇒ 比 k（同一扇门 k = z×框占比 ≈ 常数）；
-          · **k 算不出**（coarse/width 没角点）⇒ 退回比**面积（框占比）**，占比小太多=更远那扇。
-        关键：它在**框中心匹配之前**就对所有候选生效 —— 换到远处那扇门时，新框中心离锁定门
-        很远（`best_d > match_ratio`），老写法会直接走"没匹配上"分支把 k 检验整段跳过；
-        前移之后"不是同一扇门"在入口就被挡掉。
-        """
+        """**锁定保护**（★ 2026-10-05 用户定：k 一致性检验与跳变保护**同一个位置**，"""
         if self._locked_det is None:
             return False
         ratio = (float(det.w) / float(self.w)) if (self.w and getattr(det, "w", 0)) else 0.0
         if ratio <= 1e-6:
             return False
-        # ★★ **双重保护**（2026-10-05 用户定）：下面两条**各自独立生效**，任一不符即拦。
-        #   不是"二选一"：k 测不出时只是**这一层**本帧失效，面积那层照样管。
         k_lo = float(num(sub(self._G, "select"), "k_lo_ratio", _D_SELECT["k_lo_ratio"]))
         k_hi = float(num(sub(self._G, "select"), "k_hi_ratio", _D_SELECT["k_hi_ratio"]))
         # ---- 保护①：k 一致性（k = z×框占比；能测才判，测不出本层跳过）----
@@ -387,9 +328,6 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
                     print("[GATE] 锁定保护①(k)：本帧 k=%.3f vs 参照 %.3f（允许 ×%.2f~%.2f）⇒ 不是锁定那扇门"
                           % (kz, self._lock_k_ref, k_lo, k_hi))
                 return True
-        # ---- 保护②：面积（框占比）—— **独立于①**，不依赖 k 是否可测 ----
-        # ★ 参照 = **锁定那扇门自己的占比**（2026-10-05 用户定：与①k 同源同寿命）。
-        #   不再用"丢门前占比"(_relock_ratio_ref) —— 那个会跨场景残留，把正常门误杀。
         ref = getattr(self, "_lock_ratio_ref", None)
         far = num(sub(self._G, "z"), "relock_far_ratio", _D_Z["relock_far_ratio"])
         if ref is not None and far > 0 and ratio < float(far) * float(ref):
@@ -398,8 +336,6 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
                       % (ratio, float(far), float(ref)))
             return True
         # ⚠️ 本函数**必须是纯函数**（只判、不改参照）：它在"候选筛选"里对每个候选都调，
-        #   若顺手更新参照，先处理到"更大的那扇"就会把参照顶大，再看锁定门反而成了"占比太小"
-        #   ⇒ 把正常门误杀（实测踩过）。参照只在**最终采纳的那一扇**上更新，见 _lock_note_accepted()。
         return False
 
     def _lock_note_accepted(self, det):
@@ -439,9 +375,6 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
 
     def _step(self, det, now_ms):
         self._det_now = det          # 本帧的门（「反向平移」状态判"门回来了吗"用当帧数据）
-        # ---- 正航向的「转」：**一个自包含动作**，跑完才回来 ----
-        # 只要转入已经开始，本帧就只按「遥测 yaw + 冻结的目标角」把它推完/推进一步：
-        # 不看画面、不等检测、**丢门也不中止**（转 50° 时门必然转出视野，这是正常现象）。
         if self._hdg.turning and not self._hdg.finished():
             self._turn_blocking(now_ms)
             return
@@ -455,9 +388,6 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
             self._tick_lost(now_ms)
             return
         # ★ 2026-10-05 用户定：**选门优先 z，锁门用面积**。面积参照必须**持续跟踪** ——
-        #   不能只在"完全丢门"（det 全空）时才记：实船的门是"被判成另一扇"而不是"丢"，
-        #   `_tick_lost` 从没跑过 ⇒ 参照一直 None ⇒ 占比 0.65→0.27 的暴跌没人管，
-        #   z 又因为换门后再不采纳位姿而冻结 ⇒ 两条保护全哑。这里用"上一帧被采纳的占比"顶上。
         if getattr(self, "_relock_ratio_ref", None) is None and \
                 getattr(self, "_ratio_last", None) is not None:
             self._relock_ratio_ref = float(self._ratio_last)
@@ -505,8 +435,6 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
                                       num(pnp, "z_max", _D_PNP["z_max"])),
                             refine=flag(pnp, "refine", True))
             if res is not None:
-                # z 跳变保护：上一帧也有可信位姿时，z 突变按错解弃帧
-                # （错解若给出 z ≤ z.cross 会直接触发 THROUGH → 满速冲出去）
                 max_jump = num(pnp, "max_z_jump_m", _D_PNP["max_z_jump_m"])
                 if self._z_guard and self._z_last is not None and max_jump > 0:
                     z_new = float(res[1].ravel()[2])
@@ -520,14 +448,9 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
                 self._on_pose(det, res, now_ms, mode=mode, kpt=n)
                 return
             mode = MODE_COARSE          # 位姿校验失败/跳变 → 退化 coarse
-        # 本帧没有可用位姿：解除跳变判据（下个位姿重新建立基准，防卡死），
-        # 并清零穿门确认计数 → 只有"连续帧"都判就近才算过门
         self._z_guard = False
         self._cross_cnt = 0
         if self.mode != mode:
-            # 只在**位姿失败/退化**这条路径上执行（位姿成功时上面已 return），
-            # 所以 full↔p3p 的帧间翻转不会清 _center_cnt；真正会走到的是
-            # "位姿校验失败→coarse" 与 "width↔coarse 互换"。
             self._center_cnt = 0
         if mode == MODE_WIDTH:
             self._on_width(det, now_ms, ids)

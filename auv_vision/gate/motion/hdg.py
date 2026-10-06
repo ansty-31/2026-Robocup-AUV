@@ -1,19 +1,6 @@
 # -*- coding: utf-8 -*-
 """gate/motion/hdg.py — ALIGN.HDG 正航向对齐（**算法核心 + 任务侧胶水**；2026-09-30 由
-`heading_align.py` 与 `hdg.py` 合并而来）。
-
-流程（用户定，center → hdg → postsway；**没有"航向优先"入口**）：
-  ① **先居中**：居中达标（`align.*` 判据，见 `modes.py`）才允许起转；
-  ② **再转向**：`HeadingAligner` 冻结本帧 ψ → 按同一编号重发相对角度并等待下位机完成 → 硬停收尾；
-  ③ **然后反向平移 + 缓慢后退**（`_start_post_sway`；每帧 action=`sway_back`）：
-     朝转走方向的反向平移（`hdg.post_sway`）+ 同时小幅后退（`hdg.post_sway_back`），
-     直到**当前门**（本帧选中的那扇）出现 ≥ `hdg.post_sway_kpt_min` 个
-     conf ≥ `vision.gate.keypoint.conf_thr` 的角点 ⇒ 退出，把控制交回视觉
-     （"对齐光轴"的目的达成）；`hdg.post_sway_ms` 到期是**安全兜底**（绝不永久停摆）；
-     转向/冲刺进行中一律让位（`sway_exit=yield(...)`）—— 平移优先级最低。
-
-参数：`comm.gate.hdg.*`（缺键 → `_D_HDG` 兜底 = 当前 cfg 的值）。
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 from common.cfg.cfgnode import flag, num
@@ -58,8 +45,7 @@ def hdg_cfg(node=None):
 
 
 class HeadingAligner(object):
-    """一次到位的正航向状态机（每帧推进一次，不阻塞主循环）。
-    终态（DONE/GIVEUP/ABORTED）一直保持到 `reset()`，而 reset 只在"新的一门"时调用"""
+    """一次到位的正航向状态机（每帧推进一次，不阻塞主循环）。"""
 
     def __init__(self, cfg=None, log=None, turn_kwargs=None):
         self.cfg = hdg_cfg(cfg)
@@ -88,9 +74,7 @@ class HeadingAligner(object):
 
     @property
     def turning(self):
-        """是否正在执行转向。
-        用途：`gate_task._step` 在这个状态下**绕开整条视觉链路**（用户定：先居中再转向，
-        或位姿被拒，转向就被打断了。"""
+        """是否正在执行转向。"""
         return self.state == TURN
 
     def summary(self):
@@ -100,8 +84,7 @@ class HeadingAligner(object):
 
     # ------------------------------------------------------------------
     def start(self, now_ms, psi=None):
-        """进正航向（`gate_task` 在**居中达标**后调用一次）。
-        Args:"""
+        """进正航向（`gate_task` 在**居中达标**后调用一次）。"""
         if not self.enabled or self.state in _TERMINAL:
             return self.state
         self._t_stage = now_ms
@@ -109,11 +92,6 @@ class HeadingAligner(object):
             return self._giveup("没有可用的 PnP 航向测量（本门 full 帧一次都没测到）")
         psi = float(psi)
         self.psi_meas = psi
-        #     psi < 0 ⇒ 左转 ／ psi > 0 ⇒ 右转
-        #     `gate_start{psi=+36.6}` → 按**旧映射**（psi>0⇒左转）执行左转，实船反馈**转反了**；
-        #     同一趟日志里遥测也可以对上：σ=-1 ⇒ ψ=−tyaw，tyaw 7.5→40.5 意味着 ψ 从 −7.5 变到 −40.5，
-        #     即机身朝"让 ψ 更负"的方向转，而 ψ>0 的偏差需要的是**减小 ψ** ⇒ 方向确实反了。
-        #     映射取反它自动跟着反，不需要单独改。
         left = bool(psi < 0)
         self.last_d = -1.0 if left else 1.0        # +1=右转 / -1=左转（与 turn_deg 的 d 同义）
         self.last_dir = "左转" if left else "右转"
@@ -200,10 +178,7 @@ class HeadingAligner(object):
 
 class GateHdg(object):
     def _hdg_new_psi_since_turn(self):
-        """这次起转能不能用**当前这个 ψ**：必须是"上一次转向结束之后"测到的。
-        之后防自转的闸门：没有它，转向一结束就会拿"起转前那个旧 ψ"立刻再转一次，无限循环。
-        够不够正不在这里判（`|ψ| ≤ tol` 时 `HeadingAligner.start()` 自己给 DONE、不转）。
-        基准是 `_hdg_turns_last_ms`（本门上一次转向结束时刻），与"多久没测量"无关。"""
+        """这次起转能不能用**当前这个 ψ**：必须是"上一次转向结束之后"测到的。"""
         if self._hdg_deg is None or self._hdg_ms is None:
             return False
         if self._hdg_turns_last_ms is None:
@@ -232,12 +207,7 @@ class GateHdg(object):
         self._hdg_skip_logged = True
         print("[GATE] ⚠️ 居中达标但跳过正航向：%s ⇒ 带残余航向直接进近（这一门不会再转）" % why)
     def _hdg_abort(self, why):
-        """中止正在进行的正航向转向（只有**整门丢失 / 进冲刺**才调）。
-
-        档位退化（width/coarse）不触发中止：转向期间视觉链路整个被绕开（见 `_step`），
-        那才是"不被画面干扰"的正确做法。原地旋转看不到门就不该继续盲转 ——
-        `TurnCore.abort()` 会立刻把本帧 yaw 归零，`stop_hard` 由调用方在收尾时负责。
-        """
+        """中止正在进行的正航向转向（只有**整门丢失 / 进冲刺**才调）。"""
         if self.substate == SUB_HDG and not self._hdg.finished():
             self._hdg.abort(why)
             self._hdg_done = True
@@ -246,13 +216,7 @@ class GateHdg(object):
             return True
         return False
     def _turn_blocking(self, now_ms, target_deg=None, left=None):
-        """★ **唯一的阻塞路径**（`turn` 专用）：**输入目标角度，输出"阶段结束"标志**。
-        不传（每帧续跑）就沿用 aligner 里已冻结的目标角。
-        · **输出**：`True = 这次转向阶段已结束`（本门不会再转，调用方可继续往下走）；
-        `False = 尚未结束`（本帧先回主循环，下一帧从同一个冻结目标角续跑）。
-        · 全程只看「冻结的目标角 + 下位机完成反馈」：画面丢失、门转出视野、档位退化、位姿被拒
-        **都不打断**；唯一中止来自 `TurnCore`（下发失败 / 等待完成超时）。
-        · 收尾（`_hdg_done` / 回 GOLDEN / 挂"转完反向平移"）**只做一次**。"""
+        """★ **唯一的阻塞路径**（`turn` 专用）：**输入目标角度，输出"阶段结束"标志**。"""
         import time as _time
         _t0 = _time.monotonic()
         if target_deg is not None and self._hdg.state == "idle":
@@ -275,26 +239,15 @@ class GateHdg(object):
             #   然后等"转向之后的新 ψ 测量"；真正 DONE 将锁存本门航向确认标志。
             self._hdg_turns += 1
             self._hdg_done = True
-            # 只有 TurnCore/HeadingAligner 的真正 DONE 才能确认航向；
-            # TIMEOUT/GIVEUP/ABORTED 不能放行 THROUGH。
             if self._hdg.state == "done":
                 self._hdg_ok = True
             self.substate = SUB_GOLDEN
             print("[GATE] 本门第 %d 次转向结束（下位机执行阶段已结束）"
                   % self._hdg_turns)
             self._center_cnt = 0          # 转向会动到门在画面里的位置 → 之后复核居中
-            #   （84→128 只到 ~95 = 仍在转）；这时一旦断流/关串口，船就**锁在那个值上一直转**。
-            #   开关：`comm.gate.hdg.stop_hard`（默认 true；嫌慢可设 false，但风险自负）。
-            # 硬停完成后拿到**折算过的帧时基**，平移窗口从那一刻起算（见 `_stop_hard_framed`）。
             _now_stop, _stop_ok = self._stop_hard_framed(now_ms, quiet=not S.DEBUG)
             if _stop_ok is False:
                 print("[GATE] ⚠️ 转向收尾硬停**未确认**（遥测显示仍在转）—— 平移窗口照开，注意船姿态")
-            #   两者在同一帧里先后阻塞、中间**没有任何一帧**（`_t0` → `_turn_inner_loop` 20Hz
-            #   阻塞闭环 1~3s → `_stop_hard_framed` 再阻塞 0.7~2.5s → 本帧才收尾）。
-            #   只折算硬停 ⇒ 窗口起点仍**落后"这次转向的耗时"**，而窗口只有 `post_sway_ms`(600ms)
-            #   ≪ 转向耗时 ⇒ **窗口一出世就已过期**，生产里照旧只发得出 1 帧平移。
-            #   （用例 `test_post_sway_starts_after_the_turn_end_hard_stop` 同时模拟"转向阻塞"与
-            #     "硬停阻塞"，只折算一半就会红。）
             _now_true = int(now_ms + (_time.monotonic() - _t0) * 1000.0)
             self._now_ms = _now_true      # 本帧后续（`_set_info` 的窗口判据 / z 新鲜度）都用真实时刻
             self._hdg_turns_last_ms = _now_true   # 判"有没有新的 ψ"的基准（必须晚于它）
@@ -308,11 +261,7 @@ class GateHdg(object):
                        hdg_state=self._hdg.state)
         return ended
     def _stop_hard_framed(self, now_ms, quiet=False):
-        """转向收尾**硬停** + **帧时钟域显式折算**（与 `_turn_inner_loop` 同一套做法）。
-        `base/hw/uart.py::stop_hard` 是**帧内阻塞**的，它自己按 `dt=0.05`（20Hz）连发中性帧、
-        （用例 `test_post_sway_starts_after_the_turn_end_hard_stop` 咬的就是这个次序）；
-        Returns:
-        "平移窗口从整块阻塞结束起算"由 `_turn_blocking` 用整帧流逝时间再折算一次（见那里）。"""
+        """转向收尾**硬停** + **帧时钟域显式折算**（与 `_turn_inner_loop` 同一套做法）。"""
         import time as _time
         if not flag(sub(self._G, "hdg"), "stop_hard", True):
             return now_ms, None
@@ -333,9 +282,7 @@ class GateHdg(object):
                  ms=dt_ms, now_after=int(now_ms + dt_ms), ok=ok)
         return int(now_ms + dt_ms), ok
     def _start_post_sway(self, now_ms):
-        """转向结束 → **进入「转完反向平移」状态**（用户 2026-09-27 定；主循环里的一个状态）。
-        反方向**平移一小段把它拉回视野；一旦重新检出到"刚丢的那个门"就立刻交回视觉。
-        检测、PnP、ψ 更新、居中确认、丢门处理一律照跑。"""
+        """转向结束 → **进入「转完反向平移」状态**（用户 2026-09-27 定；主循环里的一个状态）。"""
         if self._post_sway_until_ms is not None or not self._hdg.last_d:
             return
         win = float(self._hdg_cfg.get("post_sway_ms", 600.0) or 0.0)
@@ -346,40 +293,24 @@ class GateHdg(object):
         self._post_sway = _dof_clip(-self._hdg.last_d * mag)     # 反向平移
         self._post_sway_back = _dof_clip(-abs(back))             # ★ 同时**缓慢后退**（2026-09-28 定）
         self._post_sway_until_ms = now_ms + win
-        # ★ 2026-10-02：整次转向在**同一帧内**跑完，于是"窗口开启那一帧"用的检测是**转向之前**采的
-        #   （门当然还在视野里）⇒ 若允许当帧就按角点数退出，窗口一出世就被自己清掉、补偿永远不发。
-        #   记下开启时的帧号：**只有之后的新一帧检测**才允许判"门回来了"。
         self._post_sway_frame0 = self.frames
         #    （这期间不测位姿）⇒ 加了新鲜度必然为 None、z 闸形同虚设。新鲜度只对**当帧**的 z 有意义。
     def _turn_inner_loop(self, yaw_cmd, now_ms=0):
-        """转向期间按 `comm.gate.hdg.turn_period`（默认 0.05s=20Hz）轮询"下位机完成反馈"。
-        同「进带 3 帧收舵」。返回最后一次 yaw 指令。只在**真实时钟域**阻塞推进（用例的假时钟"""
+        """转向期间按 `comm.gate.hdg.turn_period`（默认 0.05s=20Hz）轮询"下位机完成反馈"。"""
         import time as _time
         # 缺配置也要能跑（都走 _D_HDG 的兜底）
         try:
-            #  2026-10-02：节拍原本借 `motion.turn_pid.period`；turn_pid 已整块删除，
-            #  这个 pace 是**上位机自己的**（轮询下位机完成反馈），所以归 `gate.hdg.turn_period`。
             period = float(num(sub(self._G, "hdg"), "turn_period",
                                 _D_HDG.get("turn_period", 0.05)) or 0.05)
         except Exception:
             period = 0.05
         period = max(0.01, min(0.2, period))
-        # 兜底：单个转向最多推进 turn_timeout_s + 1s（TurnCore 自身也有超时）
-        #   基准取传入的 now_ms —— 绝不能把 time.monotonic() 的绝对值喂进 HDG，否则时间跳变
         t_wall0 = _time.monotonic()
         budget = float(self._hdg_cfg.get("turn_timeout_s", 8.0)) + 1.0
-        # 时钟域自适应：now_ms 与真实时钟同域（运行期）→ 真按 20Hz 睡；
-        #   不同域（用例的假时钟）→ **不真睡**，改用合成周期推进，测试才不会被拖成真时间。
-        # 时钟域判据：`now_ms` 来自**真实时钟**就算真域 —— 生产是 `main.py` 的
-        # `int(time.time()*1000)`（epoch 毫秒，板端 ~1.79e12），用例里也可能是
-        # `time.monotonic()*1000`（开机毫秒）。**两个都要认**；假时钟（用例 1000+100i）两者都远。
-        #    ⇒ 内层闭环**整个被跳过**（转向退化成"每相机帧一步"、`gate_loop` 日志永不触发、
         _wall = abs(now_ms - _time.time() * 1000.0)
         _mono = abs(now_ms - _time.monotonic() * 1000.0)
         use_wall = min(_wall, _mono) < 60000.0
         if not use_wall:
-            # 假时钟（无硬件用例：假船按"每帧一步"积分航向）⇒ 保持旧的每帧一步，
-            # 高频内层循环是**运行期**行为，只在真实时钟域生效（不引入任何新逻辑）。
             return yaw_cmd
         n = 0
         while (not self._hdg.finished()) and (_time.monotonic() - t_wall0) < budget:
@@ -403,17 +334,12 @@ class GateHdg(object):
                            hdg_state=self._hdg.state)
         return yaw_cmd
     def _hdg_turns_full(self):
-        """**本门转向次数是否已达上限** `hdg.max_turns`（0/负 = 不限）。
-
-        这是"转向无效时自转"（2026-09-27 板的疯狂旋转 bug）的兜底闸：到顶就不再起转，
-        带残余航向进近（`hdg_skip=turns_full`）——宁可不正、也不能无限转。
-        """
+        """**本门转向次数是否已达上限** `hdg.max_turns`（0/负 = 不限）。"""
         cap = int(num(sub(self._G, "hdg"), "max_turns", _D_HDG["max_turns"]) or 0)
         return cap > 0 and self._hdg_turns >= cap
 
     def _hdg_ready(self, mode, now_ms):
-        """是否可以（或必须）进正航向：启用 + 本门还没做 + **没到转向上限** + **测到过 full 帧的 psi**。
-        新模型下 full 只占约 27%，死等 full 那一刻等于永远不转。"""
+        """是否可以（或必须）进正航向：启用 + 本门还没做 + **没到转向上限** + **测到过 full 帧的 psi**。"""
         # _hdg_done 表示本门不再启动新的转向；_hdg_ok 才表示可以通过冲刺前航向闸门。
         if self._hdg_done or self._hdg_ok or not self._hdg.enabled:
             return False
@@ -440,8 +366,6 @@ class GateHdg(object):
             self._turn_blocking(now_ms, target_deg=self._hdg.psi_meas,
                                 left=(self._hdg.last_d < 0))
         if self._hdg.finished():
-            # 已经够正（|psi| ≤ tol）或没得转 ⇒ 本门不再正航向。
-            #    不同步就会在 ALIGN 里反复起转（死循环）。
             self._hdg_done = True
             if self._hdg.state == "done":
                 self._hdg_ok = True
@@ -449,8 +373,7 @@ class GateHdg(object):
         self.last_info["hdg_i"] = self._hdg.iters
         return self._hdg.state
     def _tick_hdg_degraded(self, now_ms):
-        """档位退化（width/coarse）但 HDG 正在跑 → **只推进 HDG**，别让 CREEP/HOLD 冲掉子状态。
-        Returns: True = 本帧已被 HDG 接管。"""
+        """档位退化（width/coarse）但 HDG 正在跑 → **只推进 HDG**，别让 CREEP/HOLD 冲掉子状态。"""
         if not (self.phase == PH_ALIGN and self.substate == SUB_HDG
                 and not self._hdg.finished()):
             return False

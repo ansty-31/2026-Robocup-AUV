@@ -2,25 +2,6 @@
 # run_ball_reverse.sh — 待机 → 下潜 → 前进 → 撞球 → 回退 → 前进 → (转角度 → 过门)×N → 转角度
 #
 # "四个门当一个门四次过"：每次"过门"都是**单门**（pass_target=1，见 cfg/comm.yaml），
-# 转角由脚本机械控制、按固定序列执行，不再依赖视觉连续找门 —— 更可控、机械。
-#
-# 用法：  ./task1_2/run_ball_reverse.sh
-# 可调（环境变量，默认值在括号里）：
-#   AUV_WAIT_S(10)        待机秒数
-#   AUV_DESCEND_S(0)      下潜秒数（0=不下潜）
-#   AUV_FWD_S(0)          撞球前前进秒数
-#   AUV_FWD_SURGE(0.35)   撞球前前进速度
-#   AUV_REV_S(5)          撞球后回退秒数
-#   AUV_REV_SURGE(-0.5)   回退速度（负=后退）
-#   AUV_POST_FWD_S(2)     回退后前进秒数
-#   AUV_POST_FWD_SURGE(0.35)
-#   AUV_TURN_ANGLES       转角序列（空格分隔，带符号：正=左转 / 负=右转）
-#                         如 AUV_TURN_ANGLES="90 -45 90 30"；个数=过门次数
-#   AUV_TURN_TIMEOUT(20)  转向等完成反馈超时（秒）
-#   AUV_BALL_SKIP(0)      1=跳过撞球任务
-#   AUV_REV_ON_FAIL(0)    撞球非 0 退出时仍回退（1=回退）
-#   AUV_LOG_TAG(run)      日志前缀（用前缀区分轮次，别用 date：板子时钟不准）
-#                         → log/<tag>ball.jsonl / log/<tag>gate_<N>.jsonl / /tmp/<tag>path.csv
 set -u
 cd "$(dirname "$0")/.."
 
@@ -34,8 +15,6 @@ REV_S="${AUV_REV_S:-5}"
 REV_SURGE="${AUV_REV_SURGE:--0.5}"
 POST_FWD_S="${AUV_POST_FWD_S:-2}"
 POST_FWD_SURGE="${AUV_POST_FWD_SURGE:-0.35}"
-# ============ ★ 现场代填：每一次"转角度→过门"的转角（度）============
-# 数组长度 = 过门次数；四扇门可以填四个不同的角度。这里就是操作者下水前手填的地方。
 TURN_ANGLES=(
    90   # 第 1 次：第 1 扇门前转角（正=左转）
    90   # 第 2 次
@@ -45,7 +24,7 @@ TURN_ANGLES=(
 # 也可用环境变量覆盖（空格分隔）：AUV_TURN_ANGLES="90 -45 90 30"
 [ -n "${AUV_TURN_ANGLES:-}" ] && read -r -a TURN_ANGLES <<< "${AUV_TURN_ANGLES}"
 # ⚠️ 角度**带符号**：正数=左转，负数=右转（turn_deg.py 的 --deg 会被 abs() 吃符号，
-#    所以方向由本脚本按符号拆成 --dir，不靠负号本身）
+#   （细节与实测见 doc/注释历史.md）
 TURN_TIMEOUT="${AUV_TURN_TIMEOUT:-20}"
 BALL_SKIP="${AUV_BALL_SKIP:-0}"
 REV_ON_FAIL="${AUV_REV_ON_FAIL:-0}"

@@ -1,13 +1,6 @@
 # -*- coding: utf-8 -*-
 """tests/tooling/test_label_corners.py — 手工标注工具（`tools/analyze/calib/label_corners.py`）的校验。
-已知位姿 → 合成角点 → 走 label_corners 写成 dump → pnp_calib 复算 → 深度对得上。
-GUI 部分无法在无显示器环境测（已用 `--coords` 离线模式覆盖其数据通路）。
-覆盖：
-1. 吸附到红管（snap_to_red）：点到偏了会吸到管子中心；非红区域不乱跳；
-2. 记录 schema 与 `preview_detect --dump` 一致（pnp_calib 能读）；
-3. **端到端**：coords 模式 → dump → `pnp_calib.run()` → z 正确、`frame_w` 反演正确；
-4. `--resume` 按文件名跳过已标注；
-5. bbox 由 4 点算出。"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import json
@@ -31,8 +24,7 @@ W_TRUE, H_TRUE = 0.60, 0.40
 
 # ------------------------------------------------------------------ 1. 吸附
 def test_snap_to_red_snaps_onto_the_pipe():
-    """红管在 x=100..108：点在管子**左侧外** (98,50) → 吸到管子上、y 不变；
-    点在管子上 → 原地不动；点在远离管子处 → 保持点击（不乱吸）。"""
+    """红管在 x=100..108：点在管子**左侧外** (98,50) → 吸到管子上、y 不变；"""
     img = np.full((120, 200, 3), 40, np.uint8)
     img[40:60, 100:109] = (30, 30, 210)                 # BGR：红管（9 px 宽）
     x, y = LC.snap_to_red(img, 98, 50, r=6, min_gain=25)
@@ -147,8 +139,7 @@ def test_load_done_and_resume(tmp_path):
 
 
 def test_same_basename_across_dirs_does_not_collide(tmp_path):
-    """采图目录里的文件名永远是 cap_001.jpg… ⇒ 必须按**完整路径**去重。
-    按 basename 去重会让 `ruler_z100` 的记录被 `ruler_z300` 整行删掉，`--resume` 更会直接"""
+    """采图目录里的文件名永远是 cap_001.jpg… ⇒ 必须按**完整路径**去重。"""
     out = str(tmp_path / "ruler.jsonl")
     a = {"src": "cap_001.jpg", "src_path": "log/pnp_0922/ruler_z100/cap_001.jpg",
          "kind": "ruler", "span_m": 0.5, "z_tape": 1.0, "du": 540.0}

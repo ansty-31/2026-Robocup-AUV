@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """tests/tooling/test_cfg_yaml_head.py — 守住"标定 yaml 的第一个字节必须是 %YAML:1.0"
-另外：`base/cfg/settings.py` 用的 YAML 是项目自己的解析器（UTF-8 中文没问题），"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import glob

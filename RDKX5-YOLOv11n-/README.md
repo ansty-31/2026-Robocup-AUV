@@ -49,10 +49,10 @@ python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 > **`experiment/` = 只为「去畸变时机 / enhance」那一个问题服务的一切**（脚本+对照数据+结果），
 > 常规流水线不引用它 —— 分类索引见 [`experiment/README.md`](experiment/README.md)。
 > 归档规则与恢复方法见 [`_archive/README.md`](_archive/README.md)；09-24 清理（去重 6.4 G、根目录归位、
-> 清单对齐）见 [`CLEANUP_2026-09-24.md`](cleanup_record/CLEANUP_2026-09-24.md)；
-> 09-25 重组见 [`RESTRUCTURE_2026-09-25.md`](cleanup_record/RESTRUCTURE_2026-09-25.md)；
+> 清单对齐）见 [`CLEANUP_2026-09-24.md`](cleanup_record/reports/CLEANUP_2026-09-24.md)；
+> 09-25 重组见 [`RESTRUCTURE_2026-09-25.md`](cleanup_record/reports/RESTRUCTURE_2026-09-25.md)；
 > **09-26 变更（板端视角口径修订 / T5 从 111 缩到 30 / 判定归档）见
-> [`MOVES_2026-09-26.md`](cleanup_record/MOVES_2026-09-26.md)**。
+> [`MOVES_2026-09-26.md`](cleanup_record/reports/MOVES_2026-09-26.md)**。
 
 ```
 RDKX5-YOLOv11n-/
@@ -115,8 +115,11 @@ RDKX5-YOLOv11n-/
 │   │                     · `AUV_5_selected_3000_Dwb/` · `AUV_5_label_candidates_Dwb/` · `AUV_{2,3,4}_selected_*`
 │   └── calib/        ⑤ 标定输入与 QC（`AUV_1_board/` 2298 张）439 M
 │   （每区内条目一律 `<下水轮次>_<原名>`，如 `AUV_4_auv_4_frames/`）
-├── raw-data/                  ⚠️ **当前是空目录**（原"素材抢救区"：坏卡雕出的裸流，GB 级、不进库）
-│                              内容已于 2026-09-24 01:05 被**外部**清空（不是整理所为，见下）
+├── raw-data/                  ★ **素材抢救区**（坏卡雕出的裸流，不进库）—— **按天聚类**（2026-10-06）
+│                              `20260926/` … `20261005/` 7 个日期目录 ＋ `_dups/`；共 **107 批次 / 23.9 GB**
+│                              每批次 = `auv_YYYYMMDD_HHMMSS/`（`.mjpeg` ＋ `.mp4` ＋ `.timestamps`）
+│                              索引见 [`raw-data/README.md`](raw-data/README.md)
+│                              （曾被外部清空过一次，2026-09-27 起重新积入）
 ├── runs/                      训练与实验输出（不进库）—— **按轮次收敛**
 │   ├── prov/                  溯源表 provenance_*.csv（**流水线依赖，路径固定**）
 │   └── auv5/                  ★ auv5 代次一个入口
@@ -185,9 +188,9 @@ RDKX5-YOLOv11n-/
 > | `calibration_data.zip` | 打包副本 | 206 M | 2026-09-19T00:01:35 |
 >
 > ⇒ 本文档下面凡是引用 `/data/calibration_data_gate240` 的命令（§量化校验标准）**现在跑不通**，
-> **2026-09-26 用户决定：放弃恢复回收站内容**（`calibration_data/` 938 M · `calibration_data_gate240/` 1.1 G · `calibration_data.zip` 206 M · 两个 AUV_1 zip）→ 需要校验集时按 `prepare_calibration.py` **重建**，不要再去回收站捞。记录见 `cleanup_record/MOVES_2026-09-26.md` §10。
+> **2026-09-26 用户决定：放弃恢复回收站内容**（`calibration_data/` 938 M · `calibration_data_gate240/` 1.1 G · `calibration_data.zip` 206 M · 两个 AUV_1 zip）→ 需要校验集时按 `prepare_calibration.py` **重建**，不要再去回收站捞。记录见 `cleanup_record/reports/MOVES_2026-09-26.md` §10。
 > `calibration_data/` `calibration_data_detect/` `calibration_data_*/` 都在 `.gitignore` 里（`data/` `output/` 同样不进库），
-> **git 追不回来**。⚠️ 这与 `cleanup_record/CLEANUP_2026-09-24.md` 里「校验集 `calibration_data_gate240/` **保留不动**（判定基准）」
+> **git 追不回来**。⚠️ 这与 `cleanup_record/reports/CLEANUP_2026-09-24.md` 里「校验集 `calibration_data_gate240/` **保留不动**（判定基准）」
 > **互相矛盾** —— 是恢复还是就此放弃，**待你定**（本轮只标注，未替你决定）。
 
 ### 各区状态（一眼看清哪里在动、哪里是留档）
@@ -197,18 +200,19 @@ RDKX5-YOLOv11n-/
 | `scripts/` `configs/` `weights/` `docs/` | **在用** | 随版本迭代，纳入 git |
 | `cleanup_record/` | **在用** | 整理记录（`CLEANUP_2026-09-24/25` · `RESTRUCTURE_2026-09-25` · **`MOVES_2026-09-26.md`**）；逐项可回退 |
 | `data/`（`raw/ frames/ datasets/ derived/ calib/`） | **在用** | 2026-09-25 起按种类分五区；旧的 `data/AUV_1..5/` 那层已**空壳化并归档**（该空壳归档已于 **2026-09-28 删除**，0 文件）—— 本行原写作 `data/AUV_1..5`，路径已不存在，按现状改写 |
-| `raw-data/`（仓库根） | ~~已空~~ | 原抢救区；**2026-09-24 01:05 被外部清空**（非本次整理），现为 0 文件空目录 |
+| `raw-data/`（仓库根） | **在用（素材抢救区）** | 曾被清空，**2026-09-27 起重新积入 AUV_6 下水素材**；**2026-10-06 按天聚类**为 `20260926/`…`20261005/` 7 个日期目录 ＋ `_dups/`（107 批次 / 23.9 GB）；索引见 `raw-data/README.md`。用户决定**暂不归位**到 `data/raw/` |
 | `experiment/` | **留档** | 去畸变/增强实验的脚本、结果与结论；可整体删除而不影响流水线 |
 | `runs/prov` `runs/auv5/eval` `runs/auv5/calib` | **在跑** | 流水线依赖的溯源表、回归评估集、标定记录 |
 | `runs/auv5` | **留档** | auv5 的**证据链**（报告/评估/量化校验/板端实测）；权重与 bin 已退役删除（`train/stage1*` 是 09-26 新增） |
-| `output/gate_kpt_bayese_640x640_nv12.bin` | **在用** | pose 当前采用（09-24 重训版，`9ac61773…`）；板端**尚未**换到这版 |
-| `output/gate_kpt_auv4_*.bin` | **在用** | pose 回退用（上一代） |
+| `output/weights/gate_kpt_stage1_v3_bayese_640x640_nv12.bin` | **在用** | pose 当前采用（**阶段一 v3 / Plan D**，2026-09-28 裁定）；旧的 `gate_kpt_bayese_640x640_nv12.bin`（09-24 版）与 `gate_kpt_auv4_*.bin` 已被取代，**不在磁盘上**（记录见 `_archive/auv6/superseded_by_v3_20260928/`） |
 | `calibration_data_gate240/` | ⚠️ **已不在磁盘** | 原记「**留档·勿删**：量化校验集（240 张真有门的帧），是余弦判定的基准」——2026-09-26 实测已进回收站（1.1 G，2026-09-24T21:24:57），**见上方目录树后的 ⚠️ 说明** |
 | `calibration_data/` | ⚠️ **已不在磁盘** | 原记「~~已删~~：纯派生校准集（2.3 G），量化前重建即可」；现同样在回收站（938 M，实测 500 个 `.rgb`） |
-| `output/yolo11n_detect_*.bin` | **在用** | 当前球/门检测产物（09-12） |
+| `output/weights/yolo11n_detect_*.bin` | **在用** | 当前球/门检测产物（09-12）；`output/*.bin` 已于 09-26 收进 `output/weights/` |
 | `output/preview/auv5_pose/` | **在跑** | ★「线 C」人眼判定 / 分期重训工作区（**359 M**，09-26 归档后；此前 537 M）实测）；**入口是它自己的 `INDEX.md`** |
 | `output/preview/auv5_pose/judgment/archive/` | **留档·勿引用** | ★ **09-26 新增的第二个归档位置**：作废的判定日志（102 行）+ 分桶图副本（102 张）+ README；**结论不看这里**（以 `judgment/boardview_stage1_log.csv` 339 行为准）—— 见 `_archive/README.md` §8 |
-| `output/preview/pool_other_water/` | **部分归档** | 只留统计小文件（0.3 M，被脚本读取）；`annotated/`+`grids/` 148 M 已入 `_archive/auv5/unneeded_20260926/` |
+| `output/preview/pool_other_water/` | **部分归档** | 只留统计小文件；**2026-10-06 同形归类**为 `tables/` · `logs/` · `filelists/`；`annotated/`+`grids/` 148 M 已入 `_archive/auv5/unneeded_20260926/` |
+| `output/preview/small_ball/` | **在用（2026-10-06 新建）** | 夹取小球两条线的本地测试；**同形归类**为 `tables/`（15 表）· `renders/`（8 个渲染目录）；索引是它自己的 `README.md` |
+| `output/preview/auv6_pose/` | **在用** | AUV_6 评测与工具（`tools/` `tables/` `ab_v3/` `for_test_v3/` `hard_ab_v3/`）；原名 `AUV6`，**2026-10-06 统一命名** |
 | `data/derived/AUV_5_upload_roboflow/` | **在跑** | 待送 Roboflow 打标两批（`stage2_mid` 800 / `stage2_turbid` 429）；`stage1_needlabel` 577 **已完成并归档**（→ `datasets/gate-w_clear/`）＋ **09-26 纠正批 `stage1_fix_wy` 30**（`stage1_fix111` 111 张范围已被取代） |
 | `_archive/auv5/datasets_AUV_5_gate-pose_backup_20260924/` | **留档·勿删** | 另一次划分状态（与现行差 1358 文件），是**真实回退点**，不是冗余（**原表误记为 `data/datasets/…`；2026-09-28 归档重排后位于 `_archive/auv5/` 下**） |
 | `configs/backup/` | **留档** | 历史标定，只读 |
@@ -244,8 +248,8 @@ RDKX5-YOLOv11n-/
 | 路径 | 大小 | 是什么 | 真删了的回退方式 |
 |---|---|---|---|
 | ~~`data/derived/AUV_4_selected_3000/`~~ | 446M | **已归档 2026-09-26**（错域不可用，MAD≈12）；AUV_4 素材改从 `data/frames/AUV_4_auv_4_frames/` 按 D+wb 重渲染。原注：标注在 `data/datasets/AUV_4_PNP.kpt4.yolov8/` | 从 `data/frames/AUV_4_auv_4_frames/` 重抽 |
-| `data/derived/AUV_2_selected_2000/` | 193M | AUV_2 旧筛图产物 | 从 `*_frames/` 重抽 |
-| `data/derived/AUV_3_selected_2000/` | 251M | AUV_3 旧筛图产物 | 同上 |
+| `_archive/auv5/derived_AUV_2_selected_2000/` | 193M | AUV_2 旧筛图产物 | 从 `*_frames/` 重抽 |
+| `_archive/auv5/derived_AUV_3_selected_2000/` | 251M | AUV_3 旧筛图产物 | 同上 |
 | `data/datasets/AUV_1_AUV_data.zip` | 451M | 与同目录解压结果重复 | 解压目录还在 |
 | `data/datasets/AUV_1_AUV.yolov11.zip` | 212M | 与 `AUV.yolov11/` 重复 | 同上 |
 | `data/calib/AUV_1_board/` | 432M | 标定 A / 空气标定的**输入照片**（结果已存 `configs/backup/`） | ⚠️ **无法复算**那只标定，只能重拍棋盘 |
@@ -289,7 +293,7 @@ python scripts/1_prepare/prepare_frames.py data/frames/AUV_2_<分类目录> --co
 # 4)（可选）筛图：用已有模型剔除不要的类别 + 按质量加权抽样
 python scripts/1_prepare/select_frames.py data/frames/AUV_2_auv_20260910_172208_frames \
     --weights weights/yolo11n.pt --drop-classes red_ball \
-    --quality-dir data/frames/AUV_2_auv_20260910_172208_frames --keep 2000 --out-dir data/derived/AUV_2_selected_2000
+    --quality-dir data/frames/AUV_2_auv_20260910_172208_frames --keep 2000 --out-dir _archive/auv5/derived_AUV_2_selected_2000
 
 # 5) 标注（RoboFlow）：检测框 或 门 4 角点（规范见下）
 

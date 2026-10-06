@@ -1,9 +1,6 @@
 # -*- coding: utf-8 -*-
 """tests/tasks/gate/test_gate_postproc.py — 解码后处理（规范 §4）的无硬件用例
-覆盖 `gate/percept/gate_postproc.py` 四条规则里的可离线部分：
-① 可信角点（V_MIN 口径） ② 四角几何合法（顺序 + 不自交）
-③ 重复框去重（**不看包含**） ④ 选门键（near / corner 两种策略）
-外加一条**配置守卫**：代码兜底 == cfg（与 test_gate_defaults_match_cfg 同一约定）。"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import numpy as np
 import pytest
 
@@ -23,9 +20,6 @@ def _det(score=0.9, x=400, y=200, w=300, h=220, confs=(0.95, 0.95, 0.95, 0.95),
                kpt_conf=np.asarray(confs, np.float32))
 
 
-# --------------------------------------------------------------------------
-# ① 可信角点
-# --------------------------------------------------------------------------
 def test_trusted_mask_uses_vmin():
     d = _det(confs=(0.95, 0.85, 0.75, 0.6))
     assert pp.n_trusted(d, 0.8) == 2          # 0.95 / 0.85
@@ -40,9 +34,6 @@ def test_v_min_default_comes_from_cfg():
     assert pp.v_min() == float(S.vision.gate.keypoint.conf_thr)
 
 
-# --------------------------------------------------------------------------
-# ② 四角几何合法
-# --------------------------------------------------------------------------
 def test_quad_legal_accepts_normal_quad():
     d = _det()
     assert pp.quad_legal(d.kpts, [0, 1, 2, 3]) is True
@@ -51,8 +42,6 @@ def test_quad_legal_accepts_normal_quad():
 def test_quad_legal_rejects_bowtie():
     """TR 与 BR 互换 → 自交（蝴蝶结）→ 不合法。"""
     d = _det(kpts=[(400, 200), (700, 200), (400, 420), (700, 420)])
-    # 顺序变成 TL,TR,BR,BL 后：TL.x=400 < TR.x=700 ✓，但 BL.x=400 < BR.x=700 ✓，
-    # TL.y=200 < BL.y=420 ✓，TR.y=200 < BR.y=420 ✓ —— 顺序检查过，靠自交检查挡
     assert pp.quad_legal(d.kpts, [0, 1, 2, 3]) is False
 
 
@@ -69,9 +58,6 @@ def test_quad_legal_ignores_non_four_corner_instances():
     assert pp.quad_legal(None, None) is True
 
 
-# --------------------------------------------------------------------------
-# ③ 重复框去重
-# --------------------------------------------------------------------------
 def test_dedup_drops_smaller_duplicate_with_coincident_edges():
     big = _det(score=0.95, x=400, y=200, w=300, h=220)
     small = _det(score=0.80, x=402, y=202, w=296, h=216)   # 同一个门，scale 不同
@@ -112,12 +98,8 @@ def test_dedup_config_can_disable_by_edges():
     assert len(out) == 2
 
 
-# --------------------------------------------------------------------------
-# ④ apply()：几何 + 去重一起，保序、不改动传入对象
-# --------------------------------------------------------------------------
 def test_apply_drops_illegal_quad_and_preserves_order():
-    """规范 §4②：**先 L/R 归一**（左右标反 → 交换后保留），归一救不回来的才丢；保序。
-    只有"上下也反/自交"这种真的非法才丢；左右反不算非法（模型约一半实例会标反，"""
+    """规范 §4②：**先 L/R 归一**（左右标反 → 交换后保留），归一救不回来的才丢；保序。"""
     good = _det(score=0.9, x=100, y=100, w=200, h=150)
     lr_swapped = _det(score=0.8, x=400, y=200, w=200, h=150,
                       kpts=[(600, 200), (400, 200), (400, 350), (600, 350)])  # 左右反 → 归一
@@ -152,9 +134,6 @@ def test_apply_geom_check_can_be_disabled():
     assert len(out) == 1
 
 
-# --------------------------------------------------------------------------
-# ⑤ 选门
-# --------------------------------------------------------------------------
 def test_select_near_prefers_bigger_box_even_with_lower_score():
     """near（默认，规范 §4）：近距离优先 —— 框宽当测距代理。"""
     far = _det(score=0.99, x=500, y=250, w=120, h=90)
@@ -177,9 +156,6 @@ def test_select_ignores_non_gate_and_survives_bad_mode():
     assert pp.pick([ball, gate], conf_thr=0.8, cfg={"mode": "TYPO"}) is gate
 
 
-# --------------------------------------------------------------------------
-# ⑥ 配置守卫：代码兜底 == cfg（改了 cfg 就要同步兜底表）
-# --------------------------------------------------------------------------
 def test_postproc_defaults_match_cfg():
     bad = []
     for name, code, cfg in (("vision.gate.det", pp._D_DET, S.get("vision.gate.det", {})),
@@ -202,8 +178,6 @@ def test_pick_does_not_touch_safety_defaults():
     assert pp.v_min() > 0.0
 
 
-# --------------------------------------------------------------------------
-# --------------------------------------------------------------------------
 def test_gate_backend_wires_det_conf_and_postproc(monkeypatch):
     from gate.percept.gate_decode import GateKeypointBackend
     from gate.percept.geometry import CameraModel
@@ -212,8 +186,6 @@ def test_gate_backend_wires_det_conf_and_postproc(monkeypatch):
     cam = CameraModel.pinhole(1280, 720, fx=1024.0, fy=1152.0, cx=702.0, cy=409.0)
     b = GateKeypointBackend(path="models/nonexistent.bin", labels=["gate"],
                             kpt_order=["TL", "TR", "BR", "BL"], camera=cam)
-    # 候选阈值走 gate 专用的 det.conf（**不是**共用的 model.score_threshold）
-    #    这里改成**显式改两个值、看谁生效**：
     assert b._det_conf == float(S.vision.gate.det.conf)
     monkeypatch.setitem(S.vision.gate.det, "conf", 0.71)
     monkeypatch.setattr(S.vision.model, "score_threshold", 0.42, raising=False)
@@ -231,10 +203,6 @@ def test_gate_backend_wires_det_conf_and_postproc(monkeypatch):
     assert b2._det_conf == pytest.approx(0.25)
 
 
-# --------------------------------------------------------------------------
-# ⑧ 解码→后处理 集成（合成张量，不加载模型）
-#    形状/语义照 doc/设计/gate_pose_decode_spec.md §2/§3：NHWC、kpt x/y 已是 cell 坐标、v 是 raw logit
-# --------------------------------------------------------------------------
 INPUT, G = 640, 80
 STRIDE = INPUT // G
 REG_MAX, KPT_DIM = 16, 4

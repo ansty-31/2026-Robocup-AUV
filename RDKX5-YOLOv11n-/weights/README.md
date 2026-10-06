@@ -41,7 +41,7 @@
 > `weights/yolo11n-pose.stage1.pt` 是**同一份权重**（md5 `8b2325a6…`，5,674,881 B，逐字节相同），
 > 只是两个命名各被不同脚本引用 → 现只保留 `stage1.pt` 一个名字，重复名已删。
 > **要恢复**：`cp runs/auv5/train/stage1/weights/best.pt weights/yolo11n-pose.stage1.pt`（同一 md5）。
-> 记录见 `cleanup_record/MOVES_2026-09-26.md` §10。
+> 记录见 `cleanup_record/reports/MOVES_2026-09-26.md` §10。
 
 > ⚠️ **已退役、不再存在的**：auv5 版 pose 权重/ONNX/bin（`f08f82ed…` / `05fd2d8b…` / `945fdd01…`）。
 > 原因：auv5 按当时的静默默认**从 auv4 热身**，把 auv4 在**错误内参（A 标定）+ 旧链路**上学到的
@@ -105,7 +105,7 @@ ultralytics 包内同目录 `head.py.backup`（`/home/ansty/anaconda3/envs/yolov
 
 > 注：`data/mapped/` 的对照数据集**已于 2026-09-23/24 清理**（结论已收口为 D 域 + LUT 白平衡、无 CLAHE；
 > 数据集可由 `scripts/1_prepare/pose/map_pose_dataset.py` 重建，重建方式见
-> [`cleanup_record/CLEANUP_2026-09-24.md`](../cleanup_record/CLEANUP_2026-09-24.md)）。
+> [`cleanup_record/reports/CLEANUP_2026-09-24.md`](../cleanup_record/reports/CLEANUP_2026-09-24.md)）。
 > **权重本身保留**，随时可复评。
 
 ## 量化产物（板端可加载的 `.bin`）不在本目录，统一放在 `output/`

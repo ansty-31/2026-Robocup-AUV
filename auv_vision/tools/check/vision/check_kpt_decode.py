@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tools/check/vision/check_kpt_decode.py — 门 keypoint 解码约定自检（离线，单图，不动相机/船）
-用途：把"角点乱飞"定性到底是 **模型** 还是 **解码约定**。
-同一张图跑一次模型，把同一个 cell 的原始 kpt 输出用几种候选公式解出来，
-画在同一张图上（不同颜色）并打印数值 —— 哪个公式把点钉在门框角上，就是对的。
-候选公式（anchor = 选择到的网格 cell 下标；stride = input_w / g）：
-V0 现在实现 : (raw)                    * stride
-V1 ultralytics: (raw*2 + anchor - 0.5) * stride
-V2 anchor   : (raw   + anchor)         * stride
-V3 anchor-.5: (raw   + anchor - 0.5)   * stride
-V4 已是像素 : (raw)                    * 1        （有些导出把解码烘进模型）"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import argparse
@@ -54,8 +46,7 @@ def decode_variant(raw, xs, ys, stride, tag):
 
 
 def _find_cell_for_box(grids, nc, kch, pre_size, box_in, score):
-    """由真实解码出的框反推 (g, cell)：逐个尺度扫 score>=conf 的 cell，
-    用该 cell 自己解出的框与目标框比"中心距离 + 尺寸"，最接近者即来源。"""
+    """由真实解码出的框反推 (g, cell)：逐个尺度扫 score>=conf 的 cell，"""
     bx = 0.5 * (box_in[0] + box_in[2])
     by = 0.5 * (box_in[1] + box_in[3])
     bw = box_in[2] - box_in[0]
@@ -200,8 +191,7 @@ def main():
 
 # ------------------------------------------------------------------ 逐 cell 全局判定
 def raw_max_scores(outs):
-    """每个输出张量的最大值（原始值 + sigmoid）。
-    并把 shape 打出来便于识别哪个分支是类别。类别分支输出是 **logit**："""
+    """每个输出张量的最大值（原始值 + sigmoid）。"""
     rows = []
     items = outs.items() if isinstance(outs, dict) else list(enumerate(outs))
     for name, arr in items:
@@ -215,9 +205,7 @@ def raw_max_scores(outs):
 
 
 def per_cell_report(outs, labels, pre_size, conf=0.4, limit=200):
-    """对每个"有输出的 cell"比较：该 cell 解出的**框** vs 各候选公式解出的**四角包围盒**。
-    YOLO-pose 的性质：目标的框 ≈ 其关键点的包围盒（门的框就是四角的外接框）。
-    这个判据不依赖肉眼，也不依赖 NMS 选了哪个 cell。"""
+    """对每个"有输出的 cell"比较：该 cell 解出的**框** vs 各候选公式解出的**四角包围盒**。"""
     nc = len(labels)
     kch = _KPT_PER_PT * 4
     grids = {}

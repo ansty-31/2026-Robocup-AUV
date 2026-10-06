@@ -1,9 +1,6 @@
 # -*- coding: utf-8 -*-
 """tests/platform/test_base.py — base 层：settings 加载 / 11B 串口帧与控制器 / 遥测上行与限深保护 / 相机工厂。
-
-只跑 SIM 路径：UartController(sim=True)、相机 type 强制 sim，不碰串口与摄像头。
-遥测/限深用 `UartController.feed_telemetry()` 或假串口喂字节，不发真帧。
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import os
 import time
 
@@ -29,7 +26,6 @@ def test_settings_loads_real_yaml_values():
             float(S.vision.gate.keypoint.conf_thr)
     assert S.vision.gate.pnp.z_max == 15.0
     assert S.comm.frame.header == 0xA5
-    #    行为本身另有用例（test_depth_guard_blocks_surfacing_only，阈值从 cfg 读、相对判定），
     #    这一条专门钉**数值**：改了它必须有人来解释。
     assert float(S.comm.depth_guard.min_depth_m) == pytest.approx(0.55), \
         "comm.depth_guard.min_depth_m 是现场定死的 0.55，不准改（详见 README 限深保护一节）"
@@ -53,7 +49,11 @@ def test_uart_dof_axis_bytes_and_motion_text():
 
     # 全 0 == 中性轴字节（含 aux 安全默认）
     assert U.dof_to_axis_bytes() == U.neutral_axis_bytes()
-    assert U.neutral_axis_bytes() == [128, 128, 128, 128, 165, 1, 1]
+    # 附加字节来自 cfg（aux_axis）：滚轮中值 165 / tri 中位 1 钉死；
+    # index6 = 整帧 byte[7] = 指定角度轴，按协议 §6-2 中性值为 0（转向不受它影响，见 test_turn_axes）
+    aux = dict(S.comm.frame.aux_axis)
+    assert (aux[4], aux[5], aux[6]) == (165, 1, 0)
+    assert U.neutral_axis_bytes() == [128, 128, 128, 128, aux[4], aux[5], aux[6]]
 
     # dof_map：yaw→axis0, surge→axis1, heave→axis2, sway→axis3
     assert U.dof_to_axis_bytes(yaw=1.0)[0] == mid + rng
@@ -129,9 +129,6 @@ def test_create_camera_sim_returns_configured_frame(monkeypatch):
                        S.vision.camera.down.width, 3)
 
 
-# ---------------------------------------------------------------------------
-# 下位机遥测上行（15B 0xAA55 + turn_id + 深度/姿态 + turn_done + 校验和）
-# ---------------------------------------------------------------------------
 def test_telemetry_frame_roundtrip_and_resync():
     """造帧↔拆帧往返；半帧/粘包/错位/校验错可重同步（串口按字节切分是常态）。"""
     f = T.build_telemetry_frame(0.42, 0.30, 1.5, -2.25, 88.0)
@@ -242,15 +239,9 @@ def test_uart_real_serial_pty_telemetry_and_guard(monkeypatch):
         os.close(slave)
 
 
-# ---------------------------------------------------------------------------
 # 限深保护：深度不足时禁止上浮（机身不得冒出水面）
-# ---------------------------------------------------------------------------
 def _guard_uart(monkeypatch, sent, dof_comp=False):
-    """SIM 控制器 + 关 ramp（轴直通目标）+ 截获实际发出的帧。
-
-    `dof_comp`：默认**关掉下潜放大**，让"限深保护"的用例只测保护本身（两者互不干扰）；
-    要测下潜放大的用例传 `dof_comp=True`。
-    """
+    """SIM 控制器 + 关 ramp（轴直通目标）+ 截获实际发出的帧。"""
     monkeypatch.setitem(S.comm.ramp, "speed_per_s", 0.0)
     monkeypatch.setitem(S.comm.depth_guard, "enable", True)
     monkeypatch.setitem(S.comm.dof_comp, "enable", bool(dof_comp))
@@ -263,10 +254,7 @@ def _guard_uart(monkeypatch, sent, dof_comp=False):
 
 
 def test_depth_guard_blocks_surfacing_only(monkeypatch):
-    """深度 ≤ min_depth_m：上浮 >0 被清零，surge/sway/yaw 照旧；下潜照常。
-
-    阈值**从配置读**（不写死）：用户把下限定在 0.55，写死 0.3 会随配置变化而失效。
-    """
+    """深度 ≤ min_depth_m：上浮 >0 被清零，surge/sway/yaw 照旧；下潜照常。"""
     sent = []
     u = _guard_uart(monkeypatch, sent)
     mid = S.comm.frame.axis_mid
@@ -305,11 +293,7 @@ def test_depth_guard_blocks_surfacing_only(monkeypatch):
 
 
 def test_dive_boost_scales_downward_only(monkeypatch):
-    """**下潜动力单独放大**（底层共用，撞球/过门都吃）：只乘 heave<0，其余通道原样。
-
-    背景：DOF→字节→下位机 `RC_Matching*`（映射≤35→0）使实际推力远小于 DOF 数字
-    （0.20→20%、0.30→30%、0.60→60%，见 gate 文档 §1.1）→ 下潜偏弱就把这一路放大。
-    """
+    """**下潜动力单独放大**（底层共用，撞球/过门都吃）：只乘 heave<0，其余通道原样。"""
     sent = []
     u = _guard_uart(monkeypatch, sent, dof_comp=True)
     mid = S.comm.frame.axis_mid
@@ -388,8 +372,6 @@ def test_depth_guard_stale_action_block_up(monkeypatch):
 
 
 # ---------------------------------------------------------------- 硬停（安全）
-# 根因：_ramp_step 是**字节级平滑**，neutral() 的 force 只绕过心跳节流、不绕过 ramp；
-#       而下位机没有"无帧超时停车"（comm.yaml heartbeat 注释）→ 锁在最后一个非零字节上。
 class _CountWrite(object):
     def __init__(self, u):
         self.u = u
@@ -419,11 +401,7 @@ def test_stop_hard_ramps_axes_back_to_neutral():
 
 
 def test_close_hard_stops_the_boat_when_moving(monkeypatch):
-    """兜底：带着非零舵直接 close() → 关串口前自动硬停（否则船一直转）。
-
-    这里把 ramp 调快（5000 字节/秒）让用例快跑；"按 ramp 速率发够帧"本身由
-    上一个用例用真实 ramp 验证。
-    """
+    """兜底：带着非零舵直接 close() → 关串口前自动硬停（否则船一直转）。"""
     monkeypatch.setitem(S.comm.ramp, "speed_per_s", 5000.0)
     u = U.UartController(sim=True)
     mid = S.comm.frame.axis_mid
@@ -480,8 +458,7 @@ class _FakeAxesUart(object):
 
 
 def test_axis_watchdog_trips_when_one_axis_is_held_same_direction():
-    """★ **轴饱和看门狗**（用户 2026-09-27 定）：同一轴、同一方向连续发轴 ≥ max_same_dir_s
-    里的保护那时根本跑不到。"""
+    """★ **轴饱和看门狗**（用户 2026-09-27 定）：同一轴、同一方向连续发轴 ≥ max_same_dir_s"""
     u = _FakeAxesUart()
     trips = []
     w = U._AxisWatchdog(u, max_same_dir_s=0.15, min_off_b=13, poll_ms=20,
@@ -521,8 +498,7 @@ def test_axis_watchdog_ignores_reversals_deadzone_and_short_pulses():
 
 
 def test_axis_watchdog_only_watches_yaw():
-    """★ **只盯 yaw**（用户 2026-09-27 明确："看门狗只管 yaw 轴的，剩下的不能管"）。
-    而 surge/sway/heave **可以合法长同向**——冲刺几秒直行、扫视/横向对中持续平移、保深持续垂向。"""
+    """★ **只盯 yaw**（用户 2026-09-27 明确："看门狗只管 yaw 轴的，剩下的不能管"）。"""
     u = _FakeAxesUart()
     trips = []
     w = U._AxisWatchdog(u, max_same_dir_s=0.15, min_off_b=13, poll_ms=20,
@@ -566,8 +542,7 @@ def test_axis_watchdog_names_match_dof_map():
 
 
 def test_axis_watchdog_auto_start_policy(monkeypatch):
-    """开机策略：SIM 默认**不开**（免得 os._exit 打断用例）；`comm.watchdog.enable=false` 与
-    `AUV_WATCHDOG=0` 都能关；`AUV_WATCHDOG=1` 强制开。"""
+    """开机策略：SIM 默认**不开**（免得 os._exit 打断用例）；`comm.watchdog.enable=false` 与"""
     monkeypatch.delenv("AUV_WATCHDOG", raising=False)
     assert U.UartController(sim=True)._watchdog is None, "SIM 默认不该开看门狗"
     monkeypatch.setenv("AUV_WATCHDOG", "0")

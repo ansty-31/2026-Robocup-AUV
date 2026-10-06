@@ -4,7 +4,7 @@
 
 **自包含**（2026-10-06 改）：早先它 import 板端工程的 `base.settings` / `common.preprocess` /
 `common.detector`，但那些模块所在的**旧树 `/home/sunrise/AUV` 已于 2026-10-06 归档删除**
-（见 cleanup_record/BOARD_Adomain_retire_20261006.md），所以在用副本的模块路径也改成了
+（见 cleanup_record/reports/BOARD_Adomain_retire_20261006.md），所以在用副本的模块路径也改成了
 `common/vision/preprocess.py`。为了让脚本在"板端工程怎么挪都能跑"，现在把解码函数原样搬进来，
 `--chain none-stretch|none-letterbox` 时**完全不依赖板端工程**；只有 `--chain A`（已废弃）才 import
 在用副本的 `ModelPreprocessor`。复刻的是 `HbmRuntimeDetector._infer` 的每一步，并在每步之间打点：

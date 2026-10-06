@@ -1,41 +1,6 @@
 # -*- coding: utf-8 -*-
 """tools/analyze/calib/pnp_calib.py — 过门 PnP 位姿 / 深度估计的**离线标定与报告**工具。
-它回答一个具体问题：**我们解出来的 z（和位姿）到底准不准、该把哪个参数改成多少。**
-输入
-----
-`preview_detect.py --gate-kpt --dump` 产出的逐帧 JSONL（含 4 角点 + 置信度 + bbox）。
-真值从**文件名**里读，不用手抄：
-pnp_z150.jsonl          正对门，卷尺量到 z = 1.50 m
-pnp_z150_lat+25.jsonl   同上，且相机光轴相对门中心横向偏 +25 cm（门在光轴右侧）
-pnp_z150_up+10.jsonl    同上，且门中心在光轴**上方** 10 cm
-pnp_z150_yaw+20.jsonl   同上，且船体相对门右转 20°
-pnp_z075_yaw-30.jsonl   组合随便，段名可任意顺序
-约定：lat/up/yaw 的**符号**都按"门相对相机"描述：
-lat+ = 门在光轴右侧（相机系 t_x 应为正）
-up+  = 门在光轴上方（相机系 t_y 应为**负**，因为图像 y 向下）
-yaw+ = 船体右转（门法向相对光轴偏左 → psi = gate_normal_angles_deg 应为负）
-文件名不带真值时，用 `--gt gt.csv`（表头：file,z_m,lat_m,up_m,yaw_deg）。
-输出
-----
-2. `--report out.md`：完整报告（含参数校正建议、可直接粘贴的 cfg 片段）；
-3. `--csv out.csv`：每档一行（喂 Excel / 贴进 runbook 记录表）；
-4. `--frames-csv out.csv`：每帧一行（tz/tx/ty/psi/rms/mode，做散点图用）。
-它做的四件事
-------------
-① **深度标尺反演**：正对门时 `z_meas = z_true · (W_cfg / W_true)`（4 角 PnP 的深度由
-比值（正对时深度对宽高比只有弱依赖）拿最优 `frame_h`。
-② **横向/竖向**：`t_x`（米）与 lat 真值、`t_y` 与 up 真值对比（校核尺度与符号）。
-③ **航向**：`psi`（`gate_normal_angles_deg` 的 yaw 分量）与 yaw 真值对比 →
-④ **选参**：`conf_thr × reproj_px` 扫描（可用率 vs 深度误差 p90）、p3p vs full 对比、
-可选 kpt_mem 开/关 A/B。全部**离线复算**，不碰相机、不碰串口。
-用法
-----
-# 单档
-python3 tools/analyze/calib/pnp_calib.py log/pnp_z150.jsonl
-# 整组（通配）+ 出报告
-log/pnp_z*.jsonl
-# 只看 p3p/full 对比与选参扫描
-python3 tools/analyze/calib/pnp_calib.py --sweep log/pnp_z*.jsonl"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import argparse
@@ -159,10 +124,7 @@ def read_frames(path, conf_thr):
 # ---------------------------------------------------------------- 逐帧复算
 def pose_frames(frames, camera, W, H, conf_thr, reproj_px, refine=True,
                 use_kpt_mem=False, km_cfg=None):
-    """对一档的帧序列复算位姿（`prev` 按帧序串联，与在线行为一致）。
-
-    返回 dict：逐帧量 + 汇总（含 mode 分布与位姿可用率）。
-    """
+    """对一档的帧序列复算位姿（`prev` 按帧序串联，与在线行为一致）。"""
     obj_w = object_points(W, H)
     km = None
     if use_kpt_mem:
@@ -271,12 +233,7 @@ def fit_depth(z_true, z_meas):
 
 def invert_scale(per_file, camera, conf_thr, reproj_px, W0, H0,
                  max_frames=300, refine=True, slope=None):
-    """反演门框尺寸标尺。
-    ① 用"正对档"的**线性拟合斜率** `a`（`z_meas = a·z_true + b`）反解真实门宽：
-    `W* = W0 / a`。用斜率而不是"比值的直接中位数"是关键 —— 中位数会把截距 `b`
-    拟合不可用时退回"比值中位数"。
-    ② 固定 `W*`，1D 扫宽高比 `frame_h/frame_w`（正对时深度对宽高比只有弱依赖，
-    返回 dict（含扫描表，便于看平坦度）。"""
+    """反演门框尺寸标尺。"""
     fronto = [f for f in per_file if f["gt"].fronto and f.get("z_p50")]
     if not fronto:
         return None

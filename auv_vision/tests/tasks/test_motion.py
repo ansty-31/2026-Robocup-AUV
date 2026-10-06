@@ -1,16 +1,6 @@
 # -*- coding: utf-8 -*-
 """tests/tasks/test_motion.py — 运动原语：额定转角 `TurnCore` + 正航向 `HeadingAligner`。
-
-**2026-10-02 起模型变了**（板端先行的版本，本地对齐）：旋转**交给下位机执行**——
-上位机只发"相对角度 + 编号"（`uart.request_turn`）、由 UART 层按同一编号重发，
-然后等 15B 遥测里的完成标志（`uart.poll_turn_complete`）。**上位机不再跑 yaw PID 闭环**。
-
-所以这一半测的是新契约：
-  · 符号：`+` = 右转、`−` = 左转（`TurnCore.d` 左 −1 / 右 +1）；
-  · 执行期间上位机的 yaw 恒 0（手动 yaw 永远回中，转头这件事不归它）；
-  · 完成/超时/下发失败/急停四条收场路径，以及超时要**取消**下位机那次转动；
-  · 正航向 `HeadingAligner`：起转前冻结目标角 → 交给下位机 → 等完成。
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import os
 import sys
 
@@ -31,11 +21,6 @@ from gate.motion.hdg import (ABORTED, DONE, GIVEUP, TURN,             # noqa: E4
 BOARD_SIGN = -1.0
 
 
-# ======================================================================
-# 假下位机：**旋转的执行者**（2026-10-02 起）
-#   上位机 `request_turn(相对角)` → 下位机转动 → 遥测回 `turn_done`
-#   ⇒ 测试里用 `request_turn` / `poll_turn_complete` / `cancel_turn` 三个钩子模拟它。
-# ======================================================================
 class _World(object):
     """只记航向的假船：`H` 正 = 右转，门的航向误差 **psi = psi0 − H**。"""
 
@@ -53,14 +38,7 @@ class _World(object):
 
 
 class _Lower(object):
-    """假下位机。
-
-    Args:
-        world:   给了就"真的"把假世界转过去（等价于下位机执行）。
-        replies: poll 几次之后才回报完成（1 = 当帧完成；很大 = 永不回报 → 触发上位机超时）。
-        accept:  False = 模拟下发失败（`request_turn` 返回 False）。
-        estop:   True = 下位机处于急停（上位机必须立刻收手）。
-    """
+    """假下位机。"""
 
     def __init__(self, world=None, replies=1, accept=True, estop=False):
         self.world = world
@@ -118,9 +96,6 @@ def _run_core(core, lower, dt=50, frames=200):
     return core.state, yaws
 
 
-# ======================================================================
-# 额定转角（common/motion/turn_deg.py）
-# ======================================================================
 def test_yaw_sign_is_a_fixed_derivation_not_a_measurement():
     """**极性 σ 是算出来的常量**（固件 × dof_map × telemetry），不配置、不探向、不现场测。"""
     sig, src = yaw_sign()
@@ -224,9 +199,6 @@ def test_old_upper_pc_pid_is_gone_not_just_disabled():
     assert "request_turn" in inspect.getsource(TD.TurnCore.step), "新模型必须走 request_turn"
 
 
-# ======================================================================
-# 正航向（gate/motion/hdg.py）：冻结 PnP 目标角 → 交下位机转一次 → 结束
-# ======================================================================
 class _Hull(object):
     """假船 + 假门：h=机身转角(正=右)，**psi=psi0−h**（右转使 psi 变小），遥测 yaw=h×imag_sign。"""
 
@@ -388,11 +360,7 @@ def test_disabled_switches_off_completely():
 
 
 def test_p3p_frames_do_not_feed_the_filter():
-    """**p3p 的 psi 不许进滤波器**（3 点解欠定，航向 std 极大）。
-
-    做法：同一个 GateTask 先喂两帧 full（建立 +20° 的测量），再喂几帧 p3p（旋转过的、会测出别的值）
-    → `_hdg_deg` / `_hdg_ms` 必须保持 full 那帧的值不变。
-    """
+    """**p3p 的 psi 不许进滤波器**（3 点解欠定，航向 std 极大）。"""
     import numpy as np
     import cv2
     from common.vision.detector import Det
@@ -440,9 +408,6 @@ def test_wrap180_wraps_into_half_open_range():
     assert wrap180(-190.0) == pytest.approx(170.0)
 
 
-# ======================================================================
-# 手动入口（CLI）：**给一个目标角度就转**（与 gate 自动接受同一条执行链）
-# ======================================================================
 class _FakeUartCtl(object):
     """冒充 `UartController`：把 request_turn / poll / cancel 转发给假下位机。"""
 
@@ -466,10 +431,7 @@ class _FakeUartCtl(object):
 
 
 def test_manual_cli_takes_a_target_angle(monkeypatch):
-    """**手动规定目标角度**：`turn_deg.py --deg 45 --dir right` ⇒ 下发的正是 +45°（右转）。
-
-    与自动那条对照：两者都落到 `uart.request_turn()`（同一个 `TurnCore`）。
-    """
+    """**手动规定目标角度**：`turn_deg.py --deg 45 --dir right` ⇒ 下发的正是 +45°（右转）。"""
     import sys as _sys
     from common.motion import turn_deg as TD
 
@@ -495,9 +457,7 @@ def test_manual_cli_left_is_a_negative_angle(monkeypatch):
 
 
 def test_manual_cli_only_takes_deg_dir_timeout(monkeypatch):
-    """**只接受 `--deg/--dir/--timeout`**（用户 2026-10-02 定）：限幅/PID/归一化等运动参数都归下位机，
-    老写法（`--out-max/--kp/--kd/--norm-deg/--imag-sign`）现在必须**报错**而不是被静默忽略 ——
-    静默忽略会让"以为设了限幅其实没设"，宁可让老脚本当场失败。"""
+    """**只接受 `--deg/--dir/--timeout`**（用户 2026-10-02 定）：限幅/PID/归一化等运动参数都归下位机，"""
     import sys as _sys
     from common.motion import turn_deg as TD
 
@@ -512,12 +472,6 @@ def test_manual_cli_only_takes_deg_dir_timeout(monkeypatch):
     assert low.reqs == [], "参数不合法时不该下发任何转向"
 
 
-# ======================================================================
-# 2026-10-02：运行时**可信边界** `z.relock_away_m = 1.2 m`（超出即不采纳该帧位姿）。
-# 本模块绝大多数用例合成的门放在 1.5–3 m，考的是**位姿之后的逻辑**（起转/出口/恢复/SWAY_BACK…），
-# 与"多远才算可信"正交 ⇒ 这里统一把边界放宽到 99（= 关闭），只有专门考这条的用例用真值
-# （用例名里带 jump/relock/far 的自动跳过，不覆盖）。
-# ======================================================================
 @pytest.fixture(autouse=True)
 def _relax_z_trust_boundary(request, monkeypatch):
     name = request.node.name

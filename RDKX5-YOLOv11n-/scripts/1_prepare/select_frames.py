@@ -12,7 +12,7 @@
     python scripts/1_prepare/select_frames.py data/frames/AUV_3_auv_xxx_frames \\
         --weights weights/yolo11n.pt --drop-classes red_ball \\
         --quality-dir data/frames/AUV_3_auv_xxx_frames \\
-        --keep 2000 --out-dir data/derived/AUV_3_selected_2000
+        --keep 2000 --out-dir _archive/auv5/derived_AUV_3_selected_2000
 
 输出：<out-dir>/<文件名>.jpg（选中的 N 张）+ 可选 --report CSV 报告。
 """

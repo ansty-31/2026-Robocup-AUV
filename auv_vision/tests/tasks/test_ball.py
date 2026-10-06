@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
 """tests/tasks/test_ball.py — task1_2.ball：BallTask 相位机（命中序列 / 搜索超时）。
-
-用脚本化 hub 直接喂 Det，不加载模型、不开相机；now_ms 由测试推进（不真 sleep）。
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import numpy as np
 
 import base.cfg.settings as S
 from common.vision.detector import Det
-from task1_2.ball import (PH_APPROACH, PH_CENTER, PH_DASH, PH_SEARCH, PH_STOP,
+from task.ball import (PH_APPROACH, PH_CENTER, PH_DASH, PH_SEARCH, PH_STOP,
                           BallTask)
 
 W, H = 640, 480
@@ -31,14 +29,10 @@ class _BallHub(object):
         return []
 
 # 故意偏右 40px（dx≈0.125 < center_eps 0.25）：CENTER 必须真的收敛进死区才转进近，
-# 而不是因为目标恰好压在画面中心而"白拿"确认。
 _DX_PX = 40
 
 def _growing_ball(n):
-    """前 3 帧无目标，之后边长 60→ 递增的球，**封顶 240px**（面积占比最高约 0.19）。
-
-    封顶是为了"会咬"：不封顶时边长会涨到框比整幅画面还大（占比 >6，物理上不可能），
-    """
+    """前 3 帧无目标，之后边长 60→ 递增的球，**封顶 240px**（面积占比最高约 0.19）。"""
     if n < 3:
         return None
     s = min(60 + 8 * (n - 3), 240)

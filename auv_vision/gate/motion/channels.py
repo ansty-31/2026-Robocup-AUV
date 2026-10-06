@@ -20,9 +20,7 @@ class GateChannels(object):
         for p in (self._pid_sway_px, self._pid_heave_px):
             p.reset()
     def _lateral_out(self, dxn, now_ms):
-        """居中阶段的水平修正：**只用 sway 平移**（全档位共用一个像素 PID）。
-        位置误差该用平移修 —— sway 命令 = kp(8.0)·dxn，|dxn|>0.017 就能过执行器死区(0.138)；
-        而且 yaw 是**方位**控制，把门拉到光轴上 ≠ 机身与门平行。姿态由 ALIGN.HDG 负责。"""
+        """居中阶段的水平修正：**只用 sway 平移**（全档位共用一个像素 PID）。"""
         return _dof_clip(self._pid_sway_px.update(dxn, now_ms))
     def _set_info(self, action, mode="", substate="",
                   z=None, dx=0.0, dy=0.0, sway=0.0, heave=0.0,
@@ -33,19 +31,11 @@ class GateChannels(object):
             self.last_info["hdg_skip"] = hdg_skip
         if hdg_state is not None:
             self.last_info["hdg_state"] = str(hdg_state)
-        # ---- 「转完反向平移」状态：主循环每帧在这里推进（`_set_info` 是全任务**唯一**下发口）----
-        # 只覆盖"本帧发什么"：检测/PnP/ψ/居中判据在调用本函数之前**已经跑完**（ψ 因此是新鲜的）。
         if self._post_sway_until_ms is not None:
             _now = self._now_ms if self._now_ms is not None else 0
-            # **唯一退出判据**（用户 2026-09-30 定）：**当前门**（本帧选中的那扇 `_det_now`）里
-            #   conf ≥ `vision.gate.keypoint.conf_thr` 的角点数 ≥ `hdg.post_sway_kpt_min`
-            #   ⇒ 门重新进了视野、光轴对齐的目的达成 → 退出，交回视觉。
             _kmin = int(num(sub(self._G, "hdg"), "post_sway_kpt_min",
                             _D_HDG["post_sway_kpt_min"]) or 0)
             _kcur = self._post_sway_kpt_count()
-            #   ★ 2026-10-02：窗口**开启那一帧**不许按角点数退出 —— 那一帧的检测是**转向之前**采的
-            #   （转向现在整段在同一帧内跑完），拿它判"门回来了"会把窗口当帧清掉、补偿永远不发。
-            #   要等**开启之后的新一帧**检测。
             _fresh = self.frames > int(getattr(self, "_post_sway_frame0", -1) or -1)
             if _fresh and (_kmin <= 0 or _kcur >= _kmin):
                 self._post_sway_until_ms = None
@@ -55,9 +45,6 @@ class GateChannels(object):
                 self.last_info["sway_exit"] = "expire"
             elif action == "through" or self._hdg.turning:
                 #   平移优先级最低，**永远让位于转向与冲刺**（这条不是"同门判据"，是防回归的安全规则）：
-                #   ① `through` 掉进下面 else 会被改写成 sway_back（surge/yaw 清零）最长一个窗口 ⇒ 冲刺被压住；
-                #   ② 转向侧 `_turn_inner_loop` 每 20Hz 经 `_set_info` 发 yaw，窗口还活着就会把 yaw 清零
-                #      ⇒ 转向推不动（不是死锁，但白等/触发满舵保护）。
                 self._post_sway_until_ms = None
                 self.last_info["sway_exit"] = "yield(%s)" % ("through" if action == "through" else "turning")
             else:
@@ -87,15 +74,7 @@ class GateChannels(object):
         """本次冲刺速度 = `comm.gate.surge.through`。"""
         return num(sub(self._G, "surge"), "through", _D_SURGE["through"])
     def _start_search(self, new_round=False):
-        """回到"等门"状态。
-
-        ★ 2026-10-05 用户定：**判断远近的参数只在"开启新一轮"时清除**，丢门时**必须保留**。
-        为什么（实船 `log/rungate_1.jsonl` 踩的坑）：`_tick_lost` 开头刚把丢门前的基准记下来
-        （`_relock_z_ref=0.83`、`_relock_ratio_ref=0.83`），紧接着"远处丢门 → `_start_search()`"
-        又把它全部清零 ⇒ 3.27m 那扇远门进来时**三条判据都"没有参照"**，被"首见不拦"直接放行，
-        框占比 0.83→0.228 的暴跌也没人管。两条保护不是写错，是基准被自己清掉了。
-        所以：`new_round=True`（过完门 = 新一轮）才清；丢门/重取超时一律保留。
-        """
+        """回到"等门"状态。"""
         # 2026-10-03 用户定：**删掉 SEARCH 扫视** —— 直接回 ALIGN 原地等门（不左右扫）
         self.phase = PH_ALIGN
         self.substate = ""
@@ -133,14 +112,7 @@ class GateChannels(object):
         if self._kpt_mem is not None:
             self._kpt_mem.reset()
     def _search_sweep(self, now_ms):
-        """SEARCH：左右平移扫视，**每轮时长按 2 的次幂递增**（用户 2026-09-27 定）。
-        一轮（k=0,1,2,…）的波形（S = sweep_s·2^k，p = pause_s）：
-        段0 [0, S)             → +sway（右移）
-        段1 [S, S+p)           → 0（停：让检测有静止帧）
-        段2 [.., 2S+p)         → -sway（左移）
-        段3 余下               → 0（停）
-        **正反必须等时长**（遥测没有横向位置反馈，单向平移会一路漂到池壁）；
-        方向约定与 sway 一致：**+ = 右移**。`sweep_s<=0` → 只停不扫（等于原地待机）。"""
+        """SEARCH：左右平移扫视，**每轮时长按 2 的次幂递增**（用户 2026-09-27 定）。"""
         s = merge(sub(self._G, "search"), _D_SEARCH)
         base = num(s, "sweep_s", _D_SEARCH["sweep_s"]) * 1000.0
         pause = max(0.0, num(s, "pause_s", _D_SEARCH["pause_s"]) * 1000.0)
@@ -172,20 +144,10 @@ class GateChannels(object):
             return _dof_clip(-v)
         return 0.0                           # 段3：停
     def _post_sway_kpt_count(self):
-        """**当前门**（本帧选中的那扇 `_det_now`）里 conf ≥ `vision.gate.keypoint.conf_thr` 的角点数。
-
-        postsway 的**唯一**退出判据（用户 2026-09-30 定）：看到当前门的 N 个角点 = 门重新进了
-        视野、"对齐光轴"的目的达成。本帧没检出（门还在画外）= 0 ⇒ 继续反向平移 + 缓慢后退。
-        用**当帧原始**角点置信度，不是记忆后/几何过滤后的个数。
-        """
+        """**当前门**（本帧选中的那扇 `_det_now`）里 conf ≥ `vision.gate.keypoint.conf_thr` 的角点数。"""
         d = self._det_now
-        # 本帧没有"选中门"时退回**本帧画出来的那扇**（`last_dets`）—— 锁定保护前移后，
-        #   `_gate_lock` 判"没匹配上"的那几帧会返回 None，但检测框其实在（就是锁定那扇门），
-        #   退回它才能正常判"门回来了没"（实测：不退回则转完反向平移的窗口永远收不掉）。
         if d is None:
             _ld = getattr(self, "last_dets", None) or []
-            # 再退回**本帧原始检测**：`_gate_lock` 判"没匹配上"那几帧会返回 None（保护前移的副作用），
-            #   但检测框其实在。退回原始检测才能正常判"门回来了没"。
             _raw = getattr(self, "_dets_raw", None) or []
             d = _ld[0] if _ld else (_raw[0] if _raw else None)
         kc = None if d is None else getattr(d, "kpt_conf", None)
@@ -208,10 +170,7 @@ class GateChannels(object):
         from gate.percept.down_view import detect_red_bar
         return detect_red_bar(frame)
     def _z_est(self, det, conf_thr):
-        """估计一个检测门的距离 z（**选门用，近者优先**）。
-
-        full/p3p → PnP；width（对向 2 角）→ `fx·W/Δu`；其余 → 框宽代理 `fx·W/w`。None = 估不出。
-        """
+        """估计一个检测门的距离 z（**选门用，近者优先**）。"""
         kp = getattr(det, "kpts", None)
         kc = getattr(det, "kpt_conf", None)
         if kp is not None and kc is not None and len(kp) >= 4:
@@ -235,14 +194,7 @@ class GateChannels(object):
         return None
     def _pick_gate(self, dets):
         """选目标门 = **z 优先 + 同时相信"面积最大"**（★ 2026-10-05 用户定）。
-
-        判据 = `max(实测 z, 面积反推 z)`，其中 `面积反推 z = k_true/框占比`（占比最大 = 最近，
-        `k_true = fx·frame_w/画面宽 = 0.560`，门框 70cm）。**只有 z 和面积都说近才算近**，
-        谁都不能单独把自己说得很近 —— 正好挡住"远处门 PnP z 崩小、抢走选门权"。
-
-        ⚠️ **k 一致性检验不在这里** —— 它和跳变保护同性质，是"**选定之后保护锁定**"用的，
-           在 `_gate_lock()` 里（见那里的注释）。
-        """
+        ⚠️ **k 一致性检验不在这里** —— 它和跳变保护同性质，是"**选定之后保护锁定**"用的，"""
         conf_thr = num(sub(self._V, "keypoint"), "conf_thr", _D_KPT["conf_thr"])
         gates = [d for d in dets if getattr(d, "kind", None) == "gate"]
         if not gates:

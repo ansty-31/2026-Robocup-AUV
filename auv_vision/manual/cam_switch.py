@@ -1,18 +1,7 @@
 # -*- coding: utf-8 -*-
 """manual/cam_switch.py — 手动模式的**主视/下视选路推流**
-
-手动挡下，启动时用 `--camera front|down` 选一路（`udp_server.py --stream-host ... --camera X`）；
-PC 端只被动接收，不做运行时切换。
-
 ⚠️ **同一时刻只开一路相机**（2026-10-04 实测）：两块 720p 相机挂在同一个 USB 2.0 总线上
-   （`lsusb -t`：都在 Bus 01/480M 同一个 Hub 下），**同时打开必超等时带宽** —— 不管打开顺序，
-   **后开的那路 `read()` 永远返回 None**（实测 front=/dev/video2 与 down=/dev/video0 都如此）。
-   旧实现"两个一起开"会导致被选中的那路恰好是空的 → `frames_sent=0` → PC 完全没有画面。
-   所以这里改成"选哪路就开哪路"，切换时先关旧再开新。
-
-用 `base.hw.camera.create_camera("front"|"down")` 开相机（走 cfg/vision.yaml 的 camera.* 配置，
-无硬件时 fallback_sim），`manual.stream.MjpegPusher` 零转码 UDP 推流（与 manual.sh 共用同一套）。
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import threading
@@ -20,11 +9,7 @@ import time
 
 
 def parse_camera_packet(data):
-    """把 UDP 文本包翻译成相机切换指令。非相机指令返回 None。
-
-    接受：`cam:front` / `cam:f` → "front"；`cam:down` / `cam:d` → "down"；
-          `cam` / `cam:toggle` / `cam:t` → "toggle"；其余 `cam:*` → "bad"。
-    """
+    """把 UDP 文本包翻译成相机切换指令。非相机指令返回 None。"""
     try:
         t = data.decode("utf-8", errors="ignore").strip().lower().replace(" ", "")
     except Exception:
@@ -41,10 +26,7 @@ def parse_camera_packet(data):
 
 
 class CamPusher(object):
-    """后台线程：只开**当前选中**的那一路相机，转 JPEG 推给 pusher。
-
-    `switch("front"|"down")` / `toggle()` 会**先关旧相机再开新相机**（不能两路同开，见模块头注释）。
-    """
+    """后台线程：只开**当前选中**的那一路相机，转 JPEG 推给 pusher。"""
 
     def __init__(self, host, port=5000, pkt=8000, stream_fps=30.0, start="front"):
         self.which = "front" if start not in ("front", "down") else start

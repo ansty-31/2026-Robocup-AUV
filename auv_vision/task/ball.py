@@ -1,14 +1,6 @@
 # -*- coding: utf-8 -*-
 """ball.py — 任务一 撞球（BallTask）· 运动逻辑融合版
-SEARCH   无目标：原地**脉冲旋转**（spin_s/pause_s）+ 周期性慢速前进探测
-（转 spin_s → 停 pause_s，停的间隙让检测有静止帧）
-把球在**水平与竖直**同时居中
-APPROACH 稳定居中后：surge **分级**前进（远 surge_fast / 近 surge_slow）+ **仅 sway**
-做水平修正（motion.pid_sway）；**yaw=0、heave=0**
-STOP     冲刺结束 → 全 0 保持 stop_hold_s（**稳定停住**）→ DONE("hit")
-丢目标（阶梯）：短时丢失（帧窗口）→ 保持/惯性 → hold（原地全 0，
-时限：`comm.ball.timeout_ms`（当前 cfg 30s；DASH/STOP 期间不打断，保证命中与停稳都能走完）。
-参数：本任务特有的在 cfg/comm.yaml 的 `ball:` 段；**与过门共用的**（两套 PID、"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import base.cfg.settings as S
@@ -72,8 +64,6 @@ class BallTask(object):
         # 丢目标后的 hold 窗口
         self._hold_until_ms = None
 
-        # 三套 PID（量纲都是"归一化偏差 ±1"）
-        # ① 居中 yaw（撞球特有：门/球居中用旋转 + 限幅，靠近自动减速；过门居中只用 sway）
         self._pid_yaw = PID(kp=S.comm.ball.edge_yaw_kp, ki=0.0,
                             kd=S.comm.ball.edge_yaw_kd,
                             out_min=-S.comm.ball.edge_yaw_max,
@@ -120,12 +110,7 @@ class BallTask(object):
         return fast, "approach_fast"
 
     def _search_pulse_yaw(self, now_ms):
-        """搜索扫描（★ 2026-10-04 用户定）：改用公共**慢扫**。
-
-        `common/motion/search_scan.py`：左 span → 右 2span → 左 2span …（默认 span=60° ⇒ 扫 120° 视角），
-        **手动 DOF + 遥测 yaw 闭环**（PID 用当年 turn_pid 那套值），非阻塞、检测照跑（"睁眼看"）。
-        取代原来的开环时间脉冲（`search_spin_s`/`search_pause_s` 已不再使用）。
-        """
+        """搜索扫描（★ 2026-10-04 用户定）：改用公共**慢扫**。"""
         return self._scan.step(now_ms, telemetry_yaw(self.uart))
 
     def _search_advance(self, now_ms):
@@ -140,7 +125,6 @@ class BallTask(object):
             self._advance_until_ms = None
             self._search_start_ms = now_ms
             # 前进探测**不改朝向**，所以**不要** reset 扫描 —— 否则入场朝向被重取成当前朝向，
-            # 扫描就会"一步 span 地一路走"（实船实测走到 348° 的根因）。
         if now_ms - self._search_start_ms >= after_ms:
             self._advance_until_ms = now_ms + dur_ms
             self._search_start_ms = now_ms
@@ -201,10 +185,7 @@ class BallTask(object):
         return "stop", 0.0
 
     def _step_lost(self, now_ms):
-        """丢目标阶梯：短时保持/惯性 → hold(原地全 0) → 回 SEARCH。
-
-        SEARCH 相位下（含从未见过球、或阶梯走完回到搜索）→ 继续搜索，不再套 hold。
-        """
+        """丢目标阶梯：短时保持/惯性 → hold(原地全 0) → 回 SEARCH。"""
         if self._phase == PH_SEARCH:
             return self._search_advance(now_ms)
         grace = S.comm.ball.lost_grace_frames

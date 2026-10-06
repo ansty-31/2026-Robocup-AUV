@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """PID.py — 任务公用小件（PID 等）
-
-供任务一(ball)/gate 共用（早期由 root tasks.py 迁移至此）。
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 class PID(object):

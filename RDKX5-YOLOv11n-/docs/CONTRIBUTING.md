@@ -296,9 +296,9 @@ git commit -m "perf(postprocess): optimize DFL decoding speed"
 | `runs/` | 训练 / 评测 / 量化记录（`runs/auv5/`、`runs/prov/`） | `runs/auv5/REPORT_auv5_pose.md` |
 | `experiment/` | 域 / 增强消融实验（`experiment/scripts/`、`experiment/runs/`、`experiment/data/`） | `experiment/README.md` |
 | `docs/` | 本指南、中英 README、门 4 角点打标规范 `labeling_gate_pose.md`、`tutorial_zh.md` | — |
-| `cleanup_record/` | 每次整理/清理的**记录 + MOVES 表**（改路径必须在这里留痕） | `cleanup_record/RESTRUCTURE_2026-09-25.md` |
+| `cleanup_record/` | 每次整理/清理的**记录 + MOVES 表**（改路径必须在这里留痕） | `cleanup_record/reports/RESTRUCTURE_2026-09-25.md` |
 | `_archive/` | 退役但**不删**的产物（旧 `runs` / 旧 `output` / 空壳目录 / 中间产物） | `_archive/README.md` |
-| `raw-data/` | 预留原始数据目录（2026-09-26 为空） | — |
+| `raw-data/` | 素材抢救区（坏卡裸流），**按天聚类**：`20260926/`…`20261005/` ＋ `_dups/` | `raw-data/README.md` |
 
 ### 约定（改代码或改路径前必读）
 
@@ -330,7 +330,7 @@ ls -d scripts/{1_prepare,2_train,3_export} configs data/{raw,frames,datasets,der
       weights output runs experiment docs cleanup_record _archive raw-data
 ls output/preview/auv5_pose/ output/preview/auv5_pose/{docs,tools,judgment,logs,tables,filelists,renders}
 ls scripts/README.md data/README.md configs/README.md output/README.md \
-   experiment/README.md _archive/README.md cleanup_record/RESTRUCTURE_2026-09-25.md \
+   experiment/README.md _archive/README.md cleanup_record/reports/RESTRUCTURE_2026-09-25.md \
    docs/labeling_gate_pose.md docs/tutorial_zh.md runs/auv5/REPORT_auv5_pose.md
 ```
 

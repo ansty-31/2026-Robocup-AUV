@@ -1,12 +1,6 @@
 # -*- coding: utf-8 -*-
 """tests/tasks/test_search_scan.py — 公共搜索扫描 `common/motion/search_scan.py`
-
-守四件事：
-  ① **轨迹**：-span → +span → -span …（在 ±span 内往复），总扫幅 = 2×span_deg；
-  ② **段到位后停 pause_ms**（停的间隙检测更稳）；
-  ③ **没遥测就不转**（闭环量缺失 ⇒ 不乱转）；
-  ④ **出力不超 pid.out_max，且不低于执行器死区**（死区 0.138 是物理下限）。
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import base.cfg.settings as S
 from common.motion.search_scan import Scan, _D_SCAN
 
@@ -23,8 +17,6 @@ class _YawSim(object):
         self.dt = dt_ms / 1000.0
 
     def step(self, cmd):
-        # 固件约定：下发 +yaw = 右转 ⇒ **回传 yaw 减小**。σ=-1（= yaw_sign()）时：
-        #   d(yaw_deg) = σ · cmd · rate · dt  ⇒ +cmd 使 yaw_deg 变小 ✔
         self.yaw += self.sigma * float(cmd) * self.rate * self.dt
         return self.yaw
 
@@ -89,24 +81,16 @@ def test_scan_output_within_outmax_and_above_actuator_deadzone():
     om = float(sc._pid.out_max)
     for _t_ms, c, _y in trace:
         assert abs(c) <= om + 1e-9, "出力 %.3f 超 out_max %.3f" % (c, om)
-    # 逼近目标时出力必然很小（会落进执行器死区）——这是**物理下限**，不是 bug：
-    #   当年 turn_deg 文档："err≤6° → 进 PID 死区 → 输出 0 ⇒ 收敛残差 ≈6~10°"。
-    #   所以这里只要求"最大出力足够过死区"（否则整段都推不动、等于没扫）。
     assert max(abs(c) for (_t, c, _y) in trace) >= DEADZONE, \
         "最大出力都不过执行器死区 %.3f ⇒ 实际 0 推力，等于没扫" % DEADZONE
-    # 兜底表也不许把 out_max 定在死区那一档（当年 turn_deg 明确警告过 0.15）
     # 兜底 out_max 必须**明显高于**执行器死区，否则"还剩二十几度就没推力"（当年 turn_deg 的警告）。
-    #   注意收敛残差由 **PID 的 deadzone**(=6°) 决定，不由 out_max 决定 —— 两者别混。
     assert _D_SCAN["pid"]["out_max"] >= 1.05 * DEADZONE, \
         "兜底 out_max=%.2f 已到执行器死区 %.3f 的下限（当年警告线就是 0.15）" \
         % (_D_SCAN["pid"]["out_max"], DEADZONE)
 
 
 def test_scan_converges_with_correct_polarity():
-    """★ 极性对（σ=-1，+yaw=右转 ⇒ 回传 yaw 减小）⇒ **慢慢收敛**，不转圈。
-
-    轨迹应严格夹在 ±span 内（允许 tol 容差），且段目标交替 -span/+span。
-    """
+    """★ 极性对（σ=-1，+yaw=右转 ⇒ 回传 yaw 减小）⇒ **慢慢收敛**，不转圈。"""
     sc = Scan()
     sim = _YawSim(yaw=0.0, sigma=sc.sigma)      # 与 Scan 的 σ 一致 = 极性正确
     trace, targets = _run(sc, sim, n_legs=6)
@@ -120,11 +104,7 @@ def test_scan_converges_with_correct_polarity():
 
 
 def test_scan_does_not_spin_when_polarity_is_wrong():
-    """★★ 极性反了（σ 算错 ⇒ 正反馈）时，**绝不能整圈转下去** —— 角度预算必须拦住。
-
-    这是"search 只是原地来回扫、不会转圈也不能转圈"的硬保证：船的净转动量被
-    2×span + runaway_slack_deg 夹住，越界即停手（不发舵）。
-    """
+    """★★ 极性反了（σ 算错 ⇒ 正反馈）时，**绝不能整圈转下去** —— 角度预算必须拦住。"""
     sc = Scan()
     sim = _YawSim(yaw=0.0, sigma=-sc.sigma)     # ★ 故意反极性：船按相反方向响应
     trace, _t = _run(sc, sim, n_legs=1, dt_ms=100)
@@ -138,11 +118,7 @@ def test_scan_does_not_spin_when_polarity_is_wrong():
 
 
 def test_search_scan_defaults_match_cfg():
-    """★ 守卫：`motion.search_scan` 的 **cfg 值与代码兜底必须一致**。
-
-    改了 cfg 就要同步兜底表，否则"缺配置时行为不同"，而实船最难查的正是这种"改了不生效"。
-    （这条是被实船坑出来的：`sub(node, key)` 不吃点号路径 ⇒ Scan 一直用兜底值、cfg 全被忽略。）
-    """
+    """★ 守卫：`motion.search_scan` 的 **cfg 值与代码兜底必须一致**。"""
     import base.cfg.settings as S
     cfg = S.get("comm.motion.search_scan", {}) or {}
     bad = []

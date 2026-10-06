@@ -1,14 +1,6 @@
 # -*- coding: utf-8 -*-
 """stream.py — 画面推流/接收库（统一入口：根目录 manual.sh（或 python3 -m manual.stream））
-PC 端接收：按 JPEG 边界跨 UDP 数据报重组，显示/录制/统计；或直接拉 HTTP MJPEG。
-给 `base/hw/camera.py` 用的接口：
-pusher = stream.MjpegPusher(host, port, pkt=8000, stream_fps=30)
-pusher.offer(jpeg_bytes)        # 非阻塞，只保留最新帧
-给 `manual.py` 用的接口：
-open_raw_camera(...), CameraSource, SimSource,
-MjpegPusher, MjpegHttpServer,          # 发送
-UdpReceiver, HttpReceiver, Stats, Sink # 接收/显示/录制
-完整方案见 doc/记录/前视USB相机低延迟推流方案.md。"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import os as _os, sys as _sys
 if __package__ in (None, ""):        # 支持直接 python3 manual/xxx.py 运行
     _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
@@ -46,9 +38,6 @@ def _as_bytes(buf):
 # ===========================================================================
 def open_raw_camera(dev=0, width=1280, height=720, fps=60):
     """以 MJPEG 打开 UVC 相机，尽量拿到**原始 JPEG**。
-    返回 (cap, mode)：
-    mode == "raw" → read() 返回 (1,N) uint8 原始 JPEG（零解码，可直接转发）
-    mode == "bgr" → 相机不支持原始 JPEG 输出，read() 返回 BGR（推流需重编码）
     必须显式 FOURCC=MJPG + CONVERT_RGB=0 才能到 60fps 档。"""
     if cv2 is None:
         raise RuntimeError("需要 opencv-python（cv2）")
@@ -390,11 +379,7 @@ class Stats(object):
 
 
 class CamToggle(object):
-    """PC 端按 Tab 键 → 往板端遥控桥（udp_server.py 的 UDP 9000）发 `cam` 切换相机。
-
-    板端收到 `cam` 就切换主视/下视（见 manual/cam_switch.py::parse_camera_packet）。
-    0.3s 防抖：Tab 长按/连按也只切一次。
-    """
+    """PC 端按 Tab 键 → 往板端遥控桥（udp_server.py 的 UDP 9000）发 `cam` 切换相机。"""
 
     def __init__(self, host, port=9000):
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

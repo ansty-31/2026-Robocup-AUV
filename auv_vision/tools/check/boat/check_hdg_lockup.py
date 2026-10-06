@@ -1,17 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """板端自检：**转完反向平移（post_sway）会不会把 HDG 永久锁死** + 每门转向上限有没有通电。
-
 用法：
-    python3 tools/check/boat/check_hdg_lockup.py                 # 本机（本仓库）
-    python3 tools/check/boat/check_hdg_lockup.py --root /home/sunrise/AUV   # 板端旧仓库
 退出码 0 = 全部通过（或只剩"按设计如此"的 NOTE）；1 = 有 FAIL（终端里会打印要改的那一行）。
-
-**结构感知**（2026-09-30 起）：本机把相位机拆成了 `gate/gate_task.py`（门面/编排）+
-`gate/motion/*.py`（方法簇），`_D_HDG` 在 `gate/motion/params.py`；板端旧仓库可能还是
-单文件 `gate/gate_task.py` + `gate/motion/heading_align.py`。所以这里**按新旧两套位置都扫**，
-并在结尾打印实际扫了哪些文件 —— 免得"位置猜错"变成假绿/假红。
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 import argparse
 import os
 import re
@@ -140,11 +132,7 @@ def check_expiry(task_src):
 
 
 def check_same_gate(task_src):
-    """② 「是不是刚转丢的那个门」：**本机已按用户决定删除该判据**（2026-09-30）。
-
-    新设计：postsway 的退出只看「**当前门**出现 ≥ `post_sway_kpt_min` 个可信角点」+ 超时兜底。
-    板端若还留着旧的 `_post_sway_same_gate`，就仍按老要求检查它（z 做主判据）。
-    """
+    """② 「是不是刚转丢的那个门」：**本机已按用户决定删除该判据**（2026-09-30）。"""
     body = None
     for name, ln, b in _methods(task_src):
         if name == "_post_sway_same_gate":
@@ -177,7 +165,9 @@ def check_cfg(cfg_src):
     m = re.search(r"max_turns:\s*([0-9]+)", cfg_src)
     if m:
         v = int(m.group(1))
-        (OK if v == 4 else WARN).append("cfg gate.hdg.max_turns=%d（用户定 4）" % v)
+        (OK if v >= 1 else WARN).append(
+            "cfg gate.hdg.max_turns=%d（≥1 即可：2026-10-02 起降级为兜底，主闸是"
+            "「一门只转一次」；值以 cfg 为准）" % v)
     else:
         FAIL.append("cfg gate.hdg 里没有 `max_turns` ⇒ 每门转向上限没有可调旋钮"
                     "（旧版靠它治「疯狂旋转」，别丢）")

@@ -1,12 +1,6 @@
 # -*- coding: utf-8 -*-
 """gate/percept/gate_decode.py — keypoint 模型(门+4角)后端与解码脚手架
-状态说明（诚实标注）：
-真实 gate keypoint 权重尚未导出/量化，本模块提供：
-1) `decode_yolo11_kpt`：按 X5 split-head 惯例实现角点解码；
-坐标基准（相对输入 or 相对框、归一化、可见度 sigmoid 阈值）为约定值，
-导出 .bin 后必须用 §6"keypoint 解码自检"（合成图比对标定/量纲）校核修正；
-输入 nv12(640)，输出按 labels 取 gate 检测并附 kpts。
-依赖方向：gate → detector 公共件（符合 §5.0）。"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import numpy as np
@@ -22,9 +16,7 @@ _KPT_PER_PT = 3                       # (x, y, visible)
 
 
 def find_model_input(model, default="input"):
-    """解析 hbm_runtime 模型的输入名。
-    以模型自身元数据(input_names/input_name)为准；cfg 的 vision.model.input_name
-    `Input name "input" is invalid for model ...` 这类硬编码错。"""
+    """解析 hbm_runtime 模型的输入名。"""
     names = []
     for attr in ("input_names", "input_name"):
         v = getattr(model, attr, None)
@@ -50,17 +42,7 @@ def decode_yolo11_kpt(outputs, labels, frame_w, frame_h,
                       conf=None, iou=None, input_w=None, input_h=None,
                       reg_max=16, kpt_dim=4, vis_thr=0.5,
                       kpt_scale=1.0):
-    """从 X5 split-head 输出还原 检测框+角点。
-
-    约定（导出后需用 §6 自检校核）：
-      - 每尺度：reg(64) + cls(nc) + kpt(3*kpt_dim)；
-      - 角点坐标与框心同一网格单位(×stride)，可见度经 sigmoid 后阈值 vis_thr；
-      - kpt_scale 校正"坐标单位=输入像素"的缩放差异（默认 1.0）。
-      - vis_thr：本函数默认 0.5，**真机后端会传 cfg 的 keypoint.conf_thr**
-        （见 GateKeypointBackend.__init__）；低于它的角点 conf 直接被清 0。
-
-    Returns: [Det(...)]（Det.kpts=(4,2) 像素、kpt_conf=(4,)）。
-    """
+    """从 X5 split-head 输出还原 检测框+角点。"""
     conf = conf if conf is not None else S.vision.model.score_threshold
     iou = iou if iou is not None else S.vision.model.nms_threshold
     input_w = input_w or S.vision.model.input_size
@@ -68,9 +50,6 @@ def decode_yolo11_kpt(outputs, labels, frame_w, frame_h,
     nc = len(labels)
     kch = _KPT_PER_PT * kpt_dim
     bins = np.arange(reg_max, dtype=np.float32)
-    #    排列都不一样（形状都对、位置乱序）⇒ **任何按顺序取输出的写法都会静默错**
-    #    ONNX 文件里的顺序（output0/566/567/…，见 doc/设计/gate_pose_decode_spec.md §2）只是
-    #    导出清单，不是运行时保证。
     grids = {}
     for arr in outputs.values():
         a = np.asarray(arr)
@@ -151,19 +130,10 @@ class GateKeypointBackend(object):
         self.input_size = int(input_size)
         self.kind = kind
         self._key = "input"                       # hbm_runtime 输入名(加载后解析)
-        # 候选框 score 阈值：显式参数 > `vision.gate.det.conf` > 共用的 model.score_threshold > 0.6
-        # （规范 `doc/设计/gate_pose_decode_spec.md` §6 CONF。**不用共用那一个**：给 gate 调阈值不该动撞球。）
         self._det_conf = det_cfg(det_conf)
         # 解码后处理（规范 §4）：几何合法 + 重复框去重。参数读 `vision.gate.postproc`，
         self._post = postproc_cfg()
-        # 解码期角点可见度硬门限：低于它的角点 conf 直接清 0，**下游再也看不到**。
-        # 优先级（高 → 低）：
-        #   ① 构造参数 vis_thr（预览工具/测试显式给，如 0.0 = 保留模型原始置信度）
-        #   ② `vision.gate.keypoint.vis_thr`（配置单独给；默认 null）
-        #   ④ 0.5
         self._vis_thr = self.resolve_vis_thr(vis_thr)
-        # 预处理器只建一次（remap 映射缓存随实例复用；原先每帧新建 → 每帧白扔一次
-        # initUndistortRectifyMap，1280x720 下约 1.3 ms/帧）
         from common.vision.preprocess import ModelPreprocessor
         self._pre = ModelPreprocessor(
             calib_path=S.vision.camera.front.calibration)
@@ -237,5 +207,4 @@ class GateKeypointBackend(object):
                                  conf=self._det_conf,
                                  vis_thr=self._vis_thr)
         # 解码后处理（规范 §4）：几何合法 + 重复框去重 —— 任务与预览必须看到同一批实例。
-        # 几何合法性只对"四角都可信"的实例判（conf_thr=None ⇒ gate_postproc 自己去读 cfg）。
         return postproc_apply(dets, conf_thr=None, cfg=self._post)

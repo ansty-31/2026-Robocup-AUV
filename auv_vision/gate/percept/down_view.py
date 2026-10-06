@@ -1,12 +1,6 @@
 # -*- coding: utf-8 -*-
 """gate/percept/down_view.py — 下视辅助过门：HSV 识别门框底部的红色横向横杆
-
-下视相机朝正下方。机身跨过门框时，门框下沿（红色 PVC 横杆）会出现在画面里。
-本模块只回答一个问题：**画面里现在有没有一条红色的横向横杆？**
-
-HSV 双区间红阈值与最小面积读 `vision.color.line_red`（与仿真红色标示线共用同一套红）。
-开启开关是 `vision.gate.down.enable`（决策在 gate/motion/channels.py::_down_sees_red_bar）。
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import numpy as np
@@ -37,11 +31,7 @@ def red_mask(frame, cfg=None):
 
 
 def detect_red_bar(frame, cfg=None):
-    """画面里有没有红色**横向**横杆（门框底部）。返回 bool。
-
-    判据：红色掩码经形态学闭合/开运算后，存在一条「宽 ≥ 0.4×画面宽 且 宽/高 ≥ 3」的横向
-    连通块，且面积 ≥ `min_area_ratio`（默认 0.002）。这是"横向横杆"而不是普通红点/竖条。
-    """
+    """画面里有没有红色**横向**横杆（门框底部）。返回 bool。"""
     import cv2
     if frame is None:
         return False

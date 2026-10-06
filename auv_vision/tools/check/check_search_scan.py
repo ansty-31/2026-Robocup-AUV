@@ -1,24 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tools/check/check_search_scan.py — **单独跑搜索扫描**（只看转圈/不转圈，不下水任务）
-
-只动 yaw 一个轴：其余三轴恒 0。用来现场确认
-    "左 span° → 停 pause_ms → 右 2×span° → 停 → 左 2×span° → …"
-是不是**原地来回摆**，而不是**朝一个方向整圈转过去**（后者 = σ 判反了）。
-
 用法（工程根执行）：
-    python3 tools/check/check_search_scan.py                  # 默认 30s，span=cfg 值
-    python3 tools/check/check_search_scan.py --duration 60
-    python3 tools/check/check_search_scan.py --span 45 --pause 300
-    python3 tools/check/check_search_scan.py --sim            # 只打印、不驱动电机（台架）
-
-判读：
-  · 每段末尾打印 psi 与段目标，残差应在 tol_deg(6°) 上下；
-  · 出现 `⚠ 判为极性/控制异常，停手` = 转不动/转反了（查 dof_map.yaw.sign / 推进器接线）；
-  · `没有遥测 ⇒ 不动` = 下位机没回 15B 帧（查串口/固件），闭环没有输入量。
-
 ⚠️ 安全：脚本退出（含 Ctrl-C）一定先 `stop_hard` 回中位再关串口。
-"""
+（详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
 import argparse

@@ -17,13 +17,7 @@ from gate.motion.channels import _dof_clip
 
 class GateModes(object):
     def _hdg_ok_tick(self, align_deg):
-        """航向「已 OK」锁存判据（★ 2026-10-04 用户定：**持续稳定才锁存**）。
-
-        单帧落进阈值就锁存，会被一个噪声样本把"航向已 OK"钉死 —— 实测 ψ 在 1.5m 处
-        标准差 22°，船真实 yaw 标准差只有 3°（`log/rungate_1.jsonl`）；|ψ|≤8° 的最长
-        连续段只有 4 帧。锁存后 ψ 再大也不再复核 ⇒ **该转的不转**。
-        改成：**连续 ok_frames 帧**都在 tol 内才锁存；中间破一次就清零重数。
-        """
+        """航向「已 OK」锁存判据（★ 2026-10-04 用户定：**持续稳定才锁存**）。"""
         if align_deg <= 0 or abs(float(self._hdg_deg)) <= align_deg:
             self._hdg_ok_cnt = getattr(self, "_hdg_ok_cnt", 0) + 1
             need_ok = int(num(sub(self._G, "hdg"), "ok_frames", _D_HDG["ok_frames"]))
@@ -33,10 +27,7 @@ class GateModes(object):
             self._hdg_ok_cnt = 0
 
     def _on_pose(self, det, pose, now_ms, mode, kpt):
-        """位姿档：**位姿只提供深度 z 与"可信"这一事实**；居中一律用**像素误差**。
-        而且米制/像素两套阈值+两套 PID 会在 mode 于 full↔coarse 间跳时交替工作 → 收敛不了。
-        统一成像素后：**一套阈值(align.px_x/px_y) + 一套 PID**，全档位可比。
-        门框中心 = 用位姿把门原点(0,0,0)投影回图像（p3p 缺角时也比角点均值准）。"""
+        """位姿档：**位姿只提供深度 z 与"可信"这一事实**；居中一律用**像素误差**。"""
         G = self._G
         al = merge(sub(G, "align"), _D_ALIGN)
         zc = merge(sub(G, "z"), _D_Z)
@@ -51,22 +42,15 @@ class GateModes(object):
         self.mode = mode
         z = float(tvec.ravel()[2])
         self._z_last = z
-        # ★ 2026-10-02：留一份「最近一帧可信位姿」+ 时刻 —— coarse/width 帧没有位姿时，
-        #   门口兜底可以拿它判「其实已经到了、而且够正」（限 loiter.pose_fresh_ms 内才采信）。
         self._pose_ms = now_ms
         c = self.camera.project(np.zeros((1, 3), np.float32), rvec, tvec)[0]
         dxn = float((c[0] - self.w / 2.0) / (self.w / 2.0))
         dyn = float((c[1] - self.h / 2.0) / (self.h / 2.0))
-        # ★ 位姿历史（2026-10-02 用户定）：门口常是 coarse，光看当前帧判不出"在门口且对准" ⇒
-        #   留一小段最近**采信**的位姿，门口兜底按它的中位数判断（限 loiter.pose_hist_ms）。
         hist = getattr(self, "_pose_hist", None)
         if hist is None:
             hist = self._pose_hist = []
         hist.append((now_ms, z, dxn, dyn))
         del hist[:-8]
-        # 朝向误差（只有位姿档能测）：门法向 n=R·[0,0,1] → 机身相对门的航向/俯仰角。
-        # dxn 是**方位**（门在画面里偏多少）→ 修它用平移；航向是**姿态** → 修它才用转向。
-        #    不喂滤波器、不更新 _hdg_deg，只留 last-good + 时间戳。
         if mode == MODE_FULL:
             psi_deg, _pit_deg = gate_normal_angles_deg(rvec, tvec)
             self._hdg_f = psi_deg if self._hdg_f is None else \
@@ -77,13 +61,10 @@ class GateModes(object):
             align_deg = num(sub(G, "through"), "require_align_deg",
                             _D_THROUGH["require_align_deg"])
             self._hdg_ok_tick(align_deg)          # 航向"已 OK"锁存（连续 ok_frames 帧判据）
-        # 符号：图像 x 向右 = 机身向右 → sway 取正；图像 y 向下 → heave 取负。
-        # 这里 yaw 恒 0（居中只用 sway；姿态交给 ALIGN.HDG，见 `_lateral_out`）。
         sway, yaw = self._lateral_out(dxn, now_ms), 0.0
         heave = -_dof_clip(self._pid_heave_px.update(dyn, now_ms))
         aligned = abs(dxn) <= num(al, "px_x", _D_ALIGN["px_x"]) and \
             abs(dyn) <= num(al, "px_y", _D_ALIGN["px_y"])
-        # ★ 2026-10-05 用户定：冲刺的居中闸用**自己那套更宽的阈值**（through.center_x/center_y），
         #   不是 align 的 px_x/px_y（用户："最后进冲刺的居中闸不要像 align 那样严"）。
         _tc = merge(sub(G, "through"), _D_THROUGH)
         _ok_c = abs(dxn) <= num(_tc, "center_x", _D_THROUGH["center_x"]) and \
@@ -92,8 +73,6 @@ class GateModes(object):
         dx_m, dy_m = dxn, dyn            # 日志里 dx/dy **统一是像素归一化**
         cross = num(zc, "cross", _D_Z["cross"])
         if z <= cross:
-            # 穿门确认：单帧就近不冲（平面 PnP 偶发错解若给出 z≤cross，直接 THROUGH = 满速冲出），
-            # 连续 n 帧才判过门。
             self._cross_cnt += 1
             need = int(num(zc, "cross_confirm_frames", _D_Z["cross_confirm_frames"]))
             if self._cross_cnt >= max(1, need) and self._start_through():
@@ -113,7 +92,6 @@ class GateModes(object):
             self.substate = SUB_GOLDEN
             self._center_cnt = 0
         if self.phase == PH_ALIGN:
-            # ① 正航向（SUB_HDG）：**转入一旦开始就由 `_step` 顶部接管**（自包含动作，
             #    不看画面）；这里只处理"已经在 ALIGN、需要决定要不要起转"的正常路径。
             self.substate = SUB_GOLDEN
             if self._loiter_commit(dxn, dyn, float(det.w) / float(self.w), now_ms):
@@ -122,8 +100,6 @@ class GateModes(object):
                 self._center_cnt += 1
                 if self._center_cnt >= int(num(al, "confirm_frames", _D_ALIGN["confirm_frames"])):
                     if self._hdg_ready(mode, now_ms):
-                        # 居中达标 → **正航向**（PnP 目标角 → turn_deg 转一次 → 结束）
-                        # （_hdg_start 会清掉「跳过」标记，免得日志误读）
                         self._hdg_start(now_ms, "golden")
                         self._set_info("hdg", mode=mode, z=z, dx=dx_m, dy=dy_m,
                                        sway=0.0, heave=0.0, yaw=0.0, kpt=kpt,
@@ -138,8 +114,6 @@ class GateModes(object):
                            sway=sway, heave=heave, yaw=yaw, kpt=kpt,
                            hdg=self._hdg_deg, hdg_state=self._hdg.state)
         elif self.phase == PH_APPROACH:
-            # 进近两档（远→快 / 近→慢）；分档点 = z.slow_max。速度档与撞球共用（见 `_speed`）。
-            # 注：z.fast_max / z.align_max 当前**未参与运算**（见 cfg 注释）
             s_slow = self._speed("slow")
             if z > num(zc, "slow_max", _D_Z["slow_max"]):
                 surge = self._speed("fast")
@@ -153,10 +127,7 @@ class GateModes(object):
             self._set_info("center", mode=mode, z=z, dx=dx_m, dy=dy_m,
                            kpt=kpt)
     def _on_width(self, det, now_ms, ids):
-        """width 档：只有对向 2 角（上边或下边），信息只够"水平中点 + 框心竖直"，不解 PnP。
-        ① z > width.z_max（还远）且对准 → 慢 creep 靠近（换取角点/整门）；
-        出口仍然只有 `_tick_lost`（近距丢失）与 `_loiter_commit`（门口超时）两条。
-        z 由 fx·W/Δu 粗估，只用来判"该不该靠近"，不参与闭环。"""
+        """width 档：只有对向 2 角（上边或下边），信息只够"水平中点 + 框心竖直"，不解 PnP。"""
         if self._tick_hdg_degraded(now_ms):
             return
         if self._down_sees_red_bar():
@@ -185,7 +156,6 @@ class GateModes(object):
         # 对中判据（归一化像素偏差）：**全档位统一**（位姿档也用这一套，见 _on_pose）
         aligned = abs(dxn) <= num(al, "px_x", _D_ALIGN["px_x"]) and \
             abs(dyn) <= num(al, "px_y", _D_ALIGN["px_y"])
-        # ★ 2026-10-05 用户定：冲刺的居中闸用**自己那套更宽的阈值**（through.center_x/center_y），
         #   不是 align 的 px_x/px_y（用户："最后进冲刺的居中闸不要像 align 那样严"）。
         _tc = merge(sub(G, "through"), _D_THROUGH)
         _ok_c = abs(dxn) <= num(_tc, "center_x", _D_THROUGH["center_x"]) and \
@@ -217,18 +187,11 @@ class GateModes(object):
                            z=z, dx=dxn, dy=dyn, sway=sway, heave=heave,
                            surge=surge, yaw=yaw)
             return
-        # APPROACH / 其它：**本档到这里只做原地对中** —— 只给 sway/heave，`surge` 未传 ⇒ 0。
         # ⚠️ 上面的 creep 与 `_loiter_commit` 两个出口都在 `if self.phase == PH_ALIGN:`
-        #    块内，**对本相位不生效**（旧注释写的"同样生效"与代码不符，2026-10-01 更正）。
-        #    即 width 档把相位升到 APPROACH 后不再前进，直到整门丢失(`_tick_lost`)或全局超时。
-        #    另注意 `align.confirm_frames`(现 3) 决定它只 creep 几帧就升相位。
         self._set_info("center", mode=MODE_WIDTH, z=z, dx=dxn, dy=dyn,
                        sway=sway, heave=heave, yaw=yaw)
     def _on_coarse(self, det, now_ms):
-        """coarse 档：角点不足，只有整框可信。**只有未对准才后退**
-        ① 对准 → 慢 creep 靠近（争取露出角点）；
-        ② 未对准：远距只对中；中距 HOLD 超限 → REACQUIRE；很近(框装不下) → REACQUIRE。
-        出口同样只有 `_loiter_commit` 与 `_tick_lost` 两条。"""
+        """coarse 档：角点不足，只有整框可信。**只有未对准才后退**"""
         if self._tick_hdg_degraded(now_ms):
             return
         if self._down_sees_red_bar():
@@ -241,8 +204,6 @@ class GateModes(object):
         H = merge(sub(G, "hold"), _D_HOLD)
         sg = merge(sub(G, "surge"), _D_SURGE)
         self.mode = MODE_COARSE
-        # coarse 档**没有任何测距**：`_z_last` 会一直是上次 width/位姿留下的陈旧值
-        # 只失效**判据**，不动 `_z_last` 本身（日志仍要能看到它实际是多少）。
         ratio = float(det.w) / float(self.w)
         # 已在 REACQUIRE：闭环后退（退到框够小即停）或超时回 search
         if self.phase == PH_ALIGN and self.substate == SUB_REACQUIRE:
@@ -304,10 +265,7 @@ class GateModes(object):
         else:                                        # 近距装不下且没对准 → 后退重取
             self._enter_reacquire(now_ms, ratio)
     def _enter_reacquire(self, now_ms, ratio=None):
-        """进入后退重取；同一段里连续超 max_times 次就**放弃后退，改原地保持**。
-
-        倒影持续干扰时"退-进-退"会来回震荡；退了几次仍拿不到可用角点，说明再退也没用。
-        """
+        """进入后退重取；同一段里连续超 max_times 次就**放弃后退，改原地保持**。"""
         G = self._G
         R = merge(sub(G, "reacquire"), _D_REACQ)
         # 距上次后退够久 → 计数重新开始（否则一次倒影干扰会把后退永久锁死）
@@ -363,15 +321,7 @@ class GateModes(object):
         self._set_info("reacquire", substate=SUB_REACQUIRE, surge=surge,
                        kpt=self._dbg_kpt)
     def _relock_guard(self, z):
-        """**z 跳变保护**（2026-10-02 用户定）：命中 ⇒ 这一帧的位姿**不采纳**，当作"门丢了"处理
-        （不更新基准、原地 hold），而不是把坐标轴上的变化当成"门跑到那儿去了"。
-
-        三条判据（只挡"向上/更远"；向下=更快接近，正常放行）：
-        1. 与**当前在追的 z**（`_z_last`）比，向上跳 ≥ `z.relock_z_jump_m`(0.5 m) ⇒ 不是当前门；
-        2. 与**丢门前的参照**（`_relock_z_ref`）比，向上跳 ≥ 0.5 m ⇒ 不是那扇门；
-        3. 丢门重锁时 z 超过 `z.relock_away_m`(1.8 m) ⇒ **1.8m 外 = 下一个门**（当前门丢了/测不到距，
-           不能被远处能测距的门骗过去）。这条只对"有丢门参照"生效，**首见不拦**（否则第一扇门锁死）。
-        """
+        """**z 跳变保护**（2026-10-02 用户定）：命中 ⇒ 这一帧的位姿**不采纳**，当作"门丢了"处理"""
         jump = num(sub(self._G, "z"), "relock_z_jump_m", _D_Z["relock_z_jump_m"])
         away = num(sub(self._G, "z"), "relock_away_m", _D_Z["relock_away_m"])
         dist_max = num(sub(self._G, "z"), "dist_max_m", _D_Z["dist_max_m"])
@@ -379,9 +329,6 @@ class GateModes(object):
         ref = getattr(self, "_relock_z_ref", None)
         zf = float(z)
         why = None
-        # ★ 2026-10-04 用户定：**2.5m 开外完全不相信**。无条件第一条 —— 不看有无丢门参照、
-        #   不看跳没跳，只要 z 超过 dist_max_m 就当这帧位姿不可信（远处 PnP 的 z 与 yaw 都不可信；
-        #   宁可"当成门丢了"原地 hold，也不让远处能测距的门骗过当前门）。
         if dist_max > 0 and zf > dist_max:
             why = "z=%.2f m > %.2f m ⇒ 2.5m 开外**完全不相信**（无条件）" % (zf, dist_max)
         # 只挡"向上/更远"；向下跳（更快接近）是正常的，不挡。三条：
@@ -390,8 +337,6 @@ class GateModes(object):
         elif jump > 0 and ref is not None and (zf - float(ref)) >= jump:
             why = "z=%.2f 比丢门前的 %.2f m 远 ≥%.2f m ⇒ 不是那扇门" % (zf, float(ref), jump)
         elif away > 0 and ref is not None and zf > away:
-            # ★ 2026-10-02 用户定：丢门重锁时 **1.8m 外 = 下一个门**。当前门丢了/测不到距，
-            #   不能被远处能测距的门骗过去误当当前门。只对"有丢门参照(ref)"生效，首见不拦。
             why = "z=%.2f > %.2f m（丢门重锁）⇒ 判为下一个门" % (zf, away)
         if why:
             if not getattr(self, "_relock_logged", False):
@@ -404,13 +349,7 @@ class GateModes(object):
         return False
 
     def _relock_guard_ratio(self):
-        """**无位姿时的重锁保护（纯框占比）**：与 postsway 早期"占比退路"同思路。
-
-        场景：丢门后先认出的是**后面那一个门**，而这一帧没有位姿（coarse/width 都用不上）
-        ⇒ `_relock_guard()` 摸不到 z。这里用同一换算关系反推
-        `z ≈ frame_w_m·fx/(ratio·frame_w_px)`（`ratio = det.w/self.w`，与 width 测距同域），
-        再套同一个 `z.relock_z_jump_m` 阈值。取不到 fx/占比 ⇒ 返回 False（不拦，行为同现在）。
-        """
+        """**无位姿时的重锁保护（纯框占比）**：与 postsway 早期"占比退路"同思路。"""
         ref = getattr(self, "_relock_ratio_ref", None)
         ratio = float(getattr(self, "_dbg_ratio", 0.0) or 0.0)
         far = num(sub(self._G, "z"), "relock_far_ratio", _D_Z["relock_far_ratio"]) or 0.0
