@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base.cfg.settings as S
+from common.motion.search_scan import telemetry_yaw
 from common.cfg.cfgnode import flag, merge, num, sub
 from gate.motion.params import (PH_ALIGN, PH_APPROACH, PH_THROUGH, PH_CREEP_THROUGH, SUB_REACQUIRE,
                                 _D_ALIGN, _D_LOITER, _D_Z, _D_SURGE, _D_TASK, _D_THROUGH,
@@ -30,6 +31,17 @@ class GateExits(object):
         """
         need = num(sub(self._G, "through"), "require_align_deg",
                    _D_THROUGH["require_align_deg"])
+        # ★ 2026-10-05 用户定：**主出口重新加回居中闸门** —— 必须"居中成功"**连续 center_frames 帧**
+        #   才许冲刺。⚠️ 阈值用**冲刺自己那套**（through.center_x/center_y = 0.20/0.25），
+        #   比 align(0.15/0.20) **松** —— 运动抖动下要求那么严会永远冲不出去。
+        #   兜底出口（bypass_hdg=True，门口超时那条救命路）**不受此限**。
+        if not bypass_hdg:
+            T0 = merge(sub(self._G, "through"), _D_THROUGH)
+            cneed = int(num(T0, "center_frames", _D_THROUGH["center_frames"]))
+            if cneed > 0 and int(getattr(self, "_center_ok_cnt", 0)) < cneed:
+                self.last_info["through_block"] = "off_center(连续居中 %d/%d 帧)" % (
+                    int(getattr(self, "_center_ok_cnt", 0)), cneed)
+                return False
         hdg_enabled = bool(getattr(self._hdg, "enabled", True))
         # HDG 关闭时无需航向确认；启用时必须由 hdg DONE 或有效 full 帧的
         # |psi|<=require_align_deg 设置本门锁存标志。
@@ -82,7 +94,7 @@ class GateExits(object):
             if self._pass_cnt >= int(num(G, "pass_target", _D_TASK["pass_target"])):
                 self._finish("pass")
             else:
-                self._start_search()
+                self._start_search(new_round=True)
                 self._set_info("hold")
             return
         self._set_info("through", surge=self._through_speed())
@@ -115,7 +127,7 @@ class GateExits(object):
             if self._pass_cnt >= int(num(G, "pass_target", _D_TASK["pass_target"])):
                 self._finish("pass")
             else:
-                self._start_search()
+                self._start_search(new_round=True)
                 self._set_info("hold")
             return
         self._set_info("creep_through", surge=num(sg, "creep", _D_SURGE["creep"]))
@@ -123,6 +135,16 @@ class GateExits(object):
         G = self._G
         zc = merge(sub(G, "z"), _D_Z)
         sg = merge(sub(G, "surge"), _D_SURGE)
+        # ★ 2026-10-04 用户定：**还没稳定锁上门** ⇒ 用公共慢扫**旋转搜索**
+        #   （左 span → 右 2span → 左 2span …；手动 DOF + 遥测 yaw 闭环、睁眼非阻塞、有防转圈预算）。
+        #   稳定锁上门之后就不再扫（交给视觉），与本任务 hdg 完全无关（hdg 仍走"下发目标角/下位机定角度"）。
+        # ⚠️ 有「转完反向平移」窗口时必须**让位**：那个状态是靠 `_set_info` 推进的（唯一派发口），
+        #   这里若早退去跑扫描，sway_back 永远走不完、窗口也关不掉（实测用例就是这么挂的）。
+        if (self._post_sway_until_ms is None) and not getattr(self, "_lock_stable", False):
+            self._lost_cnt += 1
+            yaw = self._scan.step(now_ms, telemetry_yaw(self.uart))
+            self._set_info("search", substate=self.substate, yaw=yaw)
+            return
         self._lost_cnt += 1
         self._z_guard = False             # 丢目标→解除 z 跳变基准
         if getattr(self, "_relock_z_ref", None) is None and self._z_last is not None:

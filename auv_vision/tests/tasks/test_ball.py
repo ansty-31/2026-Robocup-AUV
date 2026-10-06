@@ -89,12 +89,15 @@ def test_ball_growing_detection_hits(fake_uart):
 
 def test_ball_without_detections_times_out(fake_uart):
     """全程无目标：SEARCH 保持，跑满 comm.ball.timeout_ms 后 DONE(timeout)。"""
+    fake_uart.telemetry.yaw_deg = 0.0        # ★ 扫描是**闭环**的：要遥测才转（没有遥测就不乱转）
     task = BallTask(fake_uart, _BallHub(lambda n: None), W, H)
     frame = np.zeros((H, W, 3), np.uint8)
+    psi_seen = []
 
     status = S.STATUS_RUNNING
     for i in range(400):
         status = task.process(frame, 100 * i)
+        psi_seen.append(float(fake_uart.telemetry.yaw_deg))
         if status == S.STATUS_DONE:
             break
 
@@ -104,8 +107,21 @@ def test_ball_without_detections_times_out(fake_uart):
     assert 100 * i >= S.comm.ball.timeout_ms             # 确实跑满时限才结束
     assert fake_uart.neutral_calls >= 1
 
-    # 搜索期确实在"脉冲旋转 + 周期性前进探测"，不是原地不动
+    # 搜索期确实在"旋转扫描 + 周期性前进探测"，不是原地不动
     surges = [f[0] for f in fake_uart.frames]
     yaws = [f[3] for f in fake_uart.frames]
     assert S.comm.ball.search_advance_surge in surges
-    assert S.comm.motion.search_yaw in yaws
+    non_zero_yaw = [y for y in yaws if abs(y) > 1e-9]
+    assert non_zero_yaw, "扫描没发过舵（闭环量缺失？）"
+    # ★ 2026-10-04：扫描是**闭环慢扫**（common/motion/search_scan.py），不再是开环固定 search_yaw
+    assert max(abs(y) for y in non_zero_yaw) <= float(S.comm.motion.search_scan.pid.out_max) + 1e-9
+    # 且绝不能"整圈转"：**朝向全程夹在 ±span 内**（扫描是来回摆，不是累积转圈）
+    cfg = S.comm.motion.search_scan
+    span, tol = float(cfg.span_deg), float(cfg.tol_deg)
+    # 允许的绝对偏移 = span + tol + abs_slack（`Scan` 的绝对预算；见 search_scan 防转圈）
+    budget = span + tol + float(cfg.abs_slack_deg)
+    lo, hi = min(psi_seen), max(psi_seen)
+    assert abs(lo) <= budget and abs(hi) <= budget, \
+        "朝向越出绝对预算 ±%.0f°：%.0f°..%.0f° ⇒ 有走圈/转圈风险" % (budget, lo, hi)
+    assert hi - lo <= 2.0 * budget + 1e-6, \
+        "扫描幅度失控：朝向范围 %.0f°..%.0f°（宽 %.0f°）" % (lo, hi, hi - lo)

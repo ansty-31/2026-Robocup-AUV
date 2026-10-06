@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base.cfg.settings as S
 from common.motion.PID import PID
+from common.motion.search_scan import Scan, telemetry_yaw
 from common.cfg.cfgnode import motion_num, motion_pid
 
 PH_SEARCH = "SEARCH"
@@ -65,7 +66,9 @@ class BallTask(object):
         # SEARCH 计时（脉冲 + 周期性前进探测）
         self._search_start_ms = None     # 本轮"连续无目标"起点
         self._advance_until_ms = None    # 前进探测截止时刻
-        self._spin_start_ms = None       # 旋转脉冲起点
+        self._spin_start_ms = None       # （旧）旋转脉冲起点 —— 已由 Scan 接管
+        # ★ 搜索扫描（2026-10-04 用户定）：公共慢扫，手动 DOF + 遥测 yaw 闭环、非阻塞"睁眼看"
+        self._scan = Scan()
         # 丢目标后的 hold 窗口
         self._hold_until_ms = None
 
@@ -117,13 +120,13 @@ class BallTask(object):
         return fast, "approach_fast"
 
     def _search_pulse_yaw(self, now_ms):
-        """搜索旋转脉冲：转 search_spin_s → 停 search_pause_s（停的间隙检测更稳）。"""
-        if self._spin_start_ms is None:
-            self._spin_start_ms = now_ms
-        spin_ms = S.comm.ball.search_spin_s * 1000
-        pause_ms = S.comm.ball.search_pause_s * 1000
-        ph = (now_ms - self._spin_start_ms) % (spin_ms + pause_ms)
-        return S.comm.motion.search_yaw if ph <= spin_ms else 0.0
+        """搜索扫描（★ 2026-10-04 用户定）：改用公共**慢扫**。
+
+        `common/motion/search_scan.py`：左 span → 右 2span → 左 2span …（默认 span=60° ⇒ 扫 120° 视角），
+        **手动 DOF + 遥测 yaw 闭环**（PID 用当年 turn_pid 那套值），非阻塞、检测照跑（"睁眼看"）。
+        取代原来的开环时间脉冲（`search_spin_s`/`search_pause_s` 已不再使用）。
+        """
+        return self._scan.step(now_ms, telemetry_yaw(self.uart))
 
     def _search_advance(self, now_ms):
         """连续无目标 search_advance_after_s → 慢速前进 search_advance_dur_s 探测新区域。"""
@@ -136,7 +139,8 @@ class BallTask(object):
                 return "search_advance", S.comm.ball.search_advance_surge, 0.0
             self._advance_until_ms = None
             self._search_start_ms = now_ms
-            self._spin_start_ms = now_ms        # 前进完，旋转脉冲重新计
+            # 前进探测**不改朝向**，所以**不要** reset 扫描 —— 否则入场朝向被重取成当前朝向，
+            # 扫描就会"一步 span 地一路走"（实船实测走到 348° 的根因）。
         if now_ms - self._search_start_ms >= after_ms:
             self._advance_until_ms = now_ms + dur_ms
             self._search_start_ms = now_ms

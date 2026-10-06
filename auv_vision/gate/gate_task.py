@@ -37,7 +37,8 @@ from gate.percept.gate_postproc import (det_cfg,
                                               postproc_cfg,
                                               select_cfg,
                                               pick as postproc_pick)
-from gate.motion.params import PH_SEARCH, PH_ALIGN, PH_APPROACH, PH_THROUGH, SUB_HDG, SUB_GOLDEN, SUB_CREEP, SUB_HOLD, SUB_REACQUIRE, SUB_SWAY_BACK, _D_ALIGN, _D_LOITER, _D_Z, _D_SURGE, _D_COARSE, _D_WIDTH, _D_TASK, _D_KPT, _D_HOLD, _D_REACQ, _D_THROUGH, _D_SEARCH, _D_PNP, _D_GEOM, _D_LOCK
+from gate.motion.params import PH_SEARCH, PH_ALIGN, PH_APPROACH, PH_THROUGH, SUB_HDG, SUB_GOLDEN, SUB_CREEP, SUB_HOLD, SUB_REACQUIRE, SUB_SWAY_BACK, _D_ALIGN, _D_LOITER, _D_Z, _D_SURGE, _D_COARSE, _D_WIDTH, _D_TASK, _D_KPT, _D_HOLD, _D_REACQ, _D_THROUGH, _D_SEARCH, _D_PNP, _D_GEOM, _D_LOCK, _D_SELECT
+from common.motion.search_scan import Scan, telemetry_yaw
 from gate.motion.channels import GateChannels
 from gate.motion.exits import GateExits
 from gate.motion.hdg import GateHdg
@@ -143,6 +144,12 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         self._lock_miss = 0               # 锁定后连续没匹配上的帧数（≥lock.miss_frames 才解锁重选）
         self._lock_cnt = 0                # ★ 连续跟住同一扇的帧数（≥lock.stable_frames ⇒ 稳定后不再参与选门）
         self._lock_stable = False         # ★ 锁定是否已稳定（稳定后才不许别的门抢）
+        self._lock_k_ref = None           # ★ 锁定门的 k 参照（k=z×框占比）——"保护锁定"①用
+        self._lock_ratio_ref = None       # ★ 锁定门的**面积**参照（框占比）——"保护锁定"②用
+        self._lock_k_bad = 0
+        # ★ 旋转搜索（2026-10-04 用户定）：公共慢扫（左 span→右 2span→…），手动 DOF+遥测 yaw 闭环、
+        #   睁眼非阻塞、有防转圈预算。**只在还没稳定锁上门时**驱动；与 hdg 完全无关。
+        self._scan = Scan()
 
         self.last_info = {"phase": PH_ALIGN, "substate": "", "mode": "",
                           "action": "stop", "z": 0.0, "dx": 0.0, "dy": 0.0,
@@ -165,6 +172,7 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         self._z_guard = False             # 上一帧是否有可信位姿（z 跳变保护基准）
         self._lost_cnt = 0
         self._center_cnt = 0
+        self._center_ok_cnt = 0           # ★ 连续"居中成功"帧数（主出口居中闸用）
         self._hold_cnt = 0
         self._cross_cnt = 0              # 连续 z≤cross 帧数（穿门确认，防单帧错解）
         self._through_frames = 0
@@ -234,6 +242,7 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
             self._turn_blocking(now_ms)
         else:
             dets = self.hub.detect_list(self.name, frame)
+            self._dets_raw = dets        # 本帧原始检测（sway 退出判据的兜底用）
             fw = frame.shape[1] if frame is not None and hasattr(frame, "shape") else 0
             det = self._gate_lock(dets, fw)
             # ★ 2026-10-04 用户定：**锁定本轮的门之后，画面只打锁定那扇门的框**（别的门不画，
@@ -276,7 +285,27 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
             self._lock_miss = 0
             self._lock_cnt = 0
             self._lock_stable = False
+            self._lock_k_ref = self._k_of(self._locked_det) if self._locked_det is not None else None
+            self._lock_ratio_ref = (float(self._locked_det.w) / float(self.w)) \
+                if (self._locked_det is not None and self.w and getattr(self._locked_det, "w", 0)) else None
             return self._locked_det
+        # ★ 锁定保护前移：先按 k/面积 把所有"不是锁定那扇门"的候选排除掉（见 _lock_guard_reject）。
+        #   ⚠️ 只在**锁定已稳定**时启用：稳定之前参照还在建立（头几帧的框/姿态都还没定），
+        #   此时动筛会误杀正常门（实测：转完那一帧门被筛掉 ⇒ `_det_now=None` ⇒
+        #   转完反向平移的 sway 窗口永远收不掉）。稳定后的锁定才需要这层防"被别的门顶掉"。
+        #   ② 解锁重选也必须再过一次闸 —— 重选结果仍与参照不符 ⇒ 不采纳，继续 hold。
+        kept = ([d for d in gates if not self._lock_guard_reject(d)]
+                if self._lock_stable else list(gates))
+        if not kept:
+            self._lock_miss += 1
+            if self._lock_miss >= miss_max:
+                if not self._lock_guard_reject(self._pick_gate(dets) or self._locked_det):
+                    self._unlock()
+                else:
+                    self._lock_miss = 0        # 重选结果也被判不是同一扇 ⇒ 不放行，继续等
+                    return None
+            return None if self._lock_stable else None
+        gates = kept
         lx = float(self._locked_det.x) + float(self._locked_det.w) * 0.5
         ly = float(self._locked_det.y) + float(self._locked_det.h) * 0.5
         thr = float(num(Lc, "match_ratio", _D_LOCK["match_ratio"])) * float(frame_w or 0.0)
@@ -288,6 +317,23 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
             if best is None or dd < best_d:
                 best, best_d = d, dd
         matched = best if (best is not None and thr > 0 and best_d <= thr) else None
+        # ★ 2026-10-05 用户定：**k 一致性检验与跳变保护同性质 —— 都是"选完锁定后"的保护闸**，
+        #   所以放在这里、不在 _pick_gate 里。同一扇门 k = z×框占比 ≈ 常数；候选的 k 离
+        #   锁定参照太远 ⇒ 这个框**不是锁定那扇门**（哪怕框中心恰好靠得近）⇒ 判没匹配上。
+        if matched is not None:
+            kz = self._k_of(matched)
+            if self._lock_k_ref is None:
+                self._lock_k_ref = kz                     # 刚锁上：建立参照
+            elif kz is not None:
+                k_lo = float(num(sub(self._G, "select"), "k_lo_ratio", _D_SELECT["k_lo_ratio"]))
+                k_hi = float(num(sub(self._G, "select"), "k_hi_ratio", _D_SELECT["k_hi_ratio"]))
+                if not (k_lo * self._lock_k_ref <= kz <= k_hi * self._lock_k_ref):
+                    if S.DEBUG:
+                        print("[GATE] k 一致性不通过：本帧 k=%.3f vs 锁定参照 %.3f（允许 ×%.2f~%.2f）"
+                              "⇒ 不是锁定那扇门" % (kz, self._lock_k_ref, k_lo, k_hi))
+                    matched = None                        # 当没检测到，走丢帧计数
+                else:
+                    self._lock_k_ref = 0.7 * self._lock_k_ref + 0.3 * kz   # 缓慢跟踪
         if matched is None:
             self._lock_miss += 1
             if self._lock_miss >= miss_max:
@@ -300,14 +346,85 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
             self._lock_stable = True
         if self._lock_stable:
             self._locked_det = matched          # ★ 稳定 ⇒ 不参与选门
+            self._lock_note_accepted(matched)
             return matched
         pick = self._pick_gate(dets)
         if pick is not None and pick is not matched:
             self._locked_det = pick
             self._lock_cnt = 0
+            self._lock_note_accepted(pick)
             return pick
         self._locked_det = matched
+        self._lock_note_accepted(matched)
         return matched
+
+    def _lock_guard_reject(self, det):
+        """**锁定保护**（★ 2026-10-05 用户定：k 一致性检验与跳变保护**同一个位置**，
+        "能测出来就用"）。返回 True = 这个框**不是锁定那扇门**，直接排除。
+
+        判据（按可测性选，不是两条并列规则）：
+          · **k 能算**（有 z）⇒ 比 k（同一扇门 k = z×框占比 ≈ 常数）；
+          · **k 算不出**（coarse/width 没角点）⇒ 退回比**面积（框占比）**，占比小太多=更远那扇。
+        关键：它在**框中心匹配之前**就对所有候选生效 —— 换到远处那扇门时，新框中心离锁定门
+        很远（`best_d > match_ratio`），老写法会直接走"没匹配上"分支把 k 检验整段跳过；
+        前移之后"不是同一扇门"在入口就被挡掉。
+        """
+        if self._locked_det is None:
+            return False
+        ratio = (float(det.w) / float(self.w)) if (self.w and getattr(det, "w", 0)) else 0.0
+        if ratio <= 1e-6:
+            return False
+        # ★★ **双重保护**（2026-10-05 用户定）：下面两条**各自独立生效**，任一不符即拦。
+        #   不是"二选一"：k 测不出时只是**这一层**本帧失效，面积那层照样管。
+        k_lo = float(num(sub(self._G, "select"), "k_lo_ratio", _D_SELECT["k_lo_ratio"]))
+        k_hi = float(num(sub(self._G, "select"), "k_hi_ratio", _D_SELECT["k_hi_ratio"]))
+        # ---- 保护①：k 一致性（k = z×框占比；能测才判，测不出本层跳过）----
+        kz = self._k_of(det)
+        k_ok = True
+        if kz is not None and self._lock_k_ref:
+            if not (k_lo * self._lock_k_ref <= kz <= k_hi * self._lock_k_ref):
+                if S.DEBUG:
+                    print("[GATE] 锁定保护①(k)：本帧 k=%.3f vs 参照 %.3f（允许 ×%.2f~%.2f）⇒ 不是锁定那扇门"
+                          % (kz, self._lock_k_ref, k_lo, k_hi))
+                return True
+        # ---- 保护②：面积（框占比）—— **独立于①**，不依赖 k 是否可测 ----
+        # ★ 参照 = **锁定那扇门自己的占比**（2026-10-05 用户定：与①k 同源同寿命）。
+        #   不再用"丢门前占比"(_relock_ratio_ref) —— 那个会跨场景残留，把正常门误杀。
+        ref = getattr(self, "_lock_ratio_ref", None)
+        far = num(sub(self._G, "z"), "relock_far_ratio", _D_Z["relock_far_ratio"])
+        if ref is not None and far > 0 and ratio < float(far) * float(ref):
+            if S.DEBUG:
+                print("[GATE] 锁定保护②(面积)：本帧占比 %.3f < %.2f×参照 %.3f ⇒ 是更远那扇门，拒收"
+                      % (ratio, float(far), float(ref)))
+            return True
+        # ⚠️ 本函数**必须是纯函数**（只判、不改参照）：它在"候选筛选"里对每个候选都调，
+        #   若顺手更新参照，先处理到"更大的那扇"就会把参照顶大，再看锁定门反而成了"占比太小"
+        #   ⇒ 把正常门误杀（实测踩过）。参照只在**最终采纳的那一扇**上更新，见 _lock_note_accepted()。
+        return False
+
+    def _lock_note_accepted(self, det):
+        """只对**最终采纳（=锁定）的那一扇**更新两者参照（k 用 EMA，面积取见过的最大）。"""
+        if det is None:
+            return
+        kz = self._k_of(det)
+        if kz is not None:
+            self._lock_k_ref = (kz if self._lock_k_ref is None
+                                else 0.7 * self._lock_k_ref + 0.3 * kz)
+        ratio = (float(det.w) / float(self.w)) if (self.w and getattr(det, "w", 0)) else None
+        if ratio is not None:
+            self._lock_ratio_ref = (ratio if self._lock_ratio_ref is None
+                                    else max(float(self._lock_ratio_ref), ratio))
+
+    def _k_of(self, det):
+        """这扇门的 k = z × 框占比。拿不到 z（没角点/coarse）或占比 ⇒ None ="本帧这项检验用不了"。"""
+        try:
+            ratio = (float(det.w) / float(self.w)) if (self.w and getattr(det, "w", 0)) else 0.0
+            if ratio <= 1e-6:
+                return None
+            z = self._z_est(det, num(sub(self._V, "keypoint"), "conf_thr", _D_KPT["conf_thr"]))
+            return None if z is None else float(z) * ratio
+        except Exception:
+            return None
 
     def _unlock(self):
         """解锁：允许下一帧重新 near 选门。"""
@@ -315,6 +432,9 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         self._lock_miss = 0
         self._lock_cnt = 0
         self._lock_stable = False
+        self._lock_k_ref = None
+        self._lock_ratio_ref = None
+        self._lock_k_bad = 0
 
 
     def _step(self, det, now_ms):
@@ -334,12 +454,19 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         if det is None:
             self._tick_lost(now_ms)
             return
-        # 丢门后重锁的**占比兜底**：本帧有框但测不到 z ⇒ 用占比反推 z 判是不是同一个门；
-        # 命中（= 另一个门）就原地 hold，不朝它靠近。
+        # ★ 2026-10-05 用户定：**选门优先 z，锁门用面积**。面积参照必须**持续跟踪** ——
+        #   不能只在"完全丢门"（det 全空）时才记：实船的门是"被判成另一扇"而不是"丢"，
+        #   `_tick_lost` 从没跑过 ⇒ 参照一直 None ⇒ 占比 0.65→0.27 的暴跌没人管，
+        #   z 又因为换门后再不采纳位姿而冻结 ⇒ 两条保护全哑。这里用"上一帧被采纳的占比"顶上。
+        if getattr(self, "_relock_ratio_ref", None) is None and \
+                getattr(self, "_ratio_last", None) is not None:
+            self._relock_ratio_ref = float(self._ratio_last)
+        # 命中（= 另一个/更远的门）就原地 hold，不朝它靠近。
         if self._relock_guard_ratio():
             self._set_info("hold", z=self._z_last)
             return
         self._lost_cnt = 0
+        self._ratio_last = float(det.w) / float(self.w)   # ★ 本帧通过保护 ⇒ 记"最近被采纳的占比"
         V = self._V
         conf_thr = num(sub(V, "keypoint"), "conf_thr", _D_KPT["conf_thr"])
         # 诊断量：本帧框占比 + 有效角点数（进叠加与 REACQUIRE 日志）

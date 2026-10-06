@@ -12,7 +12,9 @@ camera:
     width: 1280
     height: 720
     fps: 30
-    calibration: /home/sunrise/AUV/cfg/front_camera.yaml   # 去畸变标定 yaml（null=跳过）
+    # ⚠️ 2026-10-06：原值 /home/sunrise/AUV/cfg/front_camera.yaml 指向的旧树已归档删除；
+    #    改为相对名，PC 侧 prepare_frames.py 会回退到 configs/front_camera.yaml。
+    calibration: front_camera.yaml   # 去畸变标定 yaml（null=跳过）
   down:                  # 下视(IMX415 MIPI)：保留——录素材/未来任务用；返回出发区已改记忆返回，策略不再用下视
     type: sim            # sim | mipi
     device: /dev/video1
@@ -50,7 +52,9 @@ model:
                            # 注意：.hbm 是车载 J5/J6/S100(Nash) 格式，X5(Bayes-e) 无法加载！
   # ===== 双权重（ball 与 gate 分离）=====
   # 权重① ball：沿用单模型多类别 .bin（model.path 下）
-  path: /home/sunrise/AUV/models/auv_multi.bin
+  # ⚠️ 2026-10-06 悬空：旧树已删；且在用副本 models/ 里没有 auv_multi.bin（只有 yolo11n_detect_* 与 gate_kpt_stage1_*）。
+  #    此行属旧树残留，不要照抄成训练/量化参数。见 cleanup_record/BOARD_Adomain_retire_20261006.md §C
+  path: models/yolo11n_detect_bayese_640x640_nv12.bin
   strict_x5_bin: true      # true: 拒绝 .hbm 后缀并提示正确编译链路
   input_size: 640          # 模型方形输入
   input_name: images         # hbm_runtime 输入名（板端报错时填模型实际名）

@@ -478,9 +478,10 @@ def test_align_near_lost_falls_back_to_search(monkeypatch):
     assert PH_THROUGH not in phases, \
         "框不够大又真丢门：不该直冲，实际=%s" % phases[-8:]
     assert PH_SEARCH not in phases, \
-        "SEARCH 已删除：真丢门应留在 ALIGN，不回 SEARCH，实际=%s" % phases[-8:]
-    assert hist[-1]["action"] in ("hold", "reacquire"), \
-        "最后一帧应原地保持/后退重取，实际=%s" % hist[-1]["action"]
+        "相位机不回 SEARCH（仍是 ALIGN；旋转搜索由 _scan 在 ALIGN 内驱动 yaw），实际=%s" % phases[-8:]
+    # ★ 2026-10-04 用户定：还没稳定锁上门 ⇒ 用公共慢扫**旋转搜索**（不是干等）
+    assert hist[-1]["action"] == "search", \
+        "最后一帧应是旋转搜索（search），实际=%s" % hist[-1]["action"]
     assert task.last_info["pass"] == 0, \
         "不该计到过门，实际 pass=%s" % task.last_info["pass"]
 
@@ -1360,13 +1361,11 @@ def test_z_jump_protection(monkeypatch):
     import base.cfg.settings as S
     assert float(S.comm.gate.z.relock_z_jump_m) == 0.5
     assert float(S.comm.gate.z.relock_away_m) == 1.8
+    # ★ 2026-10-05 用户定：**加回来** —— 2.5m 开外**完全不相信**（无条件，首见也拦）
     assert float(S.comm.gate.z.dist_max_m) == 2.5
-    # ★ 2.5m 开外**完全不相信**：无条件（无参照也拦、比参照近也拦）
     task = _task(lambda: []); assert task._relock_guard(3.4) is True
     task = _task(lambda: []); assert task._relock_guard(2.6) is True
-    task = _task(lambda: []); task._z_last = 1.0; assert task._relock_guard(2.8) is True
-    task = _task(lambda: []); assert task._relock_guard(2.5) is False  # 恰在 dist_max 上放行（> 才拦）
-    # 首见不拦（无参照，且 2.5m 以内）
+    # 首见不拦（无参照）
     task = _task(lambda: []); assert task._relock_guard(2.0) is False
     # 向上跳（在追的 z）
     task = _task(lambda: []); task._z_last = 1.0; assert task._relock_guard(1.6) is True
@@ -1505,24 +1504,25 @@ def test_hdg_ok_latch_requires_sustained_stability(monkeypatch):
     assert task2._hdg_ok is False, "清零后单帧达标不该锁存"
 
 
-def test_pick_gate_uses_k_consistency_to_reject_bogus_small_z(monkeypatch):
-    """★ 2026-10-04 用户定：**用 k 做一致性检验**（k = z × 框占比）。
+def test_gate_lock_k_consistency_rejects_a_different_gate(monkeypatch):
+    """★ 2026-10-05 用户定：**k 一致性检验 = 保护锁定**（与跳变保护同性质），位置在 `_gate_lock`。
 
-    故障现场：远处门 PnP 的 z 崩成比实际小、甚至小于更近那扇 ⇒ 按纯 z 选会选错门。
-    实测 k：full 0.599(k/k_true=1.07)、p3p 0.457(0.82) 都可信；崩掉那次 k=0.23(0.41)。
-    做法：k/k_true < k_lo_ratio ⇒ 这个 z 崩了 ⇒ 改用框占比反推 z（k_true/占比）。
+    同一扇门 k = z×框占比 ≈ 常数（实测 full 0.599 / p3p 0.457，理论 k_true=0.560）。
+    候选的 k 离锁定参照太远 ⇒ 那个框**不是锁定那扇门**（哪怕框中心恰好靠得近）⇒ 不匹配。
     """
     task = _task(lambda: [])
-    near = _det(1.6)[0]                  # 近门 → 框大
-    far = _det(4.0)[0]                   # 远门 → 框小
-    monkeypatch.setattr(task, "_z_est",
-                        lambda det, conf_thr: 1.0 if det is far else 1.6)
-    assert task._pick_gate([near, far]) is near, \
-        "远处门报了崩小的 z 仍被选中 → k 一致性检验失效（选错门）"
-    # 反向确认：关掉 k 检验（k_lo_ratio=0）就退回纯 z 选，会选到远门
-    monkeypatch.setitem(S.comm.gate, "select",
-                        S.Y(dict(S.comm.gate.select, k_lo_ratio=0.0)))
-    assert task._pick_gate([near, far]) is far, "k_lo_ratio=0 时应按纯 z 选（选到远门）"
+    frame_w = CAM.width
+    a = _det(1.5, px=(CAM.width * 0.5, CAM.height / 2.0))[0]        # 锁定门
+    b = _det(1.5, px=(CAM.width * 0.5, CAM.height / 2.0))[0]        # 同位干扰门
+    # a 的 k 正常；b 让 _z_est 报一个崩小的 z ⇒ k 明显偏小 ⇒ 必须被判"不是同一扇"
+    monkeypatch.setattr(task, "_z_est", lambda d, c: 1.5 if d is a else 0.45)
+    task._gate_lock([a], frame_w)                     # 锁上 a，建立 k 参照
+    assert task._lock_k_ref is not None, "刚锁上就该建立 k 参照"
+    k_lo = float(S.comm.gate.select.k_lo_ratio)
+    assert task._k_of(b) < k_lo * task._lock_k_ref, "构造的干扰门 k 应该明显偏小（否则用例没意义）"
+    task._gate_lock([b], frame_w)                     # 只给 b
+    assert task._locked_det is a, \
+        "k 明显不一致的框仍被当成锁定门 ⇒ k 一致性保护失效（会把别的门当成锁定门）"
 
 
 def test_gate_lock_only_becomes_exclusive_after_stable(monkeypatch):
@@ -1544,3 +1544,136 @@ def test_gate_lock_only_becomes_exclusive_after_stable(monkeypatch):
     # 稳定后：即便只给"别的门"，也不换（会按没检测到计时，但阈值内仍保留锁定）
     task._gate_lock([b], frame_w)
     assert task._locked_det is a, "稳定后不该被别的门顶掉"
+
+
+def test_gate_rotates_to_search_when_no_gate_and_not_locked_stable():
+    """★ 2026-10-04 用户定：门任务**新增旋转搜索**（替换掉原来被删的左右 sway 扫）。
+
+    无门可锁（det 全空）且**还没稳定锁定** ⇒ 用公共慢扫旋转找门：
+    · yaw 由 `_scan` 给（闭环慢扫），不是 0（不是干等）；
+    · **绝不转圈**：净转动量夹在 ±span 预算内；
+    · **不碰 hdg**：hdg 仍在"门出现且 ψ 需要修"时走它自己那条路（另有用例守）。
+    """
+    task = _task(lambda: [])
+    task.uart.telemetry.yaw_deg = 0.0          # 闭环要遥测才动
+    frame = np.zeros((CAM.height, CAM.width, 3), np.uint8)
+    for i in range(60):
+        task.process(frame, 1000 + 100 * i)
+    yaws = [f[3] for f in task.uart.frames]
+    assert any(abs(y) > 1e-9 for y in yaws), "无门时该旋转搜索，实际一直不动（等于没实现）"
+    assert task.last_info["action"] == "search", \
+        "无门且未稳定锁定 ⇒ 动作应是 search，实际=%s" % task.last_info["action"]
+    span = float(S.comm.motion.search_scan.span_deg)
+    net = abs(task.uart.telemetry.yaw_deg)
+    assert net <= 2.0 * span + 1e-6, \
+        "净转了 %.1f°（超过 ±span=%.0f°）⇒ 有转圈/失控风险" % (net, span)
+
+
+def test_distance_refs_survive_gate_loss_but_clear_on_new_round():
+    """★ 2026-10-05 用户定：判断远近的基准**只在开启新一轮时清除**，丢门时必须保留。
+
+    实船坑：`_tick_lost` 开头刚记下丢门前基准（`_relock_z_ref=0.83`/`_relock_ratio_ref=0.83`），
+    尾部"远处丢门 → `_start_search()`"又全部清零 ⇒ 3.27m 的远门进来时三条判据都"没有参照"，
+    被"首见不拦"放行；框占比 0.83→0.228 的暴跌也没人管。
+    """
+    task = _task(lambda: [])
+    task._z_last = 0.83
+    task._relock_z_ref = 0.83
+    task._relock_ratio_ref = 0.83
+    task._pose_hist = [(1000, 0.83, 0.0, 0.0)]
+    task._start_search()                      # ← 丢门（默认 new_round=False）
+    assert task._z_last == 0.83, "丢门时不该清 _z_last（清了几何参照就没了）"
+    assert task._relock_z_ref == 0.83, "丢门时不该清 _relock_z_ref"
+    assert task._relock_ratio_ref == 0.83, "丢门时不该清 _relock_ratio_ref"
+    assert task._pose_hist, "丢门时不该清位姿历史（门口判据要用）"
+    task._start_search(new_round=True)        # ← 过完门 = 新一轮
+    assert task._z_last is None and task._relock_z_ref is None \
+        and task._relock_ratio_ref is None and task._pose_hist == [], \
+        "开启新一轮时才该把这些基准清干净"
+
+
+def test_area_ref_is_tracked_continuously(monkeypatch):
+    """★ 2026-10-05 用户定：**选门优先 z、锁门用面积**；面积参照必须**持续跟踪**。
+
+    实船坑：门是"被判成另一扇"而不是"完全丢"（det 一直有），`_tick_lost` 从没跑过
+    ⇒ `_relock_ratio_ref` 一直 None ⇒ 占比 0.65→0.27 的暴跌没人管。
+    """
+    task = _task(lambda: _det(1.5))          # 一直有门（不丢）
+    frame = np.zeros((CAM.height, CAM.width, 3), np.uint8)
+    for i in range(4):
+        task.process(frame, 1000 + 100 * i)
+    assert getattr(task, "_ratio_last", None) is not None, \
+        "被采纳的帧必须记下「最近被采纳的占比」（面积参照源）"
+    ref = task._ratio_last
+    # 模拟"换到另一扇门"：占比暴跌到 0.3× ⇒ 面积保护必须命中（= 判为另一个门）
+    task._relock_ratio_ref = ref
+    task._dbg_ratio = ref * 0.3
+    far = float(S.comm.gate.z.relock_far_ratio)
+    assert task._dbg_ratio < far * task._relock_ratio_ref, \
+        "占比摔到 0.3× 参考值时，面积保护该命中（relock_far_ratio=%.2f）" % far
+    assert task._relock_guard_ratio() is True, \
+        "占比暴跌（0.65→0.27 那种）没被面积保护拦住 ⇒ 会朝另一扇门开过去"
+
+
+def test_lock_guard_runs_before_center_matching(monkeypatch):
+    """★ 2026-10-05 用户定：锁定保护（k 一致性 + 面积）**前移到框中心匹配之前**，
+    且"能测出来就用"：k 能算就用 k，算不出才退回面积。
+
+    实船没启动的根因：老写法要等 `best_d <= match_ratio×画面宽` 才算 `matched`，
+    换到远处那扇门时中心差太远 ⇒ `matched=None` ⇒ **k 检验整段被跳过**，
+    直接走丢帧→解锁→重选，把远门选走。
+    """
+    task = _task(lambda: [])
+    frame_w = CAM.width
+    a = _det(1.5, px=(CAM.width * 0.45, CAM.height / 2.0))[0]     # 锁定门（近、框大）
+    b = _det(4.0, px=(CAM.width * 0.90, CAM.height / 2.0))[0]     # 远处那扇（框小、在另一侧）
+    # ★ 关键：b 报一个**崩小的 z**（实船那个坑）—— 框很小(0.14)却自称 1.0m ⇒
+    #   k = 1.0×0.14 = 0.14，而锁定门 k ≈ 1.5×0.373 = 0.56 ⇒ 比 0.25 < k_lo(0.75) ⇒ 必须拦
+    monkeypatch.setattr(task, "_z_est", lambda d, c: 1.5 if d is a else 1.0)
+    task._gate_lock([a], frame_w)                                  # 锁 a
+    assert task._lock_k_ref is not None, "锁上后该建立 k 参照"
+    # ① k 能测 ⇒ 用 k：b 的 k 明显偏小，必须在匹配前被排除
+    assert task._k_of(b) is not None, "b 应能算出 k（本用例前提）"
+    assert task._lock_guard_reject(b) is True, \
+        "更远那扇（k 明显偏小）必须在框中心匹配前就被排除 —— 否则 k 检验又会被跳过"
+    assert task._lock_guard_reject(a) is False, "锁定门自己不该被排除"
+    # ② k 测不出 ⇒ 退回面积
+    task._locked_det = a
+    task._lock_k_ref = None
+    task._relock_ratio_ref = 0.55                                  # 参照占比
+    small = _det(3.5, px=(CAM.width * 0.45, CAM.height / 2.0))[0]  # 同位但更小（更远）
+    monkeypatch.setattr(task, "_k_of", lambda d: None)             # 模拟 coarse：测不出 k
+    assert task._lock_guard_reject(small) is True, \
+        "k 测不出时必须退回比面积，占比小太多=更远那扇门"
+
+
+def test_through_main_exit_requires_sustained_centering(monkeypatch):
+    """★ 2026-10-05 用户定：**主出口（够近那条）重新加回居中闸门** —— 必须"居中成功"
+    **连续 through.center_frames 帧**才许冲刺。实船报的"没居中就冲刺"。
+
+    两条阈值是分开的（用户定）：
+      · align.px_x/px_y = 0.15/0.20 —— 管"对中动作精细度"
+      · through.center_x/center_y = 0.20/0.25 —— 管"够不够正才敢冲"，**更松**（抗运动抖动）
+    """
+    task = _task(lambda: [])
+    task._hdg_ok = True                      # 航向闸先放行，单测居中闸
+    need = int(S.comm.gate.through.center_frames)
+    assert need >= 2
+    # 居中不足 ⇒ 不许冲
+    task._center_ok_cnt = need - 1
+    assert task._start_through() is False, "居中不足（%d/%d 帧）竟然放行冲刺" % (need - 1, need)
+    assert "off_center" in str(task.last_info.get("through_block")), \
+        "该在 through_block 里写明是被居中闸拦的，实际=%s" % task.last_info.get("through_block")
+    # 连续达标 ⇒ 放行
+    task._center_ok_cnt = need
+    assert task._start_through() is True, "连续 %d 帧居中了还不放行" % need
+    # ⚠️ 兜底出口（bypass_hdg=True）不受居中闸限制
+    t2 = _task(lambda: [])
+    t2._center_ok_cnt = 0
+    assert t2._start_through(bypass_hdg=True) is True, \
+        "兜底出口（门口超时那条救命路）不该被居中闸卡死"
+    # 阈值必须是"更松"的那套
+    cx, cy = float(S.comm.gate.through.center_x), float(S.comm.gate.through.center_y)
+    px, py = float(S.comm.gate.align.px_x), float(S.comm.gate.align.px_y)
+    assert cx >= px and cy >= py, \
+        "冲刺居中阈值(%.2f/%.2f)不该比 align(%.2f/%.2f) 更严" % (cx, cy, px, py)

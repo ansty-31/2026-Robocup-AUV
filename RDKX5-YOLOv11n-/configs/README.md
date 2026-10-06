@@ -1,25 +1,37 @@
 # configs/ 配置说明
 
-> ⚠️ **板端相关配置以板端实机为准**。本目录中的 `vision.yaml`、`front_camera.yaml` 都是
-> **板端工程的只读镜像**，唯一权威来源是 **RM 板子实机**（SSH `sunrise@192.168.137.10`
-> 上的 `/home/sunrise/AUV/`）。
+> ⚠️ **2026-10-06 更新（在读任何一条之前先看这段）**
+>
+> 1. **权威来源换成 `/home/sunrise/Desktop/AUV_New/`**（在用副本，`deploy_to_board.sh` 的目标）。
+>    以前本文写的 `/home/sunrise/AUV/` 是**旧树（09-17，A 域时代）**，已于 **2026-10-06 归档删除**
+>    （317 MB → `AUV_New/bak/legacy_Adomain_tree_20261006.tar.gz`，md5 `3a7cda63…`），
+>    连带影响与恢复方式见 [`../cleanup_record/BOARD_Adomain_retire_20261006.md`](../cleanup_record/BOARD_Adomain_retire_20261006.md)。
+> 2. **A 域已彻底退役**：在用副本的 A 分支已于 2026-10-01 移除，旧树被删后**板端已无任何能跑 A 域的地方**。
+>    规矩：识别链路只有 **D + wb**；**夹取小球只做 `resize 640×640` 送 BPU，不做任何图像处理**；
+>    不要再给 `vision.image` 加 `chain` 之类的域开关。
+> 3. ⚠️ **本目录的 `vision.yaml` 已确认是"混血/滞后"镜像**（部分字段来自旧树、部分来自 D 域），
+>    不要再当权威；它当前只被 `../scripts/1_prepare/prepare_frames.py` 读 `image.* / camera.* / model.input_size`。
+>    要权威值请按下面「与板端同步」重新拉。
+
 > **修改流程：先改板端 → 再从板子读取同步到本目录**，不要只改本地。
 >
 > 本仓库（`RDKX5-YOLOv11n-`）对板端**只读**：只读取板端信息来对齐本地预处理过程，
-> **不修改板端代码**。注意 `/home/ansty/RDKX5/auv_vision/auv_vision/` 是板端工程的
+> **不修改板端代码**（2026-10-06 那次旧树清理是用户明确要求的手工运维，记录见上）。
+> 注意 `/home/ansty/RDKX5/auv_vision/auv_vision/` 是板端工程的
 > **本地开发副本**，会与实机有意不一致（例如本地 `SIM_MODE=True` 跑虚拟、实机 `False`
 > 跑真机），**不能当作权威来源**。
 
 > **路径书写约定（2026-09-26 逐条核对磁盘后补）**：本文里作为「指向」用的独立路径都相对**本文件所在目录**
 > （`configs/`）书写 —— 本目录内的配置文件写 `vision.yaml`、`backup/front_camera_AUV1_water_fx782.yaml`；本目录之外的写
 > `../scripts/…`、`../data/…`、`../runs/…`。`bash` 代码块里的命令按仓库根执行，保持 `scripts/…` 形式。
-> 板端路径（`/home/sunrise/AUV/…`）与三方/板端源码路径会显式标注，它们不在本仓库里。
+> 板端路径（`/home/sunrise/Desktop/AUV_New/…`；旧树 `/home/sunrise/AUV/` 已于 2026-10-06 删除）
+> 与三方/板端源码路径会显式标注，它们不在本仓库里。
 
 | 本地文件 | 来源 | 用途 |
 |---|---|---|
-| `vision.yaml` | 板子实机 `/home/sunrise/AUV/cfg/vision.yaml`（只读镜像） | 图像链路 / 相机 / 模型 / 任务参数；PC 端 `../scripts/1_prepare/prepare_frames.py` 读取它，保证**训练图与板端推理同参数** |
-| `front_camera.yaml` | 板子实机 `/home/sunrise/AUV/cfg/front_camera.yaml`（只读镜像） | **前视相机标定（K / dist）＝ 水下 / 上机使用的那一份**，训练侧去畸变与板端推理**共用同一份**。2026-09-23 起内容为 AUV_5 良好水质重标结果（fx≈1207.6，RMS 0.546px），详见下节 |
-| `front_camera_air.yaml` | 板子实机 `/home/sunrise/AUV/cfg/front_camera_air.yaml`（只读镜像） | **岸上 / 空气有效内参**（fx≈1078，dist 全 0，由卷尺 + PnP 深度反推）。**不用于上机推理**，保留供 PnP 分析、折射因子与深度标尺解释 |
+| `vision.yaml` | 板子实机 `/home/sunrise/Desktop/AUV_New/cfg/vision.yaml`（只读镜像；⚠️ 现副本是旧树时代拉的，混血滞后） | 图像链路 / 相机 / 模型 / 任务参数；PC 端 `../scripts/1_prepare/prepare_frames.py` 读取它，保证**训练图与板端推理同参数** |
+| `front_camera.yaml` | 板子实机 `/home/sunrise/Desktop/AUV_New/cfg/front_camera.yaml`（只读镜像） | **前视相机标定（K / dist）＝ 水下 / 上机使用的那一份**，训练侧去畸变与板端推理**共用同一份**。2026-09-23 起内容为 AUV_5 良好水质重标结果（fx≈1207.6，RMS 0.546px），详见下节 |
+| `front_camera_air.yaml` | 板子实机 `/home/sunrise/Desktop/AUV_New/cfg/front_camera_air.yaml`（只读镜像） | **岸上 / 空气有效内参**（fx≈1078，dist 全 0，由卷尺 + PnP 深度反推）。**不用于上机推理**，保留供 PnP 分析、折射因子与深度标尺解释 |
 | `backup/front_camera_AUV1_water_fx782.yaml` | 归档 | 旧的水下标定（fx=782.5，来自 `../data/calib/AUV_1_board`）。**已不参与任何链路**，仅留档 |
 | `backup/front_camera_board_A_fx782_20260923.yaml` | 归档（2026-09-23 换版前另存） | **与上一份是同一套内参**：`camera_matrix` 与 `distortion_coefficients` 逐项数值相同（fx=782.54、dist[0:2]=[-0.4914, 0.3784]），只是多了 `FILE-HEAD RULE` 等注释（32 行 vs 18 行）。换到 AUV_5 新标定（fx≈1207.6）前留的存底，**不参与任何链路** |
 | `yolo11n_config.yaml` | 本仓库（PC 侧） | detect 模型 PTQ 量化配置（onnx 路径 / Softmax node_info / 输出前缀） |
@@ -31,8 +43,9 @@
 ## 与板端同步（只读）
 
 ```bash
-BOARD_SSH=sunrise@192.168.137.10                    # 板子实机（权威）
-B=/home/sunrise/AUV
+BOARD_SSH=sunrise@192.168.137.10                           # 板子实机
+B=/home/sunrise/Desktop/AUV_New                            # ★ 在用副本（权威）
+# 旧路径 /home/sunrise/AUV 已于 2026-10-06 归档删除，不要再指向它
 
 scp "$BOARD_SSH:$B/cfg/vision.yaml"       configs/vision.yaml
 scp "$BOARD_SSH:$B/cfg/front_camera.yaml" configs/front_camera.yaml

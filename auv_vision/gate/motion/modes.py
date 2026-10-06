@@ -83,6 +83,12 @@ class GateModes(object):
         heave = -_dof_clip(self._pid_heave_px.update(dyn, now_ms))
         aligned = abs(dxn) <= num(al, "px_x", _D_ALIGN["px_x"]) and \
             abs(dyn) <= num(al, "px_y", _D_ALIGN["px_y"])
+        # ★ 2026-10-05 用户定：冲刺的居中闸用**自己那套更宽的阈值**（through.center_x/center_y），
+        #   不是 align 的 px_x/px_y（用户："最后进冲刺的居中闸不要像 align 那样严"）。
+        _tc = merge(sub(G, "through"), _D_THROUGH)
+        _ok_c = abs(dxn) <= num(_tc, "center_x", _D_THROUGH["center_x"]) and \
+            abs(dyn) <= num(_tc, "center_y", _D_THROUGH["center_y"])
+        self._center_ok_cnt = (getattr(self, "_center_ok_cnt", 0) + 1) if _ok_c else 0
         dx_m, dy_m = dxn, dyn            # 日志里 dx/dy **统一是像素归一化**
         cross = num(zc, "cross", _D_Z["cross"])
         if z <= cross:
@@ -179,6 +185,12 @@ class GateModes(object):
         # 对中判据（归一化像素偏差）：**全档位统一**（位姿档也用这一套，见 _on_pose）
         aligned = abs(dxn) <= num(al, "px_x", _D_ALIGN["px_x"]) and \
             abs(dyn) <= num(al, "px_y", _D_ALIGN["px_y"])
+        # ★ 2026-10-05 用户定：冲刺的居中闸用**自己那套更宽的阈值**（through.center_x/center_y），
+        #   不是 align 的 px_x/px_y（用户："最后进冲刺的居中闸不要像 align 那样严"）。
+        _tc = merge(sub(G, "through"), _D_THROUGH)
+        _ok_c = abs(dxn) <= num(_tc, "center_x", _D_THROUGH["center_x"]) and \
+            abs(dyn) <= num(_tc, "center_y", _D_THROUGH["center_y"])
+        self._center_ok_cnt = (getattr(self, "_center_ok_cnt", 0) + 1) if _ok_c else 0
         if self.phase == PH_SEARCH:
             self.phase = PH_ALIGN
             self._center_cnt = 0

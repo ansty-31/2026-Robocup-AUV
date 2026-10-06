@@ -15,6 +15,18 @@ if ROOT not in sys.path:
 import pytest  # noqa: E402  (必须放在环境变量设置之后，语义上从属于本文件的装置)
 
 
+class _FakeTelemetry(object):
+    """假遥测。`yaw_deg=None` = **没有遥测**（与加这个属性之前的行为一致 ⇒ 不影响既有用例）。
+
+    要用闭环的用例显式置 `uart.telemetry.yaw_deg = 0.0`；此后 `send_dof` 会按
+    "固件约定：+yaw = 右转 ⇒ 回传 yaw 减小"（σ=-1）积分。
+    """
+
+    def __init__(self):
+        self.yaw_deg = None
+        self.rate_deg_s = 90.0
+
+
 class FakeUart(object):
     """记录下发的 DOF 帧，代替真串口（GateTask / BallTask 测试用）。"""
 
@@ -22,9 +34,13 @@ class FakeUart(object):
         self.frames = []          # 每帧一条 (surge, sway, heave, yaw)
         self.motions = []         # set_motion 名称
         self.neutral_calls = 0
+        self.telemetry = _FakeTelemetry()
 
     def send_dof(self, surge=0.0, sway=0.0, heave=0.0, yaw=0.0):
         self.frames.append((float(surge), float(sway), float(heave), float(yaw)))
+        if self.telemetry.yaw_deg is not None:
+            # +yaw = 右转 ⇒ 回传 yaw 减小（σ=-1）；dt 固定 0.1s（用例时基一律 100ms）
+            self.telemetry.yaw_deg -= float(yaw) * self.telemetry.rate_deg_s * 0.1
 
     def set_motion(self, name, force=False):
         self.motions.append(name)
