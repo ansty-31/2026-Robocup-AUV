@@ -8,23 +8,16 @@ from __future__ import annotations
 import math
 
 import base.cfg.settings as S
-from common.cfg.cfgnode import merge, num, pid_kw, sub
+from common.cfg.cfgnode import merge, num, pid_kw, sub, req, req_node, MissingCfg
 from common.motion.PID import PID
 from common.motion.turn_deg import yaw_sign
 
 # 兜底表（取值 = 当前 cfg/comm.yaml 的 motion.search_scan 段）
-_D_SCAN = dict(
-    span_deg=40.0,        # 单侧幅度；总扫幅 = 2×span_deg
-    pause_ms=400.0,       # 每段到位后停顿（"停的间隙检测更稳"）
-    tol_deg=6.0,          # 段到位容差（= PID 死区折算角，见下）
-    norm_deg=15.0,        # 误差归一化分母（err_norm = 剩余角 / norm_deg）
-    seg_timeout_ms=8000.0,  # 单段超时兜底（舵效不足时别卡死）
-    runaway_slack_deg=30.0,  # ★ 防转圈（段）：本段转过 2×span + 这个余量还没到位 ⇒ 判极性异常、停手
-    abs_slack_deg=15.0,      # ★ 防转圈（绝对）：psi 离**入场朝向**超过 span+tol+它 ⇒ 停手（比段预算更硬）
-    duty=1.0, duty_window_ms=200.0,
-    step_deg=0.0,
-    step_pause_ms=0.0,   # 每格到位后停顿（0=不停，连续爬）
-    pid=dict(kp=0.2, ki=0.0, kd=0.0, out_max=0.15, deadzone=0.4),
+_K_SCAN_PID = ("kp", "ki", "kd", "out_max", "deadzone")
+_K_SCAN = (
+    "span_deg", "pause_ms", "tol_deg", "norm_deg", "seg_timeout_ms",
+    "runaway_slack_deg", "abs_slack_deg", "duty", "duty_window_ms",
+    "step_deg", "step_pause_ms", "pid",
 )
 
 
@@ -50,26 +43,26 @@ class Scan(object):
         # ⚠️ `sub(node, key)` **只吃单个 key，不吃点号路径** —— 写成
         base = self._node if self._node is not None else \
             sub(sub(S.comm, "motion"), "search_scan")
-        return merge(base, _D_SCAN)
+        return base          # ★ 无兜底：下面一律 req()（缺键即报名字）
 
     # ------------------------------------------------------------------ 状态
     def reset(self, yaw_telemetry=None):
         """复位（换目标/重新搜索时调）。`yaw_telemetry` 给了就用它当入场朝向。"""
         c = self._cfg()
-        self.span = float(num(c, "span_deg", _D_SCAN["span_deg"]))
-        self.pause_ms = float(num(c, "pause_ms", _D_SCAN["pause_ms"]))
-        self.tol = float(num(c, "tol_deg", _D_SCAN["tol_deg"]))
-        self.norm = max(1e-6, float(num(c, "norm_deg", _D_SCAN["norm_deg"])))
-        self.seg_timeout_ms = float(num(c, "seg_timeout_ms", _D_SCAN["seg_timeout_ms"]))
-        self.slack = float(num(c, "runaway_slack_deg", _D_SCAN["runaway_slack_deg"]))
-        self.abs_slack = float(num(c, "abs_slack_deg", _D_SCAN["abs_slack_deg"]))
-        self.duty = max(0.0, min(1.0, float(num(c, "duty", _D_SCAN["duty"]))))
-        self.duty_window_ms = max(1.0, float(num(c, "duty_window_ms", _D_SCAN["duty_window_ms"])))
-        self.step_deg = max(0.0, float(num(c, "step_deg", _D_SCAN["step_deg"])))
-        self.step_pause_ms = max(0.0, float(num(c, "step_pause_ms", _D_SCAN["step_pause_ms"])))
+        self.span = float(req(c, "span_deg"))
+        self.pause_ms = float(req(c, "pause_ms"))
+        self.tol = float(req(c, "tol_deg"))
+        self.norm = max(1e-6, float(req(c, "norm_deg")))
+        self.seg_timeout_ms = float(req(c, "seg_timeout_ms"))
+        self.slack = float(req(c, "runaway_slack_deg"))
+        self.abs_slack = float(req(c, "abs_slack_deg"))
+        self.duty = max(0.0, min(1.0, float(req(c, "duty"))))
+        self.duty_window_ms = max(1.0, float(req(c, "duty_window_ms")))
+        self.step_deg = max(0.0, float(req(c, "step_deg")))
+        self.step_pause_ms = max(0.0, float(req(c, "step_pause_ms")))
         self._sub_idx = 0        # 本段已走到第几格（step_deg>0 时用）
         self._step_pause_until = None
-        self._pid = PID(**pid_kw(sub(c, "pid"), _D_SCAN["pid"]))
+        self._pid = PID(**pid_kw(req_node(c, "pid"), "comm.motion.search_scan.pid"))
         self.psi0 = None if yaw_telemetry is None else self.sigma * float(yaw_telemetry)
         self._leg = 0             # 已完成/正在走的段号（0 起）
         self._target = None       # 当前段目标 psi（相对入场朝向）

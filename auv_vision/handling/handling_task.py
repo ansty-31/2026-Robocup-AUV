@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import base.cfg.settings as S
 from common.cfg.cfgnode import flag, merge, pid_kw, sub
-from common.motion.search_scan import Scan, telemetry_yaw
-from common.motion.axis import AxisMove, EnsureDepth, TimedDof, _D_DIP, _D_RISE, action_cfg, axis_deg, grab_cfg, grab_node, level_relative_deg, pitch_up_deg
+from common.motion.search_sweep import Sweep
+from common.motion.depth_hold import DepthHold
+from common.motion.axis import AxisMove, EnsureDepth, TimedDof, _K_DIP, _K_RISE, action_cfg, axis_deg, grab_cfg, grab_node, level_relative_deg, pitch_up_deg
 from handling.percept.cage_color import red_percent
 from common.motion.axis import AxisMove, TimedDof, ZERO_DOF, axis_deg, level_relative_deg, task_node
 from handling.motion.params import (PH_GRAB_INIT,
@@ -21,8 +22,8 @@ from handling.motion.params import (PH_GRAB_INIT,
                                   PH_GRAB_DUMP,
                                   PH_GRAB_EXIT,
                                   PH_GRAB_DONE,
-                                  _D_VERIFY,
-                                  _D_LOST,
+                                  _K_VERIFY,
+                                  _K_LOST,
                                   PH_PLACE_INIT,
                                   PH_PLACE_TRANSPORT,
                                   PH_PLACE_RELEASE,
@@ -36,7 +37,7 @@ from handling.motion.params import place_cfg
 # 兼容出口：相位常量与兜底表在 `motion/params.py`
 from handling.motion.params import *                    # noqa: F401,F403
 from handling.motion.params import (                    # noqa: F401
-    _D_CENTER, _D_APPROACH, _D_ALIGN, _D_VERIFY, _D_RETRY, _D_LOST, _D_PLACE, place_cfg)
+    _K_CENTER, _K_APPROACH, _K_ALIGN, _K_VERIFY, _K_RETRY, _K_LOST, _K_PLACE, place_cfg)
 from handling.motion.actions import (_cvnode, _ratio_radius, _dx_norm, _dy_norm, _clip)  # noqa: F401
 
 
@@ -82,7 +83,11 @@ class HandlingTask(HandlingActions, GrabPhases, PlacePhases):
         self._exit_deadline = 0.0
         self._ref_pitch = None                 # 抬头前的 pitch 遥测 = 回水平基准
         self._ensure = None
-        self._scan = Scan(log=self.log)
+        # ★ 搜索用平移扫视（prefix 按当前流程取 cfg 覆盖；place 将来要搜索也用同一个原语）
+        self._sweep = Sweep(prefix=("place" if mode == "place" else "grab"), log=self.log)
+        # ★ 定深（用户 2026-10-06：翘头后深度管在 0.5~0.6，不准太深也不准太浅）
+        self._depth_hold = DepthHold(prefix=("place" if mode == "place" else "grab"),
+                                     log=self.log)
         self._ema = None
         self._lost_cnt = 0
         self._hold_until_ms = None
@@ -270,7 +275,7 @@ class HandlingTask(HandlingActions, GrabPhases, PlacePhases):
             self._set_info("no_frame", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, None)
             return S.STATUS_RUNNING
 
-        lost = _cvnode("lost", _D_LOST)
+        lost = _cvnode("lost")
         alpha = float(lost["ema_alpha"])
         surge = sway = heave = yaw = 0.0
         dx = dy = 0.0
@@ -291,7 +296,7 @@ class HandlingTask(HandlingActions, GrabPhases, PlacePhases):
         else:
             growth = 0.0
         if self._phase == PH_GRAB_VERIFY and f is not None:
-            v = _cvnode("verify", _D_VERIFY)
+            v = _cvnode("verify")
             be = self.hub.extra(self.name)
             percent = red_percent(f, v["roi"], getattr(be, "p", None))
 
@@ -347,6 +352,15 @@ class HandlingTask(HandlingActions, GrabPhases, PlacePhases):
             surge, sway, heave, yaw = self._step_align(now_ms, dx, dy)
             action = "align"
 
+        # ★ 定深：**只作用在抬头工作段**（这几段自己的 heave 恒为 0 ⇒ 不抢通道）；
+        #   DIP/RISE 是**故意变深度**的（下压收球 / 上升带走球）⇒ 绝不插手；
+        #   ALIGN 用的是 surge(dy)+sway(dx)、本来就不动 heave；EXIT 只放平俯仰。
+        #   `f is not None`：**没有下视帧就本帧完全不动**（与上面那条 no_frame 不变量一致）——
+        #   定深虽然只靠深度遥测，但"相机瞎了还自己推"违背「没感知就停手」这条纪律。
+        if f is not None and self._phase in (PH_GRAB_SEARCH, PH_GRAB_CENTER, PH_GRAB_APPROACH):
+            hv = self._depth_hold.step(now_ms, self.uart)
+            if hv:
+                heave = hv
         if not self._finished:
             self.uart.send_dof(surge, sway, heave, yaw)
         self.last_dets = self.hub.detect_list(self.name, f) if f is not None else []

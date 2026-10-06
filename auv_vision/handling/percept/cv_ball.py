@@ -21,7 +21,7 @@ def _cfg(path, default):
     ⚠️ **必须带 `vision.` 前缀**：`S.get()` 只认 `vision.`/`comm.` 开头的路径，漏了前缀会
     **静默返回默认值**。本文件与 `grab_detector.py` 原来就漏了 ⇒ `cfg/vision.yaml` 里整个
     `grab.*` 段（红球阈值/跟踪参数/kind/mode）**一直没生效**，只因 yaml 值与代码默认值恰巧
-    相同才没暴露（2026-10-06 修；`tests/tasks/grab/test_grab_targets.py` 有用例钉住）。
+    相同才没暴露（2026-10-06 修；`tests/tasks/handling/test_grab_targets.py` 有用例钉住）。
     """
     if S is None:
         return default

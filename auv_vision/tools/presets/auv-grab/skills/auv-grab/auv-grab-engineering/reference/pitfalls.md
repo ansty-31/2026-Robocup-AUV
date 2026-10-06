@@ -92,7 +92,7 @@
 
 ```
 1. 现在在哪一代？      git log/status + md5 关键文件（cfg/权重/素材）—— 先排除"跑的不是我以为的代码"
-2. 感知行不行？        pytest tests/tasks/grab → 离线喂图（分桶命中率/耗时）
+2. 感知行不行？        pytest tests/tasks/handling → 离线喂图（分桶命中率/耗时）
 3. 链路对不对？        preview_detect.py --grab --show（真相机、不发运动）
 4. 实时够不够快？      板端 p50/p95 耗时 + fallback_rate
 5. 决策层逻辑对不对？  AUV_SIM_MODE=1 台架闭环 + analyze_task_log.py + feature_coverage.py

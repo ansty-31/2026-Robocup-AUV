@@ -5,21 +5,18 @@ from __future__ import annotations
 
 import base.cfg.settings as S
 from common.motion.search_scan import telemetry_yaw
-from common.cfg.cfgnode import flag, merge, num, sub
-from gate.motion.params import (PH_ALIGN, PH_APPROACH, PH_THROUGH, PH_CREEP_THROUGH, SUB_REACQUIRE,
-                                _D_ALIGN, _D_LOITER, _D_Z, _D_SURGE, _D_TASK, _D_THROUGH,
-                                _D_CREEP_THROUGH)
+from common.cfg.cfgnode import flag, merge, num, sub, req, req_flag, req_node, MissingCfg
+from gate.motion.params import PH_ALIGN, PH_APPROACH, PH_THROUGH, PH_CREEP_THROUGH, SUB_REACQUIRE
 
 class GateExits(object):
     def _start_through(self, bypass_hdg=False):
         """进入 THROUGH：只前进、不微调（横向修正全部留在冲刺前完成）。
         ⚠️ **两条出口是独立的**（2026-10-02 用户定）：门口超时兜底走 `bypass_hdg=True`，"""
-        need = num(sub(self._G, "through"), "require_align_deg",
-                   _D_THROUGH["require_align_deg"])
+        need = req(sub(self._G, "through"), "require_align_deg")
         # ★ 2026-10-05 用户定：**主出口重新加回居中闸门** —— 必须"居中成功"**连续 center_frames 帧**
         if not bypass_hdg:
-            T0 = merge(sub(self._G, "through"), _D_THROUGH)
-            cneed = int(num(T0, "center_frames", _D_THROUGH["center_frames"]))
+            T0 = req_node(self._G, "through")
+            cneed = int(req(T0, "center_frames"))
             if cneed > 0 and int(getattr(self, "_center_ok_cnt", 0)) < cneed:
                 self.last_info["through_block"] = "off_center(连续居中 %d/%d 帧)" % (
                     int(getattr(self, "_center_ok_cnt", 0)), cneed)
@@ -50,23 +47,23 @@ class GateExits(object):
         """穿门：只前进、不微调（横向修正全部留在冲刺前完成）。
         ⚠️ confirm_ms 要按实测航速标定：需要冲的距离 ≈ 触发距离(2026-09-23 后的 z.cross=1.10 m"""
         G = self._G
-        T = merge(sub(G, "through"), _D_THROUGH)
+        T = req_node(G, "through")
         self._through_frames += 1
         self._lost_cnt += 1               # confirm_ms<=0 时按帧数兜底
         if self._through_start_ms is None:
             self._through_start_ms = now_ms
-        ms = num(T, "confirm_ms", _D_THROUGH["confirm_ms"])
+        ms = req(T, "confirm_ms")
         if ms > 0:
             done = (now_ms - self._through_start_ms) >= ms
         else:
-            done = self._lost_cnt >= max(1, int(num(T, "confirm_frames", _D_THROUGH["confirm_frames"])))
+            done = self._lost_cnt >= max(1, int(req(T, "confirm_frames")))
         # 直行穿越；满足结束条件 → 判机身过门
         if done:
             self._pass_cnt += 1
             if S.DEBUG:
                 print("[GATE] 通过第 %d/%d 门"
-                      % (self._pass_cnt, int(num(G, "pass_target", _D_TASK["pass_target"]))))
-            if self._pass_cnt >= int(num(G, "pass_target", _D_TASK["pass_target"])):
+                      % (self._pass_cnt, int(req(G, "pass_target"))))
+            if self._pass_cnt >= int(req(G, "pass_target")):
                 self._finish("pass")
             else:
                 self._start_search(new_round=True)
@@ -85,26 +82,26 @@ class GateExits(object):
     def _tick_creep_through(self, now_ms):
         """creep_through：只前进（`surge.creep`），时长 `gate.creep_through.creep_ms` 后判过门。"""
         G = self._G
-        T = merge(sub(G, "creep_through"), _D_CREEP_THROUGH)
-        sg = merge(sub(G, "surge"), _D_SURGE)
+        T = req_node(G, "creep_through")
+        sg = req_node(G, "surge")
         if self._creep_through_start_ms is None:
             self._creep_through_start_ms = now_ms
-        if (now_ms - self._creep_through_start_ms) >= num(T, "creep_ms", _D_CREEP_THROUGH["creep_ms"]):
+        if (now_ms - self._creep_through_start_ms) >= req(T, "creep_ms"):
             self._pass_cnt += 1
             if S.DEBUG:
                 print("[GATE] creep_through 通过第 %d/%d 门"
-                      % (self._pass_cnt, int(num(G, "pass_target", _D_TASK["pass_target"]))))
-            if self._pass_cnt >= int(num(G, "pass_target", _D_TASK["pass_target"])):
+                      % (self._pass_cnt, int(req(G, "pass_target"))))
+            if self._pass_cnt >= int(req(G, "pass_target")):
                 self._finish("pass")
             else:
                 self._start_search(new_round=True)
                 self._set_info("hold")
             return
-        self._set_info("creep_through", surge=num(sg, "creep", _D_SURGE["creep"]))
+        self._set_info("creep_through", surge=req(sg, "creep"))
     def _tick_lost(self, now_ms):
         G = self._G
-        zc = merge(sub(G, "z"), _D_Z)
-        sg = merge(sub(G, "surge"), _D_SURGE)
+        zc = req_node(G, "z")
+        sg = req_node(G, "surge")
         # ⚠️ 有「转完反向平移」窗口时必须**让位**：那个状态是靠 `_set_info` 推进的（唯一派发口），
         if (self._post_sway_until_ms is None) and not getattr(self, "_lock_stable", False):
             self._lost_cnt += 1
@@ -118,7 +115,7 @@ class GateExits(object):
         if getattr(self, "_relock_ratio_ref", None) is None and self._dbg_ratio > 1e-6:
             self._relock_ratio_ref = float(self._dbg_ratio)   # z 拿不到时的退路：丢门前的框占比
         self._cross_cnt = 0
-        pose_hold = int(num(G, "pose_hold_frames", _D_TASK["pose_hold_frames"]))
+        pose_hold = int(req(G, "pose_hold_frames"))
         if self.phase in (PH_ALIGN,) and self.substate == SUB_REACQUIRE:
             self._tick_reacquire(now_ms)      # 已丢目标：无 ratio，按时间退完
             return
@@ -127,7 +124,7 @@ class GateExits(object):
             if self._post_sway_until_ms is not None and now_ms < self._post_sway_until_ms:
                 self._set_info("sway_back", z=self._z_last, sway=self._post_sway)
                 return
-            near_r = num(sub(self._G, "z"), "near_lost_ratio", _D_Z["near_lost_ratio"])
+            near_r = req(sub(self._G, "z"), "near_lost_ratio")
             last_r = float(getattr(self, "_dbg_ratio", 0.0) or 0.0)
             if self._lost_cnt <= pose_hold:
                 # 帧间防抖：沿用上一帧对中保持
@@ -146,8 +143,8 @@ class GateExits(object):
         if self.phase == PH_APPROACH:
             if self._lost_cnt <= pose_hold and self._z_last is not None:
                 self._set_info("backward_slow", z=self._z_last,
-                               surge=-num(sg, "lost_backward", _D_SURGE["lost_backward"]))
-            elif float(getattr(self, "_dbg_ratio", 0.0) or 0.0) >= num(sub(self._G, "z"), "near_lost_ratio", _D_Z["near_lost_ratio"]):
+                               surge=-req(sg, "lost_backward"))
+            elif float(getattr(self, "_dbg_ratio", 0.0) or 0.0) >= req(sub(self._G, "z"), "near_lost_ratio"):
                 # 同上：**门口丢角点不回 SEARCH**，原地后退重取（APPROACH 也守同一条）
                 self._enter_reacquire(now_ms, self._dbg_ratio)
                 self._set_info("reacquire", z=self._z_last)
@@ -160,23 +157,23 @@ class GateExits(object):
         self._set_info("search", sway=sway)
     def _loiter_commit(self, dxn, dyn, ratio, now_ms, kpt=None):
         """在门口超时兜底：**不看档位**，「人在门口 + 对准」持续太久就自己拍板直冲。"""
-        L = merge(sub(self._G, "loiter"), _D_LOITER)
+        L = req_node(self._G, "loiter")
         if not flag(L, "enable", True):
             self._loiter_start_ms = None
             return False
-        near_r = num(L, "near_ratio", num(sub(self._G, "z"), "near_lost_ratio", _D_Z["near_lost_ratio"]))
+        near_r = num(L, "near_ratio", req(sub(self._G, "z"), "near_lost_ratio"))
         r_now = float(ratio or 0.0)
         ok = (r_now >= near_r and
-              abs(float(dxn)) <= num(L, "dx_max", _D_LOITER["dx_max"]) and
-              abs(float(dyn)) <= num(L, "dy_max", _D_LOITER["dy_max"]))
+              abs(float(dxn)) <= req(L, "dx_max") and
+              abs(float(dyn)) <= req(L, "dy_max"))
         if not ok and r_now >= near_r:
-            hm = num(L, "pose_hist_ms", _D_LOITER["pose_hist_ms"])
-            hn = num(L, "pose_hist_min", _D_LOITER["pose_hist_min"])
+            hm = req(L, "pose_hist_ms")
+            hn = req(L, "pose_hist_min")
             hist = [h for h in getattr(self, "_pose_hist", []) if (now_ms - h[0]) <= hm]
             if len(hist) >= int(hn):
                 zs = sorted(h[1] for h in hist)
                 z_m = zs[len(zs) // 2]
-                zc = num(sub(self._G, "z"), "cross", _D_Z["cross"])
+                zc = req(sub(self._G, "z"), "cross")
                 if z_m <= zc:
                     if S.DEBUG:
                         print("[GATE] 下视/主视都无信息 → 按本轮 %d 帧历史判门口（z 中位=%.2f ≤ %.2f）"
@@ -188,7 +185,7 @@ class GateExits(object):
         if self._loiter_start_ms is None:
             self._loiter_start_ms = now_ms
             return False
-        wait = num(L, "timeout_ms", _D_LOITER["timeout_ms"])
+        wait = req(L, "timeout_ms")
         if (now_ms - self._loiter_start_ms) < wait:
             return False
         if S.DEBUG:

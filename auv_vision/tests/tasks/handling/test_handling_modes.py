@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""tests/tasks/grab/test_handling_modes.py — 「夹取 + 放置」总调度的**模式切换**
+"""tests/tasks/handling/test_handling_modes.py — 「夹取 + 放置」总调度的**模式切换**
 （`handling/handling_task.py`：`mode="grab" | "place" | "full"`）。
 
 守三件事：
@@ -16,7 +16,7 @@ from handling.handling_task import (PH_GRAB_DONE, PH_PLACE_DONE, PH_PLACE_INIT, 
                                     PlaceTask)
 
 _PLACE_PHASES = (PH_PLACE_INIT, PH_PLACE_TRANSPORT, PH_PLACE_RELEASE, PH_PLACE_STOP, PH_PLACE_DONE)
-from tests.tasks.grab.test_grab_flow import (FakeUart, W, H, _Backend, _Hub, _drive,
+from tests.tasks.handling.test_grab_flow import (FakeUart, W, H, _Backend, _Hub, _drive,
                                              _grow, _red_frame, _task)
 
 

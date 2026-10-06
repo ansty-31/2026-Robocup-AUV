@@ -216,7 +216,7 @@ KEEP=5 BIG_FILES=20 bash tools/deploy/tidy_board_bak.sh   # 多留几个回滚�
 
 ```bash
 # 改完代码（本地）
-python3 -m pytest tests/ -q                    # 本地全绿（216 例，约 15s）
+python3 -m pytest tests/ -q                    # 本地全绿（327 例，约 15s）
 python3 -m pytest tests/_bite_probe.py -q      # 改过 cfg 相关逻辑时：确认用例还会"咬"
 bash tools/deploy/check_board_parity.sh        # 先确认"本地 == 清单"（并看有没有"新文件未入清单"）
 bash tools/deploy/deploy_to_board.sh --dry-run # 看它打算传/删哪些（**新文件不在清单里就不会被传**）
@@ -312,7 +312,14 @@ diff -u cfg/comm.yaml "$b"        # 逐键看清差异 → 把板端现场值合
 > 曾经的两条（`base/cfg/settings.py` 的 SIM_MODE、`cfg/comm.yaml` 的台架分叉）在 2026-09-26
 > "全部以本地为准"时清空；**2026-09-27 把本地 `SIM_MODE=True` 推上板端、冲掉真驱动默认值**，
 > 于是 `base/cfg/settings.py` 重新入列（板端默认 `False` 真发串口，台架要打印用 `AUV_SIM_MODE=1`）。
-> ⚠️ 分叉粒度是**整个文件**：入列后本地对该文件的改动**不再上板端**，要改必须在板端手工同步。
+> 两种条目（2026-10-06 起）：
+> - **普通条目** = 整份跳过：本地对该文件的改动**不再上板端**，要改必须在板端手工同步。
+> - **`[sync+patch]` 条目** = **照常上传 + 上传后打补丁**：本地仍是源、文件照常同步，
+>   随后部署脚本的「步骤 3b」把板端那份改成它该有的值。检查器对两种条目一视同仁（都按"故意的差异"跳过）。
+>   起因：整份跳过会让板端拿不到文件里的**其它**更新 —— 2026-10-06 板端 `base/cfg/settings.py`
+>   缺 `STATE_GRAB`/`STATE_PLACE`，新 handling 代码直接跑不起来。目前 `base/cfg/settings.py`
+>   就是 `[sync+patch]`（补丁 = 板端 `SIM_MODE = False`）；**再加这类条目必须同时在 deploy 的
+>   步骤 3b 里为它加一个 `case` 分支**，否则会被当成未知目标报警。
 > 现状：除此 1 个文件外，**板端全量跟本地一致**；上表"先 diff 再合并"的流程仍是改 cfg 前的好习惯。
 
 ### 陷阱 2：**新文件不在清单里 = 永远传不上板**
@@ -333,7 +340,7 @@ AUV_SSH=... bash tools/deploy/check_board_parity.sh --board --write   # 板端�
 
 1. 从 `tools/deploy/board_parity.md5` 删掉那一行；
 2. 把相对路径加进 `deploy_to_board.sh` 的 `DELETED=( … )`（部署时先备份再删板端旧文件）。
-   `DELETED` 里已有的：v1.3/v1.4 分层 gate 目录、`task1_2/turn_deg.py`（已迁到 `common/motion/turn_deg.py`）、
+   `DELETED` 里已有的：v1.3/v1.4 分层 gate 目录、`task/turn_deg.py`（已迁到 `common/motion/turn_deg.py`）、
    2026-09-20 合并前的旧用例名（`test_uart.py`/`test_gate_dash.py`/`test_gate_decode.py`/
    `test_heading_align.py`/`test_turn_deg.py`/`test_preprocess_rt.py` 等）、以及 2026-09-21 分类重整前的
    **旧扁平路径**（`tools/analyze_*.py`、`tools/check_*.py`、`tools/pnp_calib.py`、`tools/deploy/archive_baks.sh`、

@@ -4,7 +4,7 @@
 与 `AUV_STREAM=0`（绝不新建推流 socket）。**秒级跑完，不需要板子/相机/水池。**
 
 ```bash
-python3 -m pytest tests/ -q                     # 全部（216 例）
+python3 -m pytest tests/ -q                     # 全部（327 例）
 python3 -m pytest tests/platform -q             # 只跑平台与公共件
 python3 -m pytest tests/tasks -q                # 只跑任务层
 python3 -m pytest tests/tooling -q              # 只跑工具层
@@ -27,7 +27,7 @@ tests/
 │   │                        cfgnode（缺键兜底、字符串布尔坑、**共用 comm.motion 参数的唯一来源**）
 │   ├── test_paths.py        路径落点（部署脚本默认目录、cfg 绝对路径、标定 yaml 文件头）
 │   └── test_hud.py          叠加层（画什么/不画什么）
-├── tasks/                ② 任务与运动原语
+├── tasks/                ② 任务与运动原语（含子目录 gate/ grab/ place/）
 │   ├── test_ball.py         撞球：SEARCH→CENTER→APPROACH→DASH→STOP→DONE(hit)；CENTER 不前进；
 │   │                        APPROACH 只 sway；无目标跑满时限
 │   ├── gate/                过门（按主题成组）

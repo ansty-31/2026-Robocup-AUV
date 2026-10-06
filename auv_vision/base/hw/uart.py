@@ -17,7 +17,12 @@ except ImportError:
     HAS_SERIAL = False
 
 # 限深保护的兜底阈值（m）：**必须与 cfg/comm.yaml 的 `depth_guard.min_depth_m` 同值**。
-_D_MIN_DEPTH_M = 0.55
+#   2026-10-06 随 cfg 从 0.55 下调到 0.50（用户要求夹取翘头工作深度能到 0.5）。
+_D_MIN_DEPTH_M = 0.50
+
+# pitch/roll 姿态限幅的兜底（度）：与 `comm.motion.axis.max_tilt_deg` / common/motion/turn_deg 同源同值。
+#   （base 层不 import common ⇒ 这里直接按 cfg 路径读，**只有一个数**，不各写一份）
+_D_MAX_TILT_DEG = 50.0
 
 # 指定角度轴（协议 byte[7]）：0=不发起新任务, 1=yaw, 2=pitch, 3=roll。
 # 帧布局 / 编码 / 执行帧语义见 doc/记录/README_COMMUNICATION.md §2、§2.1、§2.3。
@@ -682,6 +687,9 @@ class _AxisWatchdog(object):
     """**轴饱和看门狗**（用户 2026-09-27 定，阈值 5.0s）：**只看 yaw 轴** —— 同一方向**连续**发 yaw ≥"""
 
     AXES = ("yaw", "surge", "heave", "sway")
+    # ★ 不走手动轴字节的轴：pitch/roll 是「指定角度轴任务」（byte[7..10]），
+    #   老的「同向饱和」判据对它们**根本不适用** ⇒ 另开一路看 IMU 姿态（见 `check_tilt`）。
+    TILT_AXES = ("pitch", "roll")
 
     @staticmethod
     def _resolve_axes(axes):
@@ -714,24 +722,48 @@ class _AxisWatchdog(object):
         self.max_same_dir_s = float(max_same_dir_s or 0.0)
         self.min_off_b = int(min_off_b or 0)
         self.poll_ms = max(10, int(poll_ms or 50))
-        # 只看哪些轴：轴名（`dof_map` 的键）或下标；缺省**只盯 yaw**（见类文档：其余轴可合法长同向）
-        self.axes = self._resolve_axes(axes if axes is not None else ("yaw",))
+        # 只看哪些轴：轴名或下标。名单里出现 pitch/roll ⇒ 走**姿态**那一路（`check_tilt`），
+        # 其余走**手动轴字节饱和**那一路。缺省只盯 yaw。
+        names = list(axes if axes is not None else ("yaw",))
+        self.tilt_axes = tuple(str(n).strip().lower() for n in names
+                               if not isinstance(n, int) and str(n).strip().lower() in self.TILT_AXES)
+        self.axes = self._resolve_axes([n for n in names
+                                        if isinstance(n, int) or str(n).strip().lower() not in self.TILT_AXES])
+        # 姿态限幅/保持时长：阈值复用 `comm.motion.axis.max_tilt_deg`（**单一来源**）
+        try:
+            self.max_tilt_deg = abs(float(S.get("comm.motion.axis.max_tilt_deg", _D_MAX_TILT_DEG)))
+        except (TypeError, ValueError):
+            self.max_tilt_deg = _D_MAX_TILT_DEG
+        try:
+            self.tilt_hold_s = max(0.0, float(S.get("comm.watchdog.tilt_hold_s", 0.5) or 0.0))
+        except (TypeError, ValueError):
+            self.tilt_hold_s = 0.5
+        self._tilt_t0 = {}
+        self._tilt_ref = None          # 上电首次读到的 pitch/roll（诊断用：看是不是安装偏置）
         self.on_trip = on_trip
         self.log = log or print
         self._stop = threading.Event()
         self._warned_err = False
         self._thread = threading.Thread(target=self._run, name="axis-watchdog", daemon=True)
 
+    def tilt_names(self):
+        return self.tilt_axes
+
     def start(self):
-        if self.max_same_dir_s <= 0:
-            self.log("[UART] 轴看门狗：关闭（max_same_dir_s=0）")
-            return self
-        if not self.axes:
+        if not self.axes and not self.tilt_axes:
             self.log("[UART] 轴看门狗：comm.watchdog.axes 为空 ⇒ 不盯任何轴（不启动）")
             return self
-        self.log("[UART] 轴看门狗：**只盯 %s** ｜ 同一方向连续发轴 ≥ %.1fs ⇒ 硬停 + 强制退出"
-                 "（巡检 %dms，判据 |偏离中位| ≥ %d 字节）"
-                 % ("/".join(self.axis_names()), self.max_same_dir_s, self.poll_ms, self.min_off_b))
+        if self.axes and self.max_same_dir_s <= 0:
+            self.log("[UART] 轴看门狗：手动轴饱和判据关闭（max_same_dir_s=0）")
+        parts = []
+        if self.axes:
+            parts.append("手动轴 %s：同一方向连续发轴 ≥ %.1fs ⇒ 硬停 + 强制退出"
+                         "（|偏离中位| ≥ %d 字节）"
+                         % ("/".join(self.axis_names()), self.max_same_dir_s, self.min_off_b))
+        if self.tilt_axes:
+            parts.append("姿态 %s：|遥测角| > %.0f° 连续 ≥ %.1fs ⇒ 硬停 + 强制退出"
+                         % ("/".join(self.tilt_axes), self.max_tilt_deg, self.tilt_hold_s))
+        self.log("[UART] 轴看门狗（巡检 %dms）｜ %s" % (self.poll_ms, " ； ".join(parts)))
         self._thread.start()
         return self
 
@@ -751,7 +783,10 @@ class _AxisWatchdog(object):
             except Exception:
                 continue
             try:
-                self._poll_once(ax, mid, now=time.monotonic(), dirs=dirs, t0=t0)
+                _now = time.monotonic()
+                if self.tilt_axes and self.check_tilt(now=_now):
+                    return               # trip 已经处理过（on_trip 或强制退出）
+                self._poll_once(ax, mid, now=_now, dirs=dirs, t0=t0)
             except Exception as e:
                 if not self._warned_err:
                     self._warned_err = True
@@ -778,6 +813,73 @@ class _AxisWatchdog(object):
             if t0.get(i) is not None and (now - t0[i]) >= self.max_same_dir_s:
                 self._trip(i, int(b), now - t0[i])
                 return
+
+    def check_tilt(self, now=None):
+        """★ **姿态看守**（pitch/roll）：`|遥测角| > max_tilt_deg` 且**连续** ≥ `tilt_hold_s` ⇒ trip。
+
+        为什么必须另开一路：pitch/roll 走「指定角度轴任务」，**不经过手动轴字节**，老的同向饱和
+        判据对它们不适用。没有遥测时**不判**（信息不足不乱停船）。返回被 trip 的轴名或 None。
+
+        ⚠️ 判据是**绝对** IMU 角：若 IMU 安装有偏置（上电静止时就 > 限值），会立刻停船 ——
+        那本身就是要先解决的问题（日志会把上电基准打出来）。
+        """
+        if not self.tilt_axes or self.max_tilt_deg <= 0:
+            return None
+        t = time.monotonic() if now is None else float(now)
+        tel = getattr(self.uart, "telemetry", None)
+        vals = {}
+        for name in self.tilt_axes:
+            v = getattr(tel, "%s_deg" % name, None) if tel is not None else None
+            vals[name] = None if v is None else float(v)
+        if self._tilt_ref is None and any(v is not None for v in vals.values()):
+            self._tilt_ref = dict(vals)
+            self.log("[UART] 看门狗基准（上电首次读到）：%s"
+                     % " ".join("%s=%s" % (k, "-" if v is None else "%.1f°" % v)
+                                for k, v in vals.items()))
+        for name, v in vals.items():
+            if v is None:
+                self._tilt_t0.pop(name, None)      # 没遥测 = 不判
+                continue
+            if abs(v) > self.max_tilt_deg:
+                if name not in self._tilt_t0:
+                    self._tilt_t0[name] = t
+                if t - self._tilt_t0[name] >= self.tilt_hold_s:
+                    self._trip_tilt(name, v, t - self._tilt_t0[name])
+                    return name
+            else:
+                self._tilt_t0.pop(name, None)
+        return None
+
+    def _trip_tilt(self, name, deg, held_s):
+        ref = (self._tilt_ref or {}).get(name, None)
+        self.log("[UART] ⛔ **轴看门狗·姿态**：%s 实测 %+.1f° 超过 ±%.0f° 已持续 %.1fs"
+                 "（上电基准 %s）⇒ **硬停 + 强制退出**"
+                 % (name, deg, self.max_tilt_deg, held_s,
+                    "n/a" if ref is None else "%+.1f°" % ref))
+        try:
+            self.uart.estop()
+        except Exception:
+            pass
+        try:
+            if getattr(self.uart, "_ser", None) is not None:
+                with self.uart._tx_lock:
+                    for _ in range(20):
+                        self.uart._ser.write(build_neutral_frame())
+                        time.sleep(0.02)
+        except Exception:
+            pass
+        if self.on_trip is not None:
+            try:
+                self.on_trip(name, held_s, deg)
+            except Exception:
+                pass
+            return
+        for _f in (sys.stdout, sys.stderr):
+            try:
+                _f.flush()
+            except Exception:
+                pass
+        os._exit(9)
 
     def _trip(self, i, byte, held_s):
         mid = int(S.comm.frame.axis_mid)

@@ -29,10 +29,13 @@ heartbeat:
   interval_ms: 50  # 心跳间隔(ms)，≥20Hz
 estop:
   repeat_ms: 30  # 急停连发中性帧间隔(ms)
-watchdog:  # ★ **轴饱和看门狗**
+watchdog:  # ★ **轴看门狗**（独立线程）：手动轴看「同向饱和」，pitch/roll 看「姿态超限」
   enable: true  # 独立线程
-  axes: [yaw]  # ★**只盯哪些轴**
-  max_same_dir_s: 10.0  # 同一轴、**同一方向**连续发轴超过这么多秒 ⇒ estop 硬停 + 强制退出(9)
+  axes: [yaw, pitch, roll]  # ★**盯哪些轴**：yaw=同向饱和；pitch/roll=不走手动轴字节，看 IMU 姿态
+  tilt_hold_s: 0.5  # 姿态超限要**连续**这么久才停船（防单帧抖动误停）
+  #   姿态限值复用 comm.motion.axis.max_tilt_deg（单一来源，默认 50°）
+  #   ⚠️ 判据是**绝对** IMU 角：若 IMU 安装有偏置（上电静止读数就 >50°）会立刻停船 ——
+  #     那本身就是要先解决的问题（看门狗日志会把上电基准打出来，便于判断是不是偏置）  max_same_dir_s: 10.0  # 同一轴、**同一方向**连续发轴超过这么多秒 ⇒ estop 硬停 + 强制退出(9)
   min_off_b: 13  # 偏离中位超过这么多**字节**才算"在发轴"
   poll_ms: 50  # 巡检周期(ms)
 ramp:
@@ -42,7 +45,11 @@ telemetry:  # 下位机上行姿态/深度的**符号归一**
   yaw_sign: 1.0  # 遥测 yaw × 它
 depth_guard:  # 限深保护：只压上浮，不动前进/转向
   enable: true  # 当前深度 ≤ min_depth_m → 本帧 heave 清零并当帧回中，机身顶不出水面
-  min_depth_m: 0.55  # ⚠️ **现场定死 = 0.55，不准改**
+  min_depth_m: 0.50  # 现场定死值（**2026-10-06 用户从 0.55 下调到 0.50**）
+  #   ⚠️ 改这个数必须**同时**改：`base/hw/uart.py::_D_MIN_DEPTH_M`（代码兜底，删键时用）、
+  #      `tests/platform/test_base.py` 的不变用例、`tests/_bite_probe.py` 的说明。
+  #   ⚠️ 露出水面 = 比赛立即停止：下调即放宽安全边界（抬头 30° 时抬高 ≈ (机长/2)·sin30°），
+  #      必须现场量机头（含相机壳）离水面余量后再定。
   stale_ms: 500  # 遥测超过这么久(ms)没更新 → 视为没有深度
   stale_action: pass  # 无新鲜深度时：pass=放行(台架/仿真友好) | block_up=连盲上浮也不许
   snap: true  # 触发时 heave 轴当帧直接回中
@@ -55,7 +62,7 @@ dof_comp:  # **底层共用**：单独调"下潜"这一路动力
 motion:  # **ball / gate 共用的底层运动参数**
   pid_sway:  {kp: 8.0, ki: 0.01, kd: 0.05, out_max: 0.55, deadzone: 0.05}
   pid_heave: {kp: 1.0, ki: 0.0,  kd: 0.15, out_max: 1.0,  deadzone: 0.04}
-  surge_fast: 0.35  # 快档：ball 分级最高速/冲刺、gate 远距进近
+  surge_fast: 0.30  # 快档：ball 分级最高速/冲刺、gate 远距进近
   surge_slow: 0.15  # 慢档：ball 接近段减速、gate 近距进近
   loss_inertia_surge: 0.25  # 目标短时丢失时的低速惯性
   search_yaw: 0.3  # 无目标时原地旋转搜索
@@ -96,6 +103,24 @@ motion:  # **ball / gate 共用的底层运动参数**
     release:               # 任务四用：到点放球（用户定：横倾 30° → 断动力 3s → 结束，不回正不后退）
       steps: [{name: 横倾放球, tilt: true},
               {name: 断动力停住, s: 3.0}]
+  # ★ 左右平移扫视（**任务三/四的 search**；形状照 gate 那套 `_search_sweep`）。
+  #   为什么不用 search_scan：抬头时转 yaw 会让目标绕圈跑，平移只让它横移；且不依赖 yaw 遥测。
+  #   ⚠️ 开环、无横向位置反馈 ⇒ 一趟来回**可能有净漂移**（未验证，现场要实测）。
+  search_sweep:
+    sweep_s: 2.0        # 首轮单程时长(s)；每轮翻倍
+    sweep_max_s: 32.0   # 单程时长上限(s)
+    pause_s: 1.0        # 段间停顿(s)（停着检测更稳）
+    sway: 0.20          # 平移幅值（占位·未标定；**下限**：执行器死区 0.138，别低于 ~0.15）
+    duty: 0.5           # ★ 占空比(<1)：本方向**推一小段、停一下**，不一次到位（幅值不动⇒不掉死区）
+    duty_window_ms: 400 # 占空比窗口(ms)
+    max_ms: 0.0         # 扫视总时长上限(ms)；0 = 不限（交给任务总时限兜）
+
+  # ★ 指定角度轴的安全限幅（用户 2026-10-06 定）：pitch/roll **不准超过 ±50°**（yaw 不受限）
+  #   指令侧：common/motion/turn_deg.TurnCore 夹紧；姿态侧：AxisMove 超限撤指令 + 停手；
+  #   最外一层：看门狗（comm.watchdog）按**实测姿态**停船。**只有一个数**，三处都读它。
+  axis:
+    max_tilt_deg: 50.0
+
   presets:  # 手动模式/急停用的 DOF 预设（**只留生产真正用得到的**：main.py 收口发 stop）
     stop:         [0.0, 0.0, 0.0, 0.0]
 
@@ -108,13 +133,33 @@ tasks:
 grab:  # 任务三 夹取小球（决策层 2026-10-06 起建；**感知全程用下视相机**）
 # ⚠️ 标「占位·未标定」的值上水前必须现场实测（标定顺序与判据见 doc/注释历史.md）。
 # ⚠️ 未标定前**不要**把 grab 放进 tasks.enabled：calibrated 是安全闸，false ⇒ 本任务不 ready ⇒ 装配层跳过它。
-  calibrated: false      # ★ 安全闸：false ⇒ 跳过本任务（不占状态机、不发任何指令）
+  calibrated: true      # ★ 安全闸：false ⇒ 跳过本任务（不占状态机、不发任何指令）
   timeout_ms: 45000      # 总时限（用户 2026-10-06 定）；撞球 30s、过门 50s
-  depth_floor_m: 1.0     # 任务级有效限深下限（**只抬不降**，用户定：专用于本任务）；全局 min_depth_m 不动
+  depth_floor_m: 0.50    # ★ 翘头时的**安全下限**（工作区间 0.5~0.6，见 depth_hold）
+  #   全局限深 2026-10-06 已由用户下调为 **0.50** ⇒ 本值与它同值，浅端不再被卡在 0.55，
+  #   0.5~0.6 的整段都可用了（真正的工作点由 `depth_hold.target_m`=0.55 决定）。
+  #   ⚠️ 但注意方向冲突：你最早的口令是『翘头 30° **保证不出水面** ⇒ 下限增大』，
+  #      现在为了看得见要**变浅** ⇒ 机头离水面的余量变小了。抬头 30° 机头抬高 ≈ (机长/2)·sin30°，
+  #      **下水前必须现场量**：抬头到位后目视/卷尺量机头（含相机壳）离水面还有多少，记录在案。
+  #      要回退：把这个数改回 0.8（一行），或临时 AUV_CFG_DIR 指向一份更保守的 cfg。
   ensure_depth: true     # 抬头前先下潜到该下限；关掉 = 不再"保证不出水面"（默认必须是开）
   ensure_depth_s: 8.0    # 下潜到位的时间上限；超时 → 放弃抬头（不硬顶）
   descend_heave: -0.40   # 下潜幅值（占位·未标定；下层还有 dof_comp.dive_scale 会再放大）
   depth_tol_m: 0.05      # 到位容差(m)：深度遥测有量化误差，别贴死
+  # ★ 定深（用户 2026-10-06：翘头时深度控制在 **0.5~0.6**，不准太深也不准太浅）
+  #   作用范围：只在抬头**工作段**（SEARCH/CENTER/APPROACH）。DIP/RISE 故意变深度（下压/上升）⇒ 不插手；
+  #   ALIGN 用 surge(dy)+sway(dx) 本就不动 heave；EXIT 只放平俯仰。
+  #   浅端实际生效值 = `max(band_lo, 全局 min_depth_m)`。全局 2026-10-06 已下调为 0.50 ⇒
+  #   生效下沿 = 0.50，**整段 0.5~0.6 都可用**；若哪天把全局抬回去（>0.50），生效下沿会跟着抬，
+  #   DepthHold 会在启动时把这件事打印一次（不静默）。
+  depth_hold:
+    enable: true
+    target_m: 0.55       # 目标（区间中点）
+    band_lo_m: 0.50      # 期望区间下沿（**实际生效 = max(它, 全局 min_depth_m)**）
+    band_hi_m: 0.60      # 区间上沿：超过就算「太深」→ 上浮
+    kp: 1.0              # 比例（深度误差 m → heave）；无积分 ⇒ 不与定深 PID 打架
+    out_max: 0.35        # 上浮/下潜幅值上限（占位·未标定）
+    deadzone_m: 0.02     # 死区滞环：贴边不来回抖
   # ---- 指定角度轴动作（协议 byte[7]：2=pitch / 3=roll）----
   pitch: {up_deg: 30.0, up_sign: 1.0, timeout_s: 8.0, settle_ms: 300.0}
   #   up_sign ⚠️**未验证**：相对角正负 vs 物理抬头（上板单轴实测后再定）
@@ -150,8 +195,11 @@ place:  # 任务四 放置（运输 → 到点 → 放球；**与任务三并列
 # ⚠️ 未定项都标出来了：'到点'的真实判据、运输通道/速度、以及'IMU roll 0 = 物理水平'都未验证。
 # ⚠️ calibrated 是安全闸：false ⇒ 本任务不 ready ⇒ 装配层跳过（不占状态机、不发指令）。
   calibrated: false      # ★ 安全闸：false ⇒ 跳过本任务
+  # ★ 2026-10-07：**无兜底** ⇒ place 也必须有 depth_hold（DepthHold 直接 req_node）
+  depth_hold: {enable: true, target_m: 0.55, band_lo_m: 0.5, band_hi_m: 0.6,
+               kp: 1.0, out_max: 0.35, deadzone_m: 0.02}
   timeout_ms: 60000      # 任务级兜底（放球 3s + 运输占位 30s 的余量）
-  depth_floor_m: 1.0     # 任务级有效限深下限（**只抬不降**）；全局 min_depth_m(0.55) 不动
+  depth_floor_m: 0.8     # 任务级有效限深下限（**只抬不降**）；全局限深 0.50 是另一条、不动它
   transport_s: 30.0      # 占位·未标定：运输时长；真正的'到点'判据待定（或调 task.arrived()）
   surge: 0.25            # 占位·未标定：运输速度（通道同 ball/gate 的 surge）
   roll_target_deg: 0.0   # ⚠️ 未验证：IMU roll 目标（0 = 机身水平）——'滚不出来'靠它
@@ -189,20 +237,31 @@ ball:  # 任务一 撞球：运动链 SEARCH→CENTER→APPROACH→DASH→STOP
 gate:  # 任务二 过门
   timeout_ms: 50000  # 任务级兜底
   pass_target: 1  # 完成计数目标：单门 1
-  align: {confirm_frames: 4, px_x: 0.15, px_y: 0.20}  # 现用值
-  hdg: {enable: true, tol_deg: 8.0, max_step_deg: 15.0, turn_scale: 0.8, timeout_ms: 30000,
+  align: {confirm_frames: 4, px_x: 0.15, px_y: 0.10}  # 现用值
+  hdg: {enable: true, tol_deg: 8.0, max_step_deg: 0.0, turn_scale: 1.0, timeout_ms: 30000,
         # ★ ok_frames（2026-10-04 用户定）：**连续多少帧** ψ 都在 tol_deg 内才算"航向已 OK"。
 #   （细节与实测见 doc/注释历史.md）
         ok_frames: 5,
         turn_timeout_s: 8.0,         post_sway_ms: 600.0, post_sway: 0.20,
         post_sway_back: 0.15, post_sway_kpt_min: 2,
           turn_period: 0.05, stop_hard: true,
-        max_turns: 5}
+        max_turns: 5,
+        # ★ post_sway_settle_frames（2026-10-06 用户定）：转向后**先连停这么多帧再看画面**
+        #   —— 转向后前几帧还是转向前的旧画面，拿它判"门回来了"没意义（实测帧18仍报 kpt=4）。
+        post_sway_settle_frames: 8}
   loiter: {enable: true, near_ratio: 0.50, timeout_ms: 6000, dx_max: 0.25, dy_max: 0.30, pose_hist_ms: 1500.0, pose_hist_min: 3}
-  z: {align_max: 4.0, fast_max: 3.0, slow_max: 1.2, cross: 1.3,
+  z: {align_max: 4.0, fast_max: 3.0,
+      # ★★ 2026-10-07 用户定：**三个"到门口"的距离键直接划等号** ——
+      #   `z.slow_max`（近了就慢） / `z.cross`（冲刺触发） / `width.z_max`（width 档"够近了"）。
+      #   ⚠️ 用 **YAML 锚点**实现：**只改下面 `&door_m` 这一处**，三个键同时变；
+      #     历史上它们是手工写成同一个数（09-30 起 cross/slow_max 都是 1.2），
+      #     散在三个地方、改一个忘一个 ⇒ 现在钉成一个来源。
+      #   物理含义：门框在画面里大到这个程度 = 已到门口。
+      slow_max: &door_m 1.2,
+      cross: *door_m,
         # ★ dist_max_m（2026-10-04 用户定）：z 超过它 ⇒ **完全不相信**这一帧位姿
 #   （细节与实测见 doc/注释历史.md）
-        dist_max_m: 2.5,  # ★ 2026-10-05 用户定：**加回来**
+        dist_max_m: 3.0,  # ★ 2026-10-07 用户定：**3 米开外测距已不可信** ⇒ 完全不相信（原来是 2.5）
       cross_confirm_frames: 4,  # 连续 z≤cross 帧数才判过门(防单帧 PnP 错解冲出去)
       # ★ 与 cross 同值：近了就进 THROUGH，不会因为太近而长时间 search/back_slow
 #   （细节与实测见 doc/注释历史.md）
@@ -211,9 +270,12 @@ gate:  # 任务二 过门
       relock_away_m: 1.8,  # ★ 丢门重锁时 z 超过它 ⇒ 判为「下一个门」
       near_lost_ratio: 0.50,
       }
+  # ★ approach（2026-10-06 用户定）：进近（APPROACH）相位用哪个速档。
+  #   `creep` = 舍弃 forward_fast，**到达 z.cross 前一律慢速试探**（撞门代价不可逆）。
+  approach: {tier: creep}
   surge: {creep: 0.20, lost_backward: 0.20, reacquire: 0.25, through: 0.6}
   width:  # width 档
-    z_max: 1.5  # 粗测距 z ≤ 它 = 够近了，此时只允许 creep 靠近
+    z_max: *door_m   # ★ 与 z.cross / z.slow_max 同一个值（YAML 锚点，改 &door_m 一处即可）
   coarse: {far_ratio: 0.18, near_ratio: 0.55, align_x: 0.33, align_y: 0.29}
   hold: {max_frames: 20}  # HOLD 无进展帧数 → REACQUIRE(只在"未对准"时累加)
   reacquire: {max_ms: 800,  # 单次后退上限(ms)
@@ -231,7 +293,7 @@ gate:  # 任务二 过门
   lock: {match_ratio: 0.20, miss_frames: 5, stable_frames: 5}
   # ★ 选门：z 与**框占比**配合判据（2026-10-04 用户定）。
 #   （细节与实测见 doc/注释历史.md）
-  select: {k_check: true, k_lo_ratio: 0.75, k_hi_ratio: 1.40}   # 选门 = z 优先 + 面积最大 + k 一致性保护
+  select: {k_check: true, k_lo_ratio: 0.75, k_hi_ratio: 1.40, k_max_ratio: 0.90}   # 选门 = z 优先 + 面积最大 + k 一致性保护
   pose_hold_frames: 10  # 帧间防抖：丢姿态时的保持帧数
 
 debug:  # 通信调试

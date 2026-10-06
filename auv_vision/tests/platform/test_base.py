@@ -27,8 +27,9 @@ def test_settings_loads_real_yaml_values():
     assert S.vision.gate.pnp.z_max == 15.0
     assert S.comm.frame.header == 0xA5
     #    这一条专门钉**数值**：改了它必须有人来解释。
-    assert float(S.comm.depth_guard.min_depth_m) == pytest.approx(0.55), \
-        "comm.depth_guard.min_depth_m 是现场定死的 0.55，不准改（详见 README 限深保护一节）"
+    assert float(S.comm.depth_guard.min_depth_m) == pytest.approx(0.50), \
+        "comm.depth_guard.min_depth_m 是**现场定死值**（2026-10-06 用户定为 0.50）：改它必须同时改 " \
+        "base/hw/uart.py::_D_MIN_DEPTH_M 与 tests/_bite_probe.py 的说明（详见 README 限深保护一节）"
     assert bool(S.comm.depth_guard.enable) is True
     assert S.get("vision.gate.kpt_mem.recall_conf") == 0.45
     assert S.get("vision.no_such_key") is None
@@ -527,12 +528,55 @@ def test_axis_watchdog_only_watches_yaw():
 def test_axis_watchdog_axes_come_from_cfg():
     """盯哪些轴由 `comm.watchdog.axes` 决定（缺省只 yaw；乱写轴名忽略并告警）。"""
     # 而**代码默认**永远只盯 yaw（这才是"配不上也不能变宽"的保证）。
+    # 2026-10-06 用户定：**看守 yaw、pitch、roll**（pitch/roll 不走手动轴字节 ⇒ 另走姿态路）
     _cfg_axes = S.get("comm.watchdog.axes", None)
-    assert _cfg_axes in (None, ["yaw"]), _cfg_axes
-    assert U._AxisWatchdog(_FakeAxesUart(), log=lambda *a: None).axis_names() == ("yaw",)
+    assert _cfg_axes == ["yaw", "pitch", "roll"], _cfg_axes
+    w0 = U._AxisWatchdog(_FakeAxesUart(), log=lambda *a: None)
+    assert w0.axis_names() == ("yaw",) and w0.tilt_names() == (), "代码缺省仍是最窄的 yaw"
     w = U._AxisWatchdog(_FakeAxesUart(), axes=["yaw", "sway"], log=lambda *a: None)
     assert w.axis_names() == ("yaw", "sway"), w.axis_names()
-    assert U._AxisWatchdog(_FakeAxesUart(), axes=["pitch"], log=lambda *a: None).axes == ()
+    # ★ pitch/roll 不在 `dof_map` 里 ⇒ **不能**按字节轴解析（否则会报"未知轴名"并丢掉这条保护）
+    wt = U._AxisWatchdog(_FakeAxesUart(), axes=["yaw", "pitch", "roll"], log=lambda *a: None)
+    assert wt.tilt_names() == ("pitch", "roll") and wt.axis_names() == ("yaw",), \
+        (wt.axis_names(), wt.tilt_names())
+    # 乱写的轴名照样忽略
+    assert U._AxisWatchdog(_FakeAxesUart(), axes=["nonsense"], log=lambda *a: None).axes == ()
+
+
+def test_axis_watchdog_trips_when_the_attitude_exceeds_the_tilt_limit():
+    """★ **姿态看守**（用户 2026-10-06 定）：pitch/roll 实测超限并**连续** ≥ tilt_hold_s ⇒ 停船。
+
+    为什么必须另开一路：pitch/roll 走「指定角度轴任务」（byte[7..10]），**不经过手动轴字节**，
+    老的「同向饱和」判据对它们根本不适用。
+    """
+    u = _FakeAxesUart()
+    u.telemetry = S.Y({"pitch_deg": 0.0, "roll_deg": 0.0})
+    trips = []
+    w = U._AxisWatchdog(u, axes=["yaw", "pitch", "roll"],
+                        on_trip=lambda name, held, val: trips.append((name, val)),
+                        log=lambda *a: None)
+    lim = float(w.max_tilt_deg)
+    assert lim == pytest.approx(float(S.get("comm.motion.axis.max_tilt_deg", 50.0)))
+
+    u.telemetry.pitch_deg = lim - 5.0
+    assert w.check_tilt(now=0.0) is None and w.check_tilt(now=10.0) is None, "限内不判"
+    u.telemetry.pitch_deg = lim + 10.0
+    assert w.check_tilt(now=20.0) is None, "刚超限要等满保持时长"
+    assert w.check_tilt(now=20.0 + float(w.tilt_hold_s)) == "pitch", "连续超限该停船"
+    assert trips and trips[0][0] == "pitch" and u.estops >= 1
+    # roll 同理
+    trips.clear(); u.telemetry.pitch_deg = 0.0
+    u.telemetry.roll_deg = -(lim + 5.0)
+    assert w.check_tilt(now=100.0) is None
+    assert w.check_tilt(now=100.0 + float(w.tilt_hold_s)) == "roll"
+    # ★ 没遥测 = 信息不足 ⇒ **不判**（不乱停船），并且把未满的计时清掉
+    u.telemetry.roll_deg = lim + 1.0
+    w.check_tilt(now=200.0)
+    u.telemetry.roll_deg = None
+    assert w.check_tilt(now=201.0) is None and w._tilt_t0 == {}
+    # 名单里没有 pitch/roll ⇒ 这一路整个不工作
+    w2 = U._AxisWatchdog(_FakeAxesUart(), axes=["yaw"], log=lambda *a: None)
+    assert w2.tilt_names() == () and w2.check_tilt(now=0.0) is None
 
 
 def test_axis_watchdog_names_match_dof_map():

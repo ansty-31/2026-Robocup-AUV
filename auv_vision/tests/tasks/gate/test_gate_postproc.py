@@ -94,7 +94,7 @@ def test_dedup_config_can_disable_by_edges():
     big = _det(score=0.95, x=400, y=200, w=300, h=220)
     small = _det(score=0.80, x=401, y=201, w=298, h=218)
     out = pp.dedup([big, small], conf_thr=0.8,
-                   cfg={"edge_tol": 0.10, "min_edges": 5, "geom_check": True})
+                   cfg={"edge_tol": 0.10, "min_edges": 5, "geom_check": True, "lr_norm": True})
     assert len(out) == 2
 
 
@@ -130,7 +130,7 @@ def test_lr_normalize_skips_placeholder_and_single_side():
 def test_apply_geom_check_can_be_disabled():
     bad = _det(kpts=[(600, 200), (400, 200), (400, 350), (600, 350)])
     out = pp.apply([bad], conf_thr=0.8,
-                   cfg={"edge_tol": 0.10, "min_edges": 2, "geom_check": False})
+                   cfg={"edge_tol": 0.10, "min_edges": 2, "geom_check": False, "lr_norm": True})
     assert len(out) == 1
 
 
@@ -156,17 +156,17 @@ def test_select_ignores_non_gate_and_survives_bad_mode():
     assert pp.pick([ball, gate], conf_thr=0.8, cfg={"mode": "TYPO"}) is gate
 
 
-def test_postproc_defaults_match_cfg():
+def test_postproc_cfg_keys_are_all_readable():
+    """★ 2026-10-07 用户定：**删掉兜底默认值**。这里只保留反向检查 ——
+    cfg 里出现的键，代码的键名清单里必须有（拼错键名会静默失效）。"""
     bad = []
-    for name, code, cfg in (("vision.gate.det", pp._D_DET, S.get("vision.gate.det", {})),
-                            ("vision.gate.postproc", pp._D_POST, S.get("vision.gate.postproc", {})),
-                            ("vision.gate.select", pp._D_SELECT, S.get("vision.gate.select", {}))):
-        for k, v in dict(cfg).items():
-            if k not in code:
-                bad.append("%s.%s：cfg 有但代码兜底表没有" % (name, k))
-            elif code[k] != v:
-                bad.append("%s.%s：cfg=%r 代码兜底=%r" % (name, k, v, code[k]))
-    assert not bad, "解码后处理的兜底默认值与 cfg 不一致：\n  " + "\n  ".join(bad)
+    for name, keys, cfg in (("vision.gate.det", pp._K_DET, S.get("vision.gate.det", {})),
+                            ("vision.gate.postproc", pp._K_POST, S.get("vision.gate.postproc", {})),
+                            ("vision.gate.select", pp._K_SELECT, S.get("vision.gate.select", {}))):
+        for k in dict(cfg):
+            if k not in keys:
+                bad.append("%s.%s：cfg 有但代码读不到（拼错？或键名清单漏了）" % (name, k))
+    assert not bad, "cfg 与代码键名清单不一致：\n  " + "\n  ".join(bad)
     assert pp.det_cfg() == float(S.vision.gate.det.conf)
     assert pp.select_cfg()["mode"] == str(S.vision.gate.select.mode)
     assert pp.postproc_cfg()["min_edges"] == int(S.vision.gate.postproc.min_edges)

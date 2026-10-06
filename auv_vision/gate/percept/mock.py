@@ -13,7 +13,7 @@ class MockGateBackend(object):
     """每 detect() 前进一帧；pose_fn(f) -> (rvec, tvec) 或 None(=目标消失)。"""
 
     def __init__(self, camera, frame_w=None, frame_h=None,
-                 z0=5.5, step=0.02, cross_z=0.7,   # 0.02m/帧@33ms ≈ 0.6m/s（贴近真船）
+                 z0=5.5, step=0.02, cross_z=None,   # 0.02m/帧@33ms ≈ 0.6m/s（贴近真船）
                  lat_bias=0.18, align_frames=50,
                  score=0.92, conf_ok=0.92,
                  pose_fn=None,
@@ -26,6 +26,13 @@ class MockGateBackend(object):
         self.h = frame_h or camera.height
         self.z0 = float(z0)
         self.step = float(step)
+        # ★ 2026-10-07：`cross_z` = **模拟"船已穿过门"的距离**，必须**明显小于**
+        #   `comm.gate.z.cross`（冲刺触发点），否则门先消失、冲刺判据来不及攒够连续帧
+        #   （实踩：z.cross 改成 0.70 后与旧的 cross_z=0.7 撞在一起 ⇒ mock 全流程到不了 THROUGH）。
+        #   不显式给就按 cfg 的 70% 取，保证冲刺永远先发生。
+        if cross_z is None:
+            import base.cfg.settings as _S
+            cross_z = 0.7 * float(_S.get("comm.gate.z.cross", 1.0) or 1.0)
         self.cross_z = float(cross_z)
         self.lat_bias = float(lat_bias)
         self.align_frames = int(align_frames)

@@ -186,14 +186,14 @@ def check_cap_wired(task_src, align_src):
             FAIL.append("`_hdg_turns_full()` 没有被调用（只在定义处出现 ⇒ 上限没接到起转判据上）")
         elif "def _hdg_turns_full" in task_src:
             OK.append("`_hdg_turns_full()` 已接到起转判据上（`_hdg_ready`）")
-    blk = _dict_block(align_src, "_D_HDG")
+    blk = _dict_block(align_src, "_K_HDG")
     if blk is None:
-        WARN.append("找不到 `_D_HDG` 兜底表（读到的文件见结尾清单）")
+        WARN.append("找不到 `_K_HDG` 键名清单（★ 2026-10-07 起兜底机制已删）（读到的文件见结尾清单）")
     elif "max_turns" not in blk:
-        FAIL.append("`_D_HDG` 里没有 `max_turns` ⇒ `hdg_cfg()` 会把 cfg 里的 `max_turns` "
+        FAIL.append("`_K_HDG` 里没有 `max_turns` ⇒ `hdg_cfg()` 不会读 cfg 的 `max_turns` "
                     "**静默丢掉**（cfg 看起来生效、其实没读）")
     else:
-        OK.append("`_D_HDG` 里有 max_turns（cfg 的键真的会被读到）")
+        OK.append("`_K_HDG` 里有 max_turns（cfg 的键真的会被读到）")
 
 
 def check_kpt_exit(task_src, cfg_src):

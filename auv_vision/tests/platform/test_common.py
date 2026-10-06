@@ -7,7 +7,7 @@ import pytest
 import base.cfg.settings as S
 from common.motion.PID import PID
 from common.vision.detector import Det, pick_target
-from common.cfg.cfgnode import (MOTION_DEFAULTS, flag, merge, motion_num, motion_pid,
+from common.cfg.cfgnode import (MissingCfg, flag, merge, motion_num, motion_pid,
                             num, nums, pid_kw, sub)
 from common.vision.detector import bgr_to_packed_nv12, bgr_to_packed_nv12_fast
 from common.vision.preprocess import ModelPreprocessor, enhance
@@ -182,17 +182,20 @@ def test_cfgnode_node_readers(monkeypatch):
     assert flag({"e": 0}, "e", True) is False
     assert flag({}, "e", True) is True                          # 缺键 → 默认
 
-    # PID 参数：out_max 同时是 ±限幅；任务级覆盖优先、其余取共用默认
-    kw = pid_kw({"kp": 2.0}, MOTION_DEFAULTS["pid_sway"])
+    # PID 参数：out_max 同时是 ±限幅；★ 2026-10-07 起**五个键必填**（无兜底）
+    kw = pid_kw({"kp": 2.0, "ki": 0.0, "kd": 0.0, "out_max": 0.5, "deadzone": 0.05})
     assert kw["kp"] == 2.0
-    assert kw["out_min"] == -kw["out_max"] == -MOTION_DEFAULTS["pid_sway"]["out_max"]
-    assert kw["deadzone"] == MOTION_DEFAULTS["pid_sway"]["deadzone"]
+    assert kw["out_min"] == -kw["out_max"] == -0.5
+    assert kw["deadzone"] == 0.05
+    with pytest.raises(MissingCfg):                     # 缺键 ⇒ 报名字，不再兜底
+        pid_kw({"kp": 2.0})
 
     # **共用运动参数**：正常取值 == cfg（一处调、两个任务同时生效）
     for k in ("surge_fast", "surge_slow", "loss_inertia_surge", "search_yaw"):
         assert motion_num(k) == pytest.approx(float(S.comm.motion[k])), k
     for k in ("pid_sway", "pid_heave"):
         assert motion_pid(k)["kp"] == pytest.approx(float(S.comm.motion[k]["kp"])), k
-    # cfg 缺键 → 代码兜底（不是 KeyError）
+    # ★ 2026-10-07 用户定：**删掉兜底** —— cfg 缺键 ⇒ 报名字（不是静默用默认值）
     monkeypatch.delitem(S.comm.motion, "surge_fast", raising=False)
-    assert motion_num("surge_fast") == pytest.approx(MOTION_DEFAULTS["surge_fast"])
+    with pytest.raises(MissingCfg):
+        motion_num("surge_fast")

@@ -23,6 +23,42 @@ from base.log.turn_log import turn_log                                  # noqa: 
 _FW_RIGHT_YAW_SIGN = -1.0
 _AXIS_NAMES = {1: "yaw", 2: "pitch", 3: "roll"}
 
+# ★ 指定角度轴的**安全限幅**（用户 2026-10-06 定）：pitch / roll **不准超过 ±50°**；
+#   yaw 不受限（它要能转 180°）。这里是「指令侧」的静态夹紧 —— 真正的兜底在 `AxisMove`
+#   的姿态侧监控（每帧看遥测，超限就撤指令 + 停手）。
+#   只夹**幅度**：回水平/回正这类「往小里修」的指令幅度本来就在限内，不会被挡住。
+_D_MAX_TILT_DEG = 50.0
+
+
+def max_tilt_deg(prefix=None):
+    """pitch/roll 限幅（度）：`comm.motion.axis.max_tilt_deg`；任务段 `comm.<prefix>.max_tilt_deg` 可覆盖。"""
+    import base.cfg.settings as S
+    v = S.get("comm.motion.axis.max_tilt_deg", _D_MAX_TILT_DEG)
+    if prefix:
+        o = S.get("comm.%s.max_tilt_deg" % prefix, None)
+        if o is not None:
+            v = o
+    try:
+        v = abs(float(v))
+    except (TypeError, ValueError):
+        v = _D_MAX_TILT_DEG
+    return max(0.0, min(180.0, v))
+
+
+def clamp_tilt_deg(axis, deg, prefix=None, log=None):
+    """把 pitch/roll 的相对角夹到 ±`max_tilt_deg`。返回 `(角, 是否被夹)`；yaw 原样返回。"""
+    a = turn_axis_id(axis)
+    d = float(deg)
+    if a == 1 or not math.isfinite(d):
+        return d, False
+    lim = max_tilt_deg(prefix)
+    if abs(d) <= lim:
+        return d, False
+    if log is not None:
+        log("[TURN] ⚠️ %s 指令 %+.1f° 超安全限 ±%.0f° → 夹到 %+.1f°"
+            % (_AXIS_NAMES.get(a, a), d, lim, math.copysign(lim, d)))
+    return math.copysign(lim, d), True
+
 def wrap180(deg):
     """把角度差归一化到 (-180, 180]。"""
     x = math.fmod(deg + 180.0, 360.0)
@@ -87,6 +123,11 @@ class TurnCore(object):
         self.axis_name = _AXIS_NAMES.get(self.axis, "axis%d" % self.axis)
         self.timeout = float(timeout)
         self.log = log or (lambda *a: None)
+        # ★ pitch/roll 安全夹紧（±50°）：**在这里夹** ⇒ `AxisMove` 与手动 CLI 都走这一条
+        _d, self.clamped = clamp_tilt_deg(self.axis, self.deg * self.d, log=self.log)
+        self.deg = abs(_d)
+        self.left = _d < 0.0
+        self.d = -1.0 if self.left else 1.0
         self.state = self.IDLE
         self.why = ""
         self.t_start = None

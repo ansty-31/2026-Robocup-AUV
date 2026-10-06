@@ -6,16 +6,16 @@ from __future__ import annotations
 import math
 
 import base.cfg.settings as S
-from common.cfg.cfgnode import flag, merge, pid_kw, sub
+from common.cfg.cfgnode import flag, merge, pid_kw, sub, req, req_flag, req_node, MissingCfg
 from common.motion.PID import PID
-from common.motion.axis import AxisMove, EnsureDepth, TimedDof, _D_DIP, _D_RISE, action_cfg, axis_deg, grab_cfg, grab_node, level_relative_deg, pitch_up_deg
+from common.motion.axis import AxisMove, EnsureDepth, TimedDof, _K_DIP, _K_RISE, action_cfg, axis_deg, grab_cfg, grab_node, level_relative_deg, pitch_up_deg
 from common.motion.axis import AxisMove, TimedDof, ZERO_DOF, axis_deg, level_relative_deg, task_node
-from handling.motion.params import _D_CENTER, _D_APPROACH, _D_ALIGN
+from handling.motion.params import _K_CENTER, _K_APPROACH, _K_ALIGN
 
 
-def _cvnode(key, defaults):
-    """`comm.grab.<key>` + 代码兜底（缺段/缺键都不崩）。"""
-    return merge(sub(grab_node(), key), defaults)
+def _cvnode(key):
+    """`comm.grab.<key>`：**必填**（★ 2026-10-07 删掉兜底；缺则报名字）。"""
+    return req_node(grab_node(), key)
 
 
 def _ratio_radius(r, fw, fh):
@@ -82,18 +82,19 @@ class HandlingActions(object):
         self._ema = (1.0 - alpha) * prev + alpha * r
         return self._ema - prev
 
-    def _new_pid(self, node, defaults):
-        return PID(**pid_kw(node, defaults))
+    def _new_pid(self, node, where=""):
+        """★ pid_kw 现在**必填**（无兜底）；`where` 只用于缺键时报错指路。"""
+        return PID(**pid_kw(node, where))
 
     def _ensure_pids(self):
         if self._pid_yaw is None:
-            c = _cvnode("center_yaw", _D_CENTER)
-            self._pid_yaw = self._new_pid(sub(c, "pid"), _D_CENTER["pid"])
-            a = _cvnode("approach", _D_APPROACH)
-            self._pid_sway = self._new_pid(sub(a, "sway"), _D_APPROACH["sway"])
-            l = _cvnode("align_level", _D_ALIGN)
-            self._pid_asw = self._new_pid(sub(l, "sway"), _D_ALIGN["sway"])
-            self._pid_asu = self._new_pid(sub(l, "surge"), _D_ALIGN["surge"])
+            c = _cvnode("center_yaw")
+            self._pid_yaw = self._new_pid(req_node(c, "pid"), "handling.center.pid")
+            a = _cvnode("approach")
+            self._pid_sway = self._new_pid(req_node(a, "sway"), "handling.approach.sway")
+            l = _cvnode("align_level")
+            self._pid_asw = self._new_pid(req_node(l, "sway"), "handling.align.sway")
+            self._pid_asu = self._new_pid(req_node(l, "surge"), "handling.align.surge")
 
     def _set_info(self, action, ratio, dx, dy, sway, surge, heave, yaw, percent):
         self.last_info.update({

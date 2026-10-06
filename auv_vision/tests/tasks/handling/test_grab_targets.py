@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""tests/tasks/grab/test_grab_targets.py — 目标色集合（`grab.targets`）与"每色一套阈值"的取用闸。
+"""tests/tasks/handling/test_grab_targets.py — 目标色集合（`grab.targets`）与"每色一套阈值"的取用闸。
 
 用户口径（2026-10-06）：现在用**红球**测逻辑与运动（红球外都毙）；比赛用**粉球/黄球** ⇒
 先把阈值槽位准备好。**本套用例钉的是"未标定不许参与"这条闸**，不是某个颜色的数值。

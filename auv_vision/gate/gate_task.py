@@ -7,7 +7,7 @@ import numpy as np
 import base.cfg.settings as S
 from common.motion.PID import PID
 from base.log.turn_log import turn_log
-from common.cfg.cfgnode import flag, merge, motion_node, motion_num, num, pid_kw, sub
+from common.cfg.cfgnode import flag, merge, motion_node, motion_num, num, pid_kw, sub, req, req_flag, req_node, MissingCfg
 from gate.percept.gate_detector import board_camera
 from gate.percept.kpt_memory import ENV_ENABLE, build_kpt_memory, enable_source
 from gate.percept.gate_frontend import (parse_kpt_mode,
@@ -27,7 +27,8 @@ from gate.percept.gate_postproc import (det_cfg,
                                               postproc_cfg,
                                               select_cfg,
                                               pick as postproc_pick)
-from gate.motion.params import PH_SEARCH, PH_ALIGN, PH_APPROACH, PH_THROUGH, SUB_HDG, SUB_GOLDEN, SUB_CREEP, SUB_HOLD, SUB_REACQUIRE, SUB_SWAY_BACK, _D_ALIGN, _D_LOITER, _D_Z, _D_SURGE, _D_COARSE, _D_WIDTH, _D_TASK, _D_KPT, _D_HOLD, _D_REACQ, _D_THROUGH, _D_SEARCH, _D_PNP, _D_GEOM, _D_LOCK, _D_SELECT
+from gate.motion.params import (PH_SEARCH, PH_ALIGN, PH_APPROACH, PH_THROUGH, SUB_HDG,
+                                SUB_GOLDEN, SUB_CREEP, SUB_HOLD, SUB_REACQUIRE, SUB_SWAY_BACK)
 from common.motion.search_scan import Scan, telemetry_yaw
 from gate.motion.channels import GateChannels
 from gate.motion.exits import GateExits
@@ -38,6 +39,51 @@ from gate.motion.params import *            # noqa: F401,F403
 
 class GateTask(GateChannels, GateHdg, GateModes, GateExits):
     name = "gate"
+
+    # ------------------------------------------------------------------ 启动自检
+    def validate_cfg(self):
+        """**启动自检：把 `_K_*` 键名清单逐项核对 cfg** —— 缺键当场报名字。
+
+        ★ 2026-10-07 用户定：删掉代码兜底之后，必须补上这道"必填校验"。
+        ⚠️ 为什么必须在**启动**时做，而不能只靠 `req()` 用到才报：
+           `req()` 是惰性的 —— `z.cross` 只在**门口的位姿帧**才被读到，缺它的话
+           船会一路跑到门口才抛异常（实船：那正是最不能出事的地方）。
+        """
+        from gate.motion.params import (_K_ALIGN, _K_LOITER, _K_Z, _K_SURGE, _K_COARSE,
+                                        _K_WIDTH, _K_HOLD, _K_REACQ, _K_THROUGH, _K_SEARCH,
+                                        _K_HDG, _K_LOCK, _K_SELECT, _K_PNP, _K_GEOM)
+        G, V = self._G, self._V
+        pairs = [("comm.gate.align", _K_ALIGN, G.get("align")),
+                 ("comm.gate.loiter", _K_LOITER, G.get("loiter")),
+                 ("comm.gate.z", _K_Z, G.get("z")),
+                 ("comm.gate.surge", _K_SURGE, G.get("surge")),
+                 ("comm.gate.coarse", _K_COARSE, G.get("coarse")),
+                 ("comm.gate.width", _K_WIDTH, G.get("width")),
+                 ("comm.gate.hold", _K_HOLD, G.get("hold")),
+                 ("comm.gate.reacquire", _K_REACQ, G.get("reacquire")),
+                 ("comm.gate.through", _K_THROUGH, G.get("through")),
+                 ("comm.gate.search", _K_SEARCH, G.get("search")),
+                 ("comm.gate.hdg", _K_HDG, G.get("hdg")),
+                 ("comm.gate.lock", _K_LOCK, G.get("lock")),
+                 ("comm.gate.select", _K_SELECT, G.get("select")),
+                 ("vision.gate.pnp", _K_PNP, V.get("pnp")),
+                 ("vision.gate.percept.geometry", _K_GEOM, V.get("geometry"))]
+        miss = []
+        for name, keys, node in pairs:
+            for k in keys:
+                if not isinstance(node, dict) or node.get(k) is None:
+                    miss.append("%s.%s" % (name, k))
+        # 顶层标量 + 字符串档位
+        for k in ("timeout_ms", "pass_target", "pose_hold_frames"):
+            if G.get(k) is None:
+                miss.append("comm.gate.%s" % k)
+        if (G.get("approach") or {}).get("tier") in (None, ""):
+            miss.append("comm.gate.approach.tier")
+        if (self._V.get("keypoint") or {}).get("conf_thr") is None:
+            miss.append("vision.gate.keypoint.conf_thr")
+        if miss:
+            raise MissingCfg("✗ cfg 缺必填参数（代码已无兜底，请补进 cfg/*.yaml）：\n    "
+                             + "\n    ".join(miss))
 
     def __init__(self, uart, hub, frame_w, frame_h):
         self.uart = uart
@@ -51,7 +97,7 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         self._down_enabled = flag(sub(V, "down"), "enable", False)
         self._down_frame = None
 
-        geo = merge(sub(V, "geometry"), _D_GEOM)
+        geo = req_node(V, "geometry")
         self.frame_w_m = float(geo["frame_w"])
         self.frame_h_m = float(geo["frame_h"])
         # 相机—机身安装偏置(m)：**只读入、不参与运算**（未标定；接进 sway/heave 目标
@@ -68,7 +114,7 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         else:
             # 打印**实际生效**的值（自己写兜底会打出与 kpt_memory.DEFAULTS 不一致的数字）
             m = self._kpt_mem
-            conf_thr = num(sub(V, "keypoint"), "conf_thr", _D_KPT["conf_thr"])
+            conf_thr = req(sub(V, "keypoint"), "conf_thr")
             print("[GATE] kpt_mem 开启（逐点软融合，%s）：alpha=%s beta=%s "
                   "recall_conf=%s（必须 < keypoint.conf_thr=%.2f）"
                   % (enable_source(km), m.alpha, m.beta, m.recall_conf, conf_thr))
@@ -82,8 +128,11 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
 
         G_sway, G_heave = sub(G, "pid_sway"), sub(G, "pid_heave")
         self._gain_src = "gate(显式覆盖)" if (G_sway or G_heave) else "motion(共用)"
-        self._pid_sway_kw = pid_kw(G_sway, motion_node("pid_sway"))
-        self._pid_heave_kw = pid_kw(G_heave, motion_node("pid_heave"))
+        # ★ pid_kw 现在**必填**（无兜底）：任务级没写就用 comm.motion 那份，两者都必须齐全
+        self._pid_sway_kw = pid_kw(G_sway or motion_node("pid_sway"),
+                                   "comm.gate.pid_sway|comm.motion.pid_sway")
+        self._pid_heave_kw = pid_kw(G_heave or motion_node("pid_heave"),
+                                    "comm.gate.pid_heave|comm.motion.pid_heave")
         self._pid_sway_px = PID(**self._pid_sway_kw)
         self._pid_heave_px = PID(**self._pid_heave_kw)
         _ks = ("kp", "ki", "kd", "out_max", "deadzone")
@@ -103,7 +152,7 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
                  ("edge_tol=%.2f/min_edges=%d/geom=%s"
                   % (self._post["edge_tol"], self._post["min_edges"],
                      self._post["geom_check"])),
-                 num(sub(V, "keypoint"), "conf_thr", _D_KPT["conf_thr"]),
+                 req(sub(V, "keypoint"), "conf_thr"),
                  det_cfg()))
         self._hdg_done = True             # True=本门不需要再正航向（未启用或已出结论）
         self._hdg_done = not flag(self._hdg_cfg, "enable", True)
@@ -142,6 +191,7 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
                           "hdg_i": 0,           # 正航向已迭代次数（ALIGN.HDG）
                           "status": S.STATUS_RUNNING, "reason": ""}
         self.reset_state()
+        self.validate_cfg()          # ★ 启动自检：缺键当场报名字（代码已无兜底）
     def reset_state(self):
         self.frames = 0
         self._start_ms = None
@@ -223,17 +273,17 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
             self._step(det, now_ms)
 
         if (self._start_ms is not None and
-                now_ms - self._start_ms >= num(self._G, "timeout_ms", _D_TASK["timeout_ms"])):
+                now_ms - self._start_ms >= req(self._G, "timeout_ms")):
             self._finish("timeout")
         self.last_info["status"] = S.STATUS_DONE if self._finished \
             else S.STATUS_RUNNING
         return self.last_info["status"]
     def _gate_lock(self, dets, frame_w):
         """选门 + **锁定**（★ 2026-10-04 用户定："可以锁定，但锁定前务必做好检查 ——"""
-        Lc = merge(sub(self._G, "lock"), _D_LOCK)
+        Lc = req_node(self._G, "lock")
         gates = [d for d in dets if getattr(d, "kind", None) == "gate"]
-        miss_max = int(num(Lc, "miss_frames", _D_LOCK["miss_frames"]))
-        stable_n = int(num(Lc, "stable_frames", _D_LOCK["stable_frames"]))
+        miss_max = int(req(Lc, "miss_frames"))
+        stable_n = int(req(Lc, "stable_frames"))
         if not gates:
             self._lock_miss += 1
             if self._lock_miss >= miss_max:
@@ -263,7 +313,7 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         gates = kept
         lx = float(self._locked_det.x) + float(self._locked_det.w) * 0.5
         ly = float(self._locked_det.y) + float(self._locked_det.h) * 0.5
-        thr = float(num(Lc, "match_ratio", _D_LOCK["match_ratio"])) * float(frame_w or 0.0)
+        thr = float(req(Lc, "match_ratio")) * float(frame_w or 0.0)
         best, best_d = None, None
         for d in gates:
             cx = float(d.x) + float(d.w) * 0.5
@@ -277,8 +327,8 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
             if self._lock_k_ref is None:
                 self._lock_k_ref = kz                     # 刚锁上：建立参照
             elif kz is not None:
-                k_lo = float(num(sub(self._G, "select"), "k_lo_ratio", _D_SELECT["k_lo_ratio"]))
-                k_hi = float(num(sub(self._G, "select"), "k_hi_ratio", _D_SELECT["k_hi_ratio"]))
+                k_lo = float(req(sub(self._G, "select"), "k_lo_ratio"))
+                k_hi = float(req(sub(self._G, "select"), "k_hi_ratio"))
                 if not (k_lo * self._lock_k_ref <= kz <= k_hi * self._lock_k_ref):
                     if S.DEBUG:
                         print("[GATE] k 一致性不通过：本帧 k=%.3f vs 锁定参照 %.3f（允许 ×%.2f~%.2f）"
@@ -317,8 +367,8 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         ratio = (float(det.w) / float(self.w)) if (self.w and getattr(det, "w", 0)) else 0.0
         if ratio <= 1e-6:
             return False
-        k_lo = float(num(sub(self._G, "select"), "k_lo_ratio", _D_SELECT["k_lo_ratio"]))
-        k_hi = float(num(sub(self._G, "select"), "k_hi_ratio", _D_SELECT["k_hi_ratio"]))
+        k_lo = float(req(sub(self._G, "select"), "k_lo_ratio"))
+        k_hi = float(req(sub(self._G, "select"), "k_hi_ratio"))
         # ---- 保护①：k 一致性（k = z×框占比；能测才判，测不出本层跳过）----
         kz = self._k_of(det)
         k_ok = True
@@ -328,8 +378,26 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
                     print("[GATE] 锁定保护①(k)：本帧 k=%.3f vs 参照 %.3f（允许 ×%.2f~%.2f）⇒ 不是锁定那扇门"
                           % (kz, self._lock_k_ref, k_lo, k_hi))
                 return True
+        # ★★ 2026-10-06 用户定：**贴到门口 / 门框出画时，面积保护必须让位**(方案 a+c)。
+        #   (a) 船贴近时门框撑出画面，bbox 只剩可见部分 ⇒ 框占比**必然**变小 ⇒ "占比<0.7×参照"
+        #       会把**贴脸的门自己**判成"更远那扇" ⇒ 锁定门被自己人拒收 ⇒ 一路 hold 进不了 THROUGH
+        #       （实船帧134：占比 0.398→0.177，z 已冻在 1.17 ≤ cross）。判定"近"用锁定门最近采信的 z。
+        #   (c) 检测框**触到画面边缘**= 门框被裁掉 ⇒ 占比同样不代表距离 ⇒ 本条也不做面积判据。
+        _zc = req_node(self._G, "z")
+        _cross = req(_zc, "cross")
+        _zl = getattr(self, "_z_last", None)
+        if _cross > 0 and _zl is not None and float(_zl) <= _cross:
+            return False                      # (a) 门口：跳过面积保护（①k 与跳变保护仍在）
+        _w = float(self.w or 0)
+        _h = float(self.h or 0)
+        if _w > 0 and _h > 0:
+            _x0, _y0 = float(det.x), float(det.y)
+            _x1, _y1 = _x0 + float(det.w), _y0 + float(det.h)
+            _m = 2.0                          # 容差(px)：贴着边就算出画
+            if _x0 <= _m or _y0 <= _m or _x1 >= _w - _m or _y1 >= _h - _m:
+                return False                  # (c) 门框出画：框占比不代表距离，跳过面积保护
         ref = getattr(self, "_lock_ratio_ref", None)
-        far = num(sub(self._G, "z"), "relock_far_ratio", _D_Z["relock_far_ratio"])
+        far = req(sub(self._G, "z"), "relock_far_ratio")
         if ref is not None and far > 0 and ratio < float(far) * float(ref):
             if S.DEBUG:
                 print("[GATE] 锁定保护②(面积)：本帧占比 %.3f < %.2f×参照 %.3f ⇒ 是更远那扇门，拒收"
@@ -357,7 +425,7 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
             ratio = (float(det.w) / float(self.w)) if (self.w and getattr(det, "w", 0)) else 0.0
             if ratio <= 1e-6:
                 return None
-            z = self._z_est(det, num(sub(self._V, "keypoint"), "conf_thr", _D_KPT["conf_thr"]))
+            z = self._z_est(det, req(sub(self._V, "keypoint"), "conf_thr"))
             return None if z is None else float(z) * ratio
         except Exception:
             return None
@@ -398,7 +466,7 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         self._lost_cnt = 0
         self._ratio_last = float(det.w) / float(self.w)   # ★ 本帧通过保护 ⇒ 记"最近被采纳的占比"
         V = self._V
-        conf_thr = num(sub(V, "keypoint"), "conf_thr", _D_KPT["conf_thr"])
+        conf_thr = req(sub(V, "keypoint"), "conf_thr")
         # 诊断量：本帧框占比 + 有效角点数（进叠加与 REACQUIRE 日志）
         self._dbg_ratio = float(det.w) / float(self.w)
         if det.kpt_conf is not None:
@@ -426,16 +494,16 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         if mode in (MODE_FULL, MODE_P3P) and n >= 3:
             obj3s = self.obj3[ids]
             img2s = np.asarray(kpts)[ids]
-            pnp = merge(sub(V, "pnp"), _D_PNP)
+            pnp = req_node(V, "pnp")
             # 上帧位姿用于消歧：平面 IPPE 双解在远距/小目标时 RMS 接近，纯靠 RMS 会帧间跳
             prev = self._last_pose
             res = gate_pose(self.camera, obj3s, img2s, prev=prev,
-                            reproj_thr=num(pnp, "reproj_px", _D_PNP["reproj_px"]),
-                            z_bounds=(num(pnp, "z_min", _D_PNP["z_min"]),
-                                      num(pnp, "z_max", _D_PNP["z_max"])),
+                            reproj_thr=req(pnp, "reproj_px"),
+                            z_bounds=(req(pnp, "z_min"),
+                                      req(pnp, "z_max")),
                             refine=flag(pnp, "refine", True))
             if res is not None:
-                max_jump = num(pnp, "max_z_jump_m", _D_PNP["max_z_jump_m"])
+                max_jump = req(pnp, "max_z_jump_m")
                 if self._z_guard and self._z_last is not None and max_jump > 0:
                     z_new = float(res[1].ravel()[2])
                     if abs(z_new - self._z_last) > max_jump:

@@ -61,3 +61,82 @@ def test_missing_keys_do_not_crash():
     for info in ({}, {"hdg_state": None}, {"hdg": 0, "hdg_i": None}):
         txt, col = psi_line(info, 8.0)
         assert isinstance(txt, str) and len(col) == 3
+
+
+# --------------------------------------------------------------------------- #
+# through 专表（★ 2026-10-07 用户要求：**单独一份记录 through 的日志**）
+# --------------------------------------------------------------------------- #
+def test_through_log_records_only_the_dash_as_segments(tmp_path):
+    """★ through 专表：**只记冲刺段**，每次冲刺自成一段（enter → 逐帧 → exit）。
+
+    为什么单独一份：任务日志几千帧、冲刺只占十几~几十帧；单独成段才能 `grep '"evt":"enter"'`
+    把每一次穿门拎出来对比（哪次走 `z≤cross`、哪次走门口超时兜底、各用了几帧多久）。
+    """
+    import json
+    import main as M
+    p = tmp_path / "t.jsonl"
+    lg = M._ThroughLog(str(p))
+    seq = [("ALIGN", "center", 0), ("APPROACH", "forward_creep", 0),
+           ("THROUGH", "through", 0), ("THROUGH", "through", 0),
+           ("THROUGH", "through", 1), ("ALIGN", "hold", 1)]
+    for i, (ph, act, ps) in enumerate(seq):
+        lg.write({"phase": ph, "action": act, "z": 1.0, "pass": ps}, 1000 + i * 100, i, "gate")
+    lg.close()
+    recs = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert [r["evt"] for r in recs] == ["enter", "frame", "frame", "exit"], \
+        "非冲刺帧不该写进来；冲刺段必须是 enter→frame…→exit"
+    assert recs[0]["frames_in_through"] == 1 and recs[-2]["frames_in_through"] == 3
+    assert recs[-1]["dur_ms"] == 300, "exit 要给出本段时长"
+    assert recs[-1]["pass"] == 1, "exit 要带上 pass"
+    # 没处于冲刺时：一个字都不写
+    lg2 = M._ThroughLog(str(tmp_path / "t2.jsonl"))
+    lg2.write({"phase": "ALIGN", "action": "hold"}, 0, 0, "gate")
+    lg2.close()
+    assert not (tmp_path / "t2.jsonl").exists(), "非冲刺段不该创建文件"
+
+
+def test_through_log_counts_creep_through_too():
+    """门口超时兜底的 `creep_through` 也算冲刺段（两种出口都要被记下来）。"""
+    import main as M
+    assert M._ThroughLog._is_through({"phase": "ALIGN", "action": "creep_through"}) is True
+    assert M._ThroughLog._is_through({"phase": "THROUGH", "action": "through"}) is True
+    assert M._ThroughLog._is_through({"phase": "APPROACH", "action": "forward_creep"}) is False
+
+
+# --------------------------------------------------------------------------- #
+# through 专表（★ 2026-10-07 用户要求：**单独一份记录 through 的日志**）
+# --------------------------------------------------------------------------- #
+def test_through_log_records_only_the_dash_as_segments(tmp_path):
+    """★ through 专表：**只记冲刺段**，每次冲刺自成一段（enter → 逐帧 → exit）。
+
+    为什么单独一份：任务日志几千帧、冲刺只占十几~几十帧；单独成段才能把每一次穿门拎出来
+    对比（哪次走 `z<=cross`、哪次走门口超时兜底、各用了几帧多久）。
+    """
+    import json
+    import main as M
+    p = tmp_path / "t.jsonl"
+    lg = M._ThroughLog(str(p))
+    seq = [("ALIGN", "center", 0), ("APPROACH", "forward_creep", 0),
+           ("THROUGH", "through", 0), ("THROUGH", "through", 0),
+           ("THROUGH", "through", 1), ("ALIGN", "hold", 1)]
+    for i, (ph, act, ps) in enumerate(seq):
+        lg.write({"phase": ph, "action": act, "z": 1.0, "pass": ps}, 1000 + i * 100, i, "gate")
+    lg.close()
+    recs = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert [r["evt"] for r in recs] == ["enter", "frame", "frame", "exit"], \
+        "非冲刺帧不该写进来；冲刺段必须是 enter->frame...->exit"
+    assert recs[0]["frames_in_through"] == 1 and recs[-2]["frames_in_through"] == 3
+    assert recs[-1]["dur_ms"] == 300, "exit 要给出本段时长"
+    assert recs[-1]["pass"] == 1, "exit 要带上 pass"
+    lg2 = M._ThroughLog(str(tmp_path / "t2.jsonl"))
+    lg2.write({"phase": "ALIGN", "action": "hold"}, 0, 0, "gate")
+    lg2.close()
+    assert not (tmp_path / "t2.jsonl").exists(), "非冲刺段不该创建文件"
+
+
+def test_through_log_counts_creep_through_too():
+    """门口超时兜底的 `creep_through` 也算冲刺段（两种出口都要被记下来）。"""
+    import main as M
+    assert M._ThroughLog._is_through({"phase": "ALIGN", "action": "creep_through"}) is True
+    assert M._ThroughLog._is_through({"phase": "THROUGH", "action": "through"}) is True
+    assert M._ThroughLog._is_through({"phase": "APPROACH", "action": "forward_creep"}) is False

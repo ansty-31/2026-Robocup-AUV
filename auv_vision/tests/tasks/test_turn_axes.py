@@ -272,7 +272,7 @@ def test_extra_floor_blocks_surfacing_at_a_higher_threshold(monkeypatch):
 
 
 def test_extra_floor_can_never_loosen_the_site_floor(monkeypatch):
-    """**不变量**：传 0 / 更小 / 非法值都不会放宽保护 —— 有效下限恒 ≥ cfg 的 0.55。"""
+    """**不变量**：传 0 / 更小 / 非法值都不会放宽保护 —— 有效下限恒 ≥ cfg 的现场定死值。"""
     sent = []
     u = _depth_uart(monkeypatch, sent, 0.30)
     base = float(S.comm.depth_guard.min_depth_m)

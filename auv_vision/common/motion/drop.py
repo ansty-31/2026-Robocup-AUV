@@ -28,28 +28,15 @@ import base.cfg.settings as S
 
 from common.motion.axis import (ZERO_DOF, AxisMove, TimedDof, axis_deg,
                                level_relative_deg, roll_dump_deg, task_node)
-from common.cfg.cfgnode import sub
+from common.cfg.cfgnode import sub, req, req_flag, req_node, MissingCfg
 
-# 兜底步骤表（= 当前 cfg/comm.yaml 的 `comm.grab.drop.<name>.steps`；删掉 cfg 键用这里的）
-_D_STEPS = {
-    # 任务三：倒掉错球（用户 2026-10-06 口径：右移2s → 横倾倒出 → 左移2s回来 → 后退2s）
-    "dump": [
-        {"name": "右移", "s": 2.0, "sway": 0.30},
-        {"name": "横倾倒出", "tilt": True},
-        {"name": "保持横倾", "s": 1.0},
-        {"name": "回正", "level": True},
-        {"name": "左移回位", "s": 2.0, "sway": -0.30},
-        {"name": "后退", "s": 2.0, "surge": -0.30},
-        {"name": "停稳", "s": 1.0},
-    ],
-    # 任务四：放球（横倾 30° → 断动力 3s；**不回正、不后退** —— 放完就结束）
-    "release": [
-        {"name": "横倾放球", "tilt": True},
-        {"name": "断动力停住", "s": 3.0},
-    ],
-}
+# ★ 2026-10-07 用户定：**删掉兜底步骤表** —— `comm.motion.drop.<name>.steps` 必须写全，
+#   缺则报名字（`_steps_of()`）。改动作序列只需动 cfg 一处。
 # `comm.grab.drop` 段的兜底
-_D_DROP = dict(depth_floor_m=1.0, restore_floor=True)
+_K_DROP = (
+    "depth_floor_m",
+    "restore_floor"
+)
 # 步骤里允许的 DOF 键（拼错就当 0，别静默当成功）
 _DOF_KEYS = ("surge", "sway", "heave", "yaw")
 
@@ -74,7 +61,7 @@ def _steps_of(which, prefix="grab"):
     steps = _pick(["comm.%s.drop.%s.steps" % (prefix, which),
                    "comm.motion.drop.%s.steps" % which])
     if not isinstance(steps, list) or not steps:
-        return [dict(s) for s in _D_STEPS.get(which, _D_STEPS["dump"])]
+        raise MissingCfg("cfg 缺 comm.motion.drop.steps.%s（代码已无兜底）" % which)
     return [dict(s) for s in steps if isinstance(s, dict)]
 
 
@@ -96,10 +83,10 @@ class BallDropSequence(object):
         g = S.get("comm.motion.drop", None) or {}             # 共用默认
         floor = d.get("depth_floor_m")
         if floor is None:
-            floor = g.get("depth_floor_m", _D_DROP["depth_floor_m"])
+            floor = req(g, "depth_floor_m")
         self.depth_floor_m = float(floor)
         self.restore_floor = bool(d.get("restore_floor",
-                                       g.get("restore_floor", _D_DROP["restore_floor"])))
+                                       req_flag(g, "restore_floor")))
         self.state = self.IDLE
         self.why = ""
         self.i = 0

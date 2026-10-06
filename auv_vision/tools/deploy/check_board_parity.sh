@@ -206,6 +206,7 @@ if [ "$BOARD" = "1" ]; then
          -o -name '*.txt' \) \
       -not -path './.*' \
       -not -path './bak/*' -not -path './log/*' -not -path './rec/*' \
+      -not -path './tools/presets/*' \
       -not -path './models/*' -not -path '*/__pycache__/*' -not -name '*.pyc' \
       -not -name 'check_board_parity.sh' -not -name 'board_parity.md5' \
       -not -name 'deploy_to_board.sh' -not -name 'tidy_board_bak.sh' -not -name 'board_forks.txt' \

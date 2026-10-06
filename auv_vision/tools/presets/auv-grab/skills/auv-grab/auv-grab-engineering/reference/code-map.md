@@ -20,7 +20,7 @@ auv_vision/auv_vision/
 ├── base/cfg/settings.py           # YAML → S.vision.* / S.comm.*（`S.get(path, default)` + 点号访问）
 ├── base/hw/uart.py                # 11B 帧组帧与下发；夹爪通道**不存在**，要新增先改这里 + cfg
 ├── common/vision/detector.py      # Det / DetectorBase / DetectorHub（register / detect_list / detect）
-└── tests/tasks/grab/test_cv_ball.py   # 18 例：感知层唯一的测试
+└── tests/tasks/handling/test_cv_ball.py   # 18 例：感知层唯一的测试
 ```
 
 ## 2. 数据流（现在能跑通的那一段）
@@ -130,7 +130,7 @@ if name == "grab":
 ```bash
 cd /home/ansty/RDKX5/auv_vision/auv_vision
 
-python3 -m pytest tests/tasks/grab -q          # 18 例（感知层：检测 + 跟踪 + cfg 兜底）
+python3 -m pytest tests/tasks/handling -q          # 18 例（感知层：检测 + 跟踪 + cfg 兜底）
 python3 -m pytest tests/ -q                    # 全工程 191 例
 
 # 板端看效果（不发运动指令）

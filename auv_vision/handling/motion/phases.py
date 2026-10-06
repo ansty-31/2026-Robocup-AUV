@@ -6,8 +6,9 @@ from handling.motion.params import place_cfg
 
 from handling.motion.actions import _cvnode, _clip, _dx_norm, _dy_norm, _ratio_radius
 
-from common.motion.search_scan import Scan, telemetry_yaw
-from common.motion.axis import AxisMove, EnsureDepth, TimedDof, _D_DIP, _D_RISE, action_cfg, axis_deg, grab_cfg, grab_node, level_relative_deg, pitch_up_deg
+# ★ 任务三/四的 search = **纯左右平移扫视**（用户 2026-10-06 定；不用 search_scan 的 yaw 慢扫）
+from common.motion.search_sweep import Sweep
+from common.motion.axis import AxisMove, EnsureDepth, TimedDof, _K_DIP, _K_RISE, action_cfg, axis_deg, grab_cfg, grab_node, level_relative_deg, pitch_up_deg
 from common.motion.drop import BallDropSequence
 from common.motion.axis import AxisMove, TimedDof, ZERO_DOF, axis_deg, level_relative_deg, task_node
 from handling.motion.params import (PH_GRAB_PITCH_UP,
@@ -20,11 +21,11 @@ from handling.motion.params import (PH_GRAB_PITCH_UP,
                                   PH_GRAB_RISE,
                                   PH_GRAB_VERIFY,
                                   PH_GRAB_DUMP,
-                                  _D_CENTER,
-                                  _D_APPROACH,
-                                  _D_ALIGN,
-                                  _D_VERIFY,
-                                  _D_RETRY,
+                                  _K_CENTER,
+                                  _K_APPROACH,
+                                  _K_ALIGN,
+                                  _K_VERIFY,
+                                  _K_RETRY,
                                   PH_PLACE_TRANSPORT,
                                   PH_PLACE_RELEASE,
                                   PH_PLACE_STOP,
@@ -66,7 +67,7 @@ class GrabPhases(object):
             self._ref_pitch = self._move.ref_deg      # ★ 回水平的基准（动作前的遥测）
             self._pitched = True
             self._phase = PH_GRAB_SEARCH
-            self._scan.reset(telemetry_yaw(self.uart))
+            self._sweep.reset(now_ms)
             self.log("[GRAB] 已抬头；水平基准 pitch=%s，开始扫描"
                      % ("n/a" if self._ref_pitch is None else "%.2f°" % self._ref_pitch))
         elif st == AxisMove.FAILED:
@@ -80,11 +81,12 @@ class GrabPhases(object):
             self._ensure_pids()
             self._pid_yaw.reset()
             return 0.0, 0.0, 0.0, 0.0
-        yaw = self._scan.step(now_ms, telemetry_yaw(self.uart))
-        return 0.0, 0.0, 0.0, _clip(yaw)
+        # ★ 只左右平移扫视：**不转 yaw**（抬头时转 yaw 会让目标绕圈跑；且不依赖 yaw 遥测）
+        sway = _clip(self._sweep.step(now_ms))
+        return 0.0, sway, 0.0, 0.0
 
     def _step_center(self, now_ms, dx):
-        c = _cvnode("center_yaw", _D_CENTER)
+        c = _cvnode("center_yaw")
         yaw = _clip(self._pid_yaw.update(dx, now_ms))
         if abs(dx) <= float(c["eps"]):
             self._hit_cnt += 1
@@ -97,7 +99,7 @@ class GrabPhases(object):
         return 0.0, 0.0, 0.0, yaw
 
     def _step_approach(self, now_ms, dx, ratio, growth):
-        a = _cvnode("approach", _D_APPROACH)
+        a = _cvnode("approach")
         if ratio >= float(a["slow_ratio"]) and growth <= float(a["growth_eps"]):
             surge = float(a["surge_slow"])
         else:
@@ -138,7 +140,7 @@ class GrabPhases(object):
 
     def _step_align(self, now_ms, dx, dy):
         """**dx→sway、dy→surge，两通道都轻微（抗水波），不用 yaw**（用户 2026-10-06 定）。"""
-        l = _cvnode("align_level", _D_ALIGN)
+        l = _cvnode("align_level")
         sway = _clip(self._pid_asw.update(dx, now_ms))
         surge = _clip(self._pid_asu.update(dy, now_ms))
         if abs(dx) <= float(l["eps_x"]) and abs(dy) <= float(l["eps_y"]):
@@ -146,7 +148,7 @@ class GrabPhases(object):
             if self._align_cnt >= int(l["confirm_frames"]):
                 self._align_cnt = 0
                 self._phase = PH_GRAB_DIP
-                c = action_cfg("dip", _D_DIP)
+                c = action_cfg("dip")
                 self._timed = TimedDof(dur_s=c["dur_s"], name="下压", heave=c["heave"],
                                        log=self.log)
                 return self._timed.dof
@@ -157,7 +159,7 @@ class GrabPhases(object):
     def _step_dip(self, now_ms):
         if self._timed.step(now_ms) == TimedDof.DONE:
             self._phase = PH_GRAB_RISE
-            c = action_cfg("rise", _D_RISE)
+            c = action_cfg("rise")
             self._timed = TimedDof(dur_s=c["dur_s"], name="上升", heave=c["heave"],
                                    log=self.log)
         return self._timed.dof \
@@ -166,7 +168,7 @@ class GrabPhases(object):
     def _step_rise(self, now_ms):
         if self._timed.step(now_ms) == TimedDof.DONE:
             self._attempts += 1
-            if not bool(_cvnode("verify", _D_VERIFY)["enable"]):
+            if not bool(_cvnode("verify")["enable"]):
                 return self._accept("verify_off")     # 关掉验色 = 收下（标定前的台架档）
             self._phase = PH_GRAB_VERIFY
             self._verify_cnt = 0
@@ -180,8 +182,8 @@ class GrabPhases(object):
         `max_dumps` 是"倒球重来"的次数上限（安全阀：绝不无限循环）。
         `percent is None`（帧/ROI 非法）**不等于"不是目标色"** ⇒ 没有证据就按"没夹到"倒掉重来。
         """
-        r = _cvnode("retry", _D_RETRY)
-        v = _cvnode("verify", _D_VERIFY)
+        r = _cvnode("retry")
+        v = _cvnode("verify")
         if bool(r["assume_ok"]) and self._attempts >= int(r["assume_ok_after"]):
             return self._accept("assumed_ok")
         if percent is not None and float(percent) >= float(v["red_percent_min"]):
@@ -214,7 +216,7 @@ class GrabPhases(object):
             self._ensure = EnsureDepth(log=self.log)
             self._ema = None
             self._hit_cnt = 0
-            self._scan.reset(telemetry_yaw(self.uart))
+            self._sweep.reset(now_ms)
             self.log("[GRAB] 回到抬头，重新进夹取")
             return 0.0, 0.0, 0.0, 0.0
         return dof

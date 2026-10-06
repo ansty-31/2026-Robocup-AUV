@@ -29,9 +29,13 @@ TURN_TIMEOUT="${AUV_TURN_TIMEOUT:-20}"
 BALL_SKIP="${AUV_BALL_SKIP:-0}"
 REV_ON_FAIL="${AUV_REV_ON_FAIL:-0}"
 TAG="${AUV_LOG_TAG:-run}"
-BALL_LOG="${AUV_BALL_LOG:-log/${TAG}ball.jsonl}"
-GATE_LOG_PREFIX="${AUV_GATE_LOG_PREFIX:-log/${TAG}gate}"
-LOG="${AUV_DOF_LOG:-/tmp/${TAG}path.csv}"
+# ★ 2026-10-07 用户定：**一趟一个目录**（同 run_gate.sh；原来跨趟同名会被截断）
+RUN_DIR="${AUV_LOG_DIR:-log/${TAG}_$(date +%m%d_%H%M)}"
+if [ -e "${RUN_DIR}" ]; then _n=1; while [ -e "${RUN_DIR}_${_n}" ]; do _n=$((_n+1)); done; RUN_DIR="${RUN_DIR}_${_n}"; fi
+mkdir -p "${RUN_DIR}"
+BALL_LOG="${AUV_BALL_LOG:-${RUN_DIR}/ball.jsonl}"
+GATE_LOG_PREFIX="${AUV_GATE_LOG_PREFIX:-${RUN_DIR}/gate}"
+LOG="${AUV_DOF_LOG:-${RUN_DIR}/path.csv}"
 
 # 清理上次残留：孤儿 main.py 会占住相机/串口，下次启动像"锁死"
 if pkill -f "[p]ython3 main.py --task" 2>/dev/null; then
@@ -45,7 +49,7 @@ echo "   待机 ${WAIT_S}s | 下潜 ${DESCEND_S}s | 前进 ${FWD_S}s | 回退 ${
 echo "   回退后前进 ${POST_FWD_S}s @ ${POST_FWD_SURGE} | 过门 ${#TURN_ANGLES[@]} 次(单门)"
 echo "   转角序列（现场代填，正=左转/负=右转）：${TURN_ANGLES[*]}"
 [ "${AUV_SIM_MODE}" = "1" ] && echo " ⚠️ AUV_SIM_MODE=1：只打印指令，不会真正驱动电机！"
-echo " 日志：撞球 ${BALL_LOG} ｜ 过门 ${GATE_LOG_PREFIX}_<N>.jsonl ｜ 轨迹 ${LOG}"
+echo " 日志：本趟目录 ${RUN_DIR}/（撞球 ball.jsonl ｜ 过门 gate_<N>.jsonl 每个门一份 ｜ 轨迹 path.csv）"
 echo "=================================================================="
 
 # ---- 通用：定时发一组 DOF（结束时硬停回中位）--------------------------------

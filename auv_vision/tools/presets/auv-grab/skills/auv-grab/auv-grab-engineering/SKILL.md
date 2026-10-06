@@ -26,7 +26,7 @@ sed -n '/^grab:/,/^[a-z]/p' cfg/vision.yaml
 grep -n "grab" cfg/comm.yaml
 
 # 现有测试与它们实际断言什么（不要只数条数）
-python3 -m pytest tests/tasks/grab -q
+python3 -m pytest tests/tasks/handling -q
 python3 -m pytest tests/ -q | tail -3
 
 # 串口通道占用（夹爪要落在哪里，先看清谁占了什么）
@@ -80,7 +80,7 @@ grep -n "def build_frame_from_dof\|def build_turn_frame\|btn_values" base/hw/uar
 | 夹取决策层 | ❌ 没有 | 相位机、运动链、时限管理全部待建 |
 | 小环感知 | ❌ 没有 | 工程与文档里**零记录**，第一步是找用户要实物信息与素材 |
 | 夹爪指令 | ❌ 没有 | 11B 帧的 byte8/9 已被转角/取消占用、byte10 是旋转编号；夹爪通道待定义 |
-| 测试 | ⚠️ 仅感知 | `tests/tasks/grab` 18 例（全工程 191 例）——决策层一行测试都没有 |
+| 测试 | ⚠️ 仅感知 | `tests/tasks/handling` 18 例（全工程 191 例）——决策层一行测试都没有 |
 
 **红线**：不要把这张表里的 ❌ 当成"顺手补一下"就动手。每一项都要先有判据、再有代码。
 

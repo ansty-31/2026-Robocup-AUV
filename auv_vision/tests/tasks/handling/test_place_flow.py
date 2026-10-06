@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""tests/tasks/place/test_place_flow.py — 任务四「放置」相位机（`handling/handling_task.py`）。
+"""tests/tasks/handling/test_place_flow.py — 任务四「放置」相位机（`handling/handling_task.py`）。
 
 验收重点（用户 2026-10-06 口径）：运输**保持 roll 平衡**（避免球滚出）→ 到点 → 横倾放球
 → 停动力 3s；以及安全闸/限深/急停/无遥测的边界。**离线用例，不证明水中效果。**
@@ -36,7 +36,8 @@ class FakeUart(object):
 
     @property
     def effective_min_depth_m(self):
-        return max(0.55, self.extra_min_depth_m)
+        # 与真件同源：max(cfg 的 site 值, 任务级下限)，别写死米数
+        return max(float(S.comm.depth_guard.min_depth_m), self.extra_min_depth_m)
 
     def set_extra_min_depth(self, m):
         self.extra_min_depth_m = max(0.0, float(m))
@@ -145,7 +146,7 @@ def test_depth_floor_is_raised_and_restored(monkeypatch):
     _drive(task, uart)
     assert 1.0 in uart.floor_calls
     assert uart.extra_min_depth_m == pytest.approx(0.0)
-    assert float(S.comm.depth_guard.min_depth_m) == pytest.approx(0.55)
+    assert float(S.comm.depth_guard.min_depth_m) == pytest.approx(0.50)
 
 
 def test_missing_roll_telemetry_stops_instead_of_driving_tilted(monkeypatch):

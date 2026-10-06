@@ -5,13 +5,15 @@ from __future__ import annotations
 
 import numpy as np
 
-from common.cfg.cfgnode import flag, num, sub
+from common.cfg.cfgnode import flag, num, sub, req, req_flag, req_node, MissingCfg
 
 # 缺键兜底：**必须与 cfg/vision.yaml 同值**（用例 test_gate_postproc 的守卫守着）
-_D_DET = dict(conf=0.5)                  # 候选框 score 阈值（只作用于 gate，不动共用的 model.score_threshold）
-_D_POST = dict(edge_tol=0.10, min_edges=2, geom_check=True, lr_norm=True)
-_D_SELECT = dict(mode="near")            # near(规范) | corner(旧行为)
-_D_VMIN = 0.8                            # 角点可信下限的兜底（真值 = vision.gate.keypoint.conf_thr）
+# 候选框 score 阈值：**只作用于 gate**，不动共用的 model.score_threshold。
+# ★ 2026-10-07：无代码兜底 —— 由 cfg 必填（缺则报名字）
+_K_POST = ("edge_tol", "min_edges", "geom_check", "lr_norm")
+_K_SELECT = ("mode",)                    # near(规范) | corner(旧行为)
+_K_DET = ("conf",)
+_K_KEYPOINT = ("conf_thr",)
 
 _BOOL_KEYS = ("geom_check", "lr_norm")
 
@@ -29,13 +31,13 @@ def det_cfg(conf=None, node=None):
         except Exception:
             node = None
     if isinstance(node, dict) and node.get("conf") is not None:
-        return num(node, "conf", _D_DET["conf"])
+        return req(node, "conf")
     try:
         import base.cfg.settings as S
         v = S.get("vision.model.score_threshold", None)
-        return float(v) if v is not None else _D_DET["conf"]
-    except Exception:
-        return _D_DET["conf"]
+        return float(v) if v is not None else req(node, "conf")
+    except Exception as e:
+        raise MissingCfg("cfg 缺 vision.gate.detect.conf（代码已无兜底）：%s" % e)
 
 def postproc_cfg(node=None):
     """读 `vision.gate.postproc`（缺键 → 代码默认，不抛异常）。"""
@@ -46,11 +48,11 @@ def postproc_cfg(node=None):
         except Exception:
             node = None
     if not isinstance(node, dict):
-        return dict(_D_POST)
-    return dict(edge_tol=num(node, "edge_tol", _D_POST["edge_tol"]),
-                min_edges=int(num(node, "min_edges", _D_POST["min_edges"])),
-                geom_check=flag(node, "geom_check", _D_POST["geom_check"]),
-                lr_norm=flag(node, "lr_norm", _D_POST["lr_norm"]))
+        raise MissingCfg("cfg 缺 vision.gate.postproc（代码已无兜底）")
+    return dict(edge_tol=req(node, "edge_tol"),
+                min_edges=int(req(node, "min_edges")),
+                geom_check=req_flag(node, "geom_check"),
+                lr_norm=req_flag(node, "lr_norm"))
 
 def select_cfg(node=None):
     """读 `vision.gate.select`（缺键 → `mode: near`，规范 §4）。"""
@@ -77,9 +79,9 @@ def v_min(conf_thr=None):
     try:
         import base.cfg.settings as S
         v = S.get("vision.gate.keypoint.conf_thr", None)
-        return float(v) if v is not None else _D_VMIN
-    except Exception:
-        return _D_VMIN
+        return float(v) if v is not None else req(node, "conf_thr")
+    except Exception as e:
+        raise MissingCfg("cfg 缺 vision.gate.keypoint.conf_thr（代码已无兜底）：%s" % e)
 
 def trusted_mask(det, conf_thr=None):
     """(K,) bool：本实例里**可信**的角点。无角点信息 → 全 False。"""

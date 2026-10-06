@@ -49,43 +49,88 @@ def flag(node, key, default=False):
     return str(v).strip().lower() not in _FALSE
 
 
-def pid_kw(node, defaults):
-    """按默认表造 PID 构造参数：`(kp, ki, kd, out_max, deadzone)`。"""
-    d = merge(node, defaults)
-    om = num(d, "out_max", defaults["out_max"])
-    return dict(kp=num(d, "kp", defaults["kp"]), ki=num(d, "ki", defaults["ki"]),
-                kd=num(d, "kd", defaults["kd"]), out_min=-om, out_max=om,
-                deadzone=num(d, "deadzone", defaults["deadzone"]))
+def pid_kw(node, where=""):
+    """按 **cfg 必填**造 PID 构造参数：`(kp, ki, kd, out_max, deadzone)`。
+
+    ★ 2026-10-07 用户定：**彻底删掉兜底** —— 五个键一个都不能缺（缺则报名字）。
+    `where` 只用于报错时指路（如 `comm.gate.motion.pid_sway`）。
+    """
+    om = req(node, "out_max")
+    out = dict(kp=req(node, "kp"), ki=req(node, "ki"), kd=req(node, "kd"),
+               out_min=-om, out_max=om, deadzone=req(node, "deadzone"))
+    return out
 
 
-MOTION_DEFAULTS = dict(
-    # 共用 PID（同一船/同一推进器；量纲都是"归一化偏差 ±1"）
-    pid_sway=dict(kp=8.0, ki=0.01, kd=0.05, out_max=0.55, deadzone=0.05),
-    pid_heave=dict(kp=1.0, ki=0.0, kd=0.15, out_max=1.0, deadzone=0.04),
-    surge_fast=0.35,
-    surge_slow=0.15,
-    loss_inertia_surge=0.25,
-    search_yaw=0.3,
-)
+# ★ 2026-10-07 用户定：**`MOTION_DEFAULTS` 已彻底删除**（兜底机制不再存在）。
+#   共用运动参数一律**必填**，缺键报名字；键名清单见 `_K_MOTION_*`（各调用方各自校验）。
 
 
 def motion_node(key):
-    """取共用运动参数里的**表**（如 `pid_sway`）；缺键 → MOTION_DEFAULTS[key]。"""
+    """取共用运动参数里的**表**（如 `pid_sway`）：**必填**，缺则报 `comm.motion.<key>`。"""
     raw = motion(key, None)
-    return merge(raw, MOTION_DEFAULTS[key])
+    if not isinstance(raw, dict):
+        raise MissingCfg("cfg 缺 comm.motion.%s（代码已无兜底）" % key)
+    return raw
 
 
 def motion_num(key):
-    """取共用运动参数里的**标量**（如 `surge_fast`）；缺键 → MOTION_DEFAULTS[key]。"""
-    return num({"v": motion(key, None)}, "v", MOTION_DEFAULTS[key])
+    """取共用运动参数里的**标量**（如 `surge_fast`）：**必填**，缺则报 `comm.motion.<key>`。"""
+    v = motion(key, None)
+    if v is None:
+        raise MissingCfg("cfg 缺 comm.motion.%s（代码已无兜底）" % key)
+    return float(v)
 
 
 def motion_pid(key):
-    """取共用运动参数里的 **PID 参数**（如 `pid_sway`）；缺键 → MOTION_DEFAULTS[key]。"""
-    return pid_kw(motion_node(key), MOTION_DEFAULTS[key])
+    """取共用运动参数里的 **PID 参数**（如 `pid_sway`）：**必填**。"""
+    return pid_kw(motion_node(key), "comm.motion.%s" % key)
 
 
 def motion(path, default=None):
     """读 `comm.motion.<path>`（ball / gate / 转向脚本共用的那份）。"""
     import base.cfg.settings as S
     return S.get("comm.motion." + path, default)
+
+
+# ---------------------------------------------------------------- 「必填」访问器
+# ★ 2026-10-07 用户定：**删掉代码里的兜底默认值**（改一个参数要同步两处，纯鸡肋）。
+#   代之以"**必填**"语义：cfg 缺键 ⇒ **当场报出键名**，而不是静默用代码里的默认值。
+#   为什么必须"报错"而不是"返回 None/0"：静默兜底会让 `z.cross` 缺键变成 0
+#   ⇒ 永远不冲刺；`keypoint.conf_thr` 缺键变成 0 ⇒ 全角点可信。**没人报错，船照跑**。
+
+class MissingCfg(KeyError):
+    """cfg 必填项缺失/非法（代码已无兜底，必须在 cfg/*.yaml 里补上）。"""
+
+
+def _where(node):
+    """尽力给出"这个节点是谁"，便于按报错直接定位 yaml 行。"""
+    for a in ("_path", "path", "name"):
+        v = getattr(node, a, None) or (node.get(a) if isinstance(node, dict) else None)
+        if v:
+            return str(v)
+    return "?"
+
+
+def req(node, key):
+    """**必填**数值：缺失/非数值 ⇒ 抛 `MissingCfg`（报出键名与位置）。"""
+    if not isinstance(node, dict) or node.get(key) is None:
+        raise MissingCfg("cfg 必填缺参数：%s.%s（代码已无兜底，请写进 cfg/*.yaml）"
+                         % (_where(node), key))
+    try:
+        return float(node[key])
+    except (TypeError, ValueError):
+        raise MissingCfg("cfg 参数 %s.%s 不是数值：%r" % (_where(node), key, node[key]))
+
+
+def req_flag(node, key):
+    """**必填**布尔：缺失 ⇒ 抛 `MissingCfg`；有值则按 `flag` 的宽松规则解析。"""
+    if not isinstance(node, dict) or key not in node:
+        raise MissingCfg("cfg 必填开关缺失：%s.%s（代码已无兜底）" % (_where(node), key))
+    return flag(node, key, False)
+
+
+def req_node(node, key):
+    """**必填**子节点：缺失/不是 dict ⇒ 抛 `MissingCfg`。"""
+    if not isinstance(node, dict) or not isinstance(node.get(key), dict):
+        raise MissingCfg("cfg 必填子节点缺失：%s.%s（代码已无兜底）" % (_where(node), key))
+    return node[key]

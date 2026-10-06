@@ -24,11 +24,16 @@ from common.vision.detector import DetectorHub
 from task.ball import BallTask
 from gate.gate_task import GateTask
 from handling.handling_task import HandlingTask
+from handling.percept.grab_detector import build_grab_backend
 from gate.percept.gate_detector import build_gate_backend
 
 TASK_CLASS = {"ball": BallTask, "gate": GateTask}
 # 夹取/放置是**同一个调度**的两种模式（`handling/`）：名字 → mode
 TASK_MODE = {"grab": "grab", "place": "place", "handling": "full"}
+# hub 注册/查询用的键 = `HandlingTask.name`（**与三种 CLI 名无关**）
+HANDLING_NAME = HandlingTask.name
+# CLI 允许的任务名（`--task` 的校验与提示都用它）
+TASK_NAMES = tuple(sorted(set(TASK_CLASS) | set(TASK_MODE)))
 
 
 def build_task(name, uart, hub, w, h):
@@ -121,22 +126,182 @@ def psi_line(info, tol_deg=8.0):
         col = (0, 140, 255)
     return txt, col
 
+class _ThroughLog(object):
+    """★ 2026-10-07 用户定：**单独一份 through 日志** —— 只记"冲刺过门"那一段。
+
+    为什么单独一份：任务日志几千帧，冲刺只占其中十几~几十帧；把每一次冲刺**单独成段**
+    （`enter` / 逐帧 `frame` / `exit` 各一行），复盘时直接 `grep '"evt":"enter"'` 就能
+    把每一次穿门拎出来对比（哪次是 `z≤cross` 触发的、哪次是门口超时兜底的、那次用了多久）。
+
+    开关（都不设 = 不记）：
+      · `AUV_THROUGH_LOG=<路径>.jsonl`  显式指定
+      · 设了 `AUV_TASK_LOG` 时**自动派生**：`<任务日志去掉后缀>_through.jsonl`
+        （即"记任务日志就顺带记 through"，不用额外记参数）
+    """
+
+    def __init__(self, path=None):
+        self.path = path
+        self._fh = None
+        self._in = False          # 本帧是否处于 THROUGH
+        self._t0 = None
+        self._n = 0
+
+    @staticmethod
+    def _is_through(info):
+        """THROUGH 的两种形态都算：正常冲刺 `through` 与门口兜底 `creep_through`。"""
+        return (str(info.get("phase", "")) == "THROUGH"
+                or str(info.get("action", "")) in ("through", "creep_through"))
+
+    def write(self, info, now_ms, frame_seq, task_name):
+        if self.path is None:
+            return
+        try:
+            cur = self._is_through(info)
+            if not cur and not self._in:
+                return                                    # 非冲刺段：一个字都不写
+            if self._fh is None:
+                d = os.path.dirname(self.path)
+                if d:
+                    os.makedirs(d, exist_ok=True)
+                self._fh = open(self.path, "w", encoding="utf-8", buffering=1)
+                print("[MAIN] through 日志 -> %s" % self.path)
+            evt = "frame"
+            if cur and not self._in:
+                evt = "enter"
+                self._t0 = now_ms
+                self._n = 0
+            elif self._in and not cur:
+                evt = "exit"
+            if cur:
+                self._n += 1
+            rec = {"evt": evt, "t": round(now_ms / 1000.0, 3), "frame": frame_seq,
+                   "task": task_name, "frames_in_through": self._n}
+            if evt == "exit" and self._t0 is not None:
+                rec["dur_ms"] = int(now_ms - self._t0)
+                rec["pass"] = info.get("pass")
+            for k, v in info.items():
+                if isinstance(v, bool) or v is None or isinstance(v, (int, float, str)):
+                    rec[k] = v
+            self._fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            self._in = cur
+        except Exception as e:
+            print("[MAIN] through 日志写入失败：%s ⇒ 关闭它，任务继续" % e)
+            self.close()
+
+    def close(self):
+        if self._fh is not None:
+            try:
+                self._fh.close()
+            finally:
+                self._fh = None
+
+
+class _TaskRecorder(object):
+    """**任务过程中的录像**（2026-10-06 用户要求）。
+
+    把任务主循环每帧（有叠加就用叠加后的画面）写成 **.mjpeg** —— 零转码，`ffplay`/`ffmpeg` 直接看，
+    和 pc 端 `pc_recorder.py` 的产物同格式。
+
+    开关（环境变量，任选一个；都不设 = 不录）：
+      · `AUV_RECORD=<路径>.mjpeg`  —— 显式指定文件
+      · `AUV_RECORD_DIR=<目录>`    —— 自动命名 `<目录>/auv_<任务>_<时间戳>.mjpeg`
+    画质：`AUV_RECORD_Q`（默认 85，0~100）。
+
+    ⚠️ 逐帧同步写盘 ⇒ 会占 I/O。默认画质 85、720p 下约 60~90 KB/帧，**跑一趟 10 分钟 ≈ 数 GB**，
+       上板前先确认 eMMC/SD 余量。
+    """
+
+    def __init__(self, path=None, quality=85):
+        self.path = path
+        self.quality = int(quality)
+        self._fh = None
+        self.frames = 0
+        self._warned = False
+
+    def write(self, frame):
+        if self.path is None or frame is None:
+            return
+        try:
+            if self._fh is None:
+                d = os.path.dirname(self.path)
+                if d:
+                    os.makedirs(d, exist_ok=True)
+                self._fh = open(self.path, "wb")
+                print("[REC] 任务录像开始 → %s" % self.path)
+            ok, enc = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.quality])
+            if ok:
+                self._fh.write(enc.tobytes())
+                self.frames += 1
+        except Exception as e:                     # 录像绝不许拖垮任务
+            if not self._warned:
+                self._warned = True
+                print("[REC] ⚠️ 录像写盘失败：%s ⇒ 关闭录像，任务继续" % e)
+            self.close()
+
+    def close(self):
+        if self._fh is not None:
+            try:
+                self._fh.close()
+            finally:
+                print("[REC] 任务录像结束：%s（%d 帧）" % (self.path, self.frames))
+                self._fh = None
+
+
+def _make_recorder(task_name="task"):
+    """按环境变量建录像器；都没设 ⇒ 返回一个什么都不做的实例。"""
+    q = int(os.environ.get("AUV_RECORD_Q", "85") or 85)
+    path = (os.environ.get("AUV_RECORD") or "").strip() or None
+    if path is None:
+        d = (os.environ.get("AUV_RECORD_DIR") or "").strip()
+        if d:
+            path = os.path.join(d, "auv_%s_%s.mjpeg"
+                                % (task_name, time.strftime("%Y%m%d_%H%M%S")))
+    return _TaskRecorder(path, q)
+
+
 class AppController(object):
     def __init__(self, tasks=None):
         self.uart = UartController()
         self.hub = DetectorHub()
         tasks = list(tasks or S.comm.tasks.enabled)
-        for name in tasks:                     # 装配层：gate 专用后端（mock/真实）
+        for name in tasks:                     # 装配层：任务专用后端（mock/真实）
             if name == "gate":
                 backend = build_gate_backend()
                 self.hub.register("gate", backend)
                 if backend is None:
                     print("[MAIN] ⚠️ gate 后端不可用：权重缺失/路径不对")
                     print("       先跑 python3 preview_detect.py --gate-kpt 自检权重")
-        self.cams = {"front": create_camera("front")}
-        self._down_feeder = DownCamFeeder() if "gate" in tasks else None
+            if name in TASK_MODE:
+                # ⚠️ hub 的键是**任务实例的 `name`**（`HandlingTask.name = "handling"`，
+                #    三种 CLI 名 grab/place/handling 都构造成同一个类）——**不是 CLI 名**。
+                #    注册错了会拿到 None ⇒ `detect_all` 静默退回 legacy（= 夹取用撞球那版 YOLO），
+                #    正是本项目明确否掉的路（BPU 留给门 keypoint）。`tests/tasks/handling` 钉着这点。
+                backend = build_grab_backend()
+                self.hub.register(HANDLING_NAME, backend)
+                if backend is None:
+                    print("[MAIN] ⚠️ 夹取/放置后端未注册（%s.detect.mode = mock）⇒ "
+                          "感知会退回 legacy 模型" % "vision.grab")
+                    print("       要跑纯 CV 红球检测：把 vision.yaml 的 grab.detect.mode 设回 cv")
+        # ⚠️ **只开本次任务真正要用的相机**：USB 相机是**独占 + 吃带宽**的设备，
+        #    板端同时开前视+下视两路 720p 时，**后开那路 read() 会返回 None**
+        #    （2026-10-06 实测：`--task grab` 开了前视 ⇒ 下视读不到帧 ⇒ `task.process()`
+        #     一帧都没被调用、状态机卡在 GRAB 空转、逐帧日志也不生成）。
+        #    所以按 `TASK_CAM` 反推"需要哪几路"，不需要的**一个都不开**。
+        need_cams = {TASK_CAM[t] for t in tasks}
+        self.cams = {}
+        for which in ("front", "down"):
+            if which in need_cams:
+                self.cams[which] = create_camera(which)
+        print("[MAIN] 本次开相机：%s（按 TASK_CAM 反推，不用的不开）"
+              % (sorted(self.cams) or "无"))
+        # 下视是**独占设备**：已经直接开了就不再起 `DownCamFeeder`（否则同设备两个 handle）。
+        self._need_down = "down" in self.cams
+        self._down_feeder = DownCamFeeder() if ("gate" in tasks and not self._need_down) else None
         if self._down_feeder is not None:
             self._down_feeder.start()
+        elif "gate" in tasks and self._need_down:
+            print("[MAIN] ⚠️ 下视已被本任务直接占用 ⇒ gate 的 wants_down 注入不可用"
+                  "（gate 的 down 默认关闭；要用得错开跑）")
         self.tasks = {}
         for name in tasks:
             cam = self.cams[TASK_CAM[name]]
@@ -149,8 +314,19 @@ class AppController(object):
         self._frame_seq = 0          # 采集序号（逐帧日志用）
         self._log_t = time.time()
         self._video_on = self._init_video()
+        self._rec = _make_recorder()          # ★ 任务过程录像（AUV_RECORD / AUV_RECORD_DIR）
         self._task_log_path = os.environ.get("AUV_TASK_LOG")
         self._task_log_fh = None
+        # ★ through 专表：显式给了用它，否则跟着任务日志自动派生（记任务日志就顺带记冲刺）
+        _tp = os.environ.get("AUV_THROUGH_LOG")
+        if not _tp and self._task_log_path:
+            _tp = (self._task_log_path[:-6] + "_through.jsonl"
+                   if self._task_log_path.endswith(".jsonl")
+                   else self._task_log_path + "_through.jsonl")
+        self._through_log = _ThroughLog(_tp)
+        # 相机连续无帧计数（超阈值 E-STOP；见任务分支里的注释）
+        self._noframe = 0
+        self._noframe_estop = int(os.environ.get("AUV_NOFRAME_ESTOP", "150") or 150)
 
     def check_ready(self, tasks):
         """返回不可用任务名列表（下水前自检：避免设备已入水却空跑）。"""
@@ -309,14 +485,37 @@ class AppController(object):
                     return self.state
                 self._advance(now_ms, "skip(%s)" % self.state)
             else:
-                frame = self.cams[TASK_CAM[STATE_TASK[self.state]]].read()
-                if frame is not None:
+                which = TASK_CAM[STATE_TASK[self.state]]
+                frame = self.cams[which].read()
+                if frame is None:
+                    # ⚠️ 相机没帧 ⇒ 本帧**连 `process()` 都不调用** ⇒ 任务自己的超时/丢目标逻辑
+                    #    整条走不到，状态机会在这里**永久空转**（2026-10-06 板端真踩：两路 USB 抢带宽）。
+                    #    所以这里自己兜底：先节流告警，连续太久就 E-STOP，绝不空转到天亮。
+                    self._noframe += 1
+                    if self._noframe % 30 == 1:
+                        print("[MAIN] ⚠️ 相机 %s 连续 %d 帧没帧（任务本帧没跑）"
+                              % (which, self._noframe))
+                    if self._noframe >= self._noframe_estop:
+                        print("[MAIN] ✗ 相机 %s 连续 %d 帧无帧 ⇒ 停手（E-STOP）"
+                              "；查相机占用/线缆/带宽（两路 USB 720p 会互抢）"
+                              % (which, self._noframe))
+                        self.uart.estop()
+                        self.state = S.STATE_ESTOP
+                        return self.state
+                else:
+                    if self._noframe:
+                        print("[MAIN] 相机 %s 恢复出帧（此前断了 %d 帧）" % (which, self._noframe))
+                    self._noframe = 0
                     self._frame_seq += 1          # 采集序号（只用于日志/叠加）
                     self._feed_down(task)
                     task.process(frame, now_ms)
                     self._log_task_frame(task, now_ms)
                     if self._video_on:
-                        self._draw(frame, getattr(task, "last_dets", None) or [])
+                        _img = self._draw(frame, getattr(task, "last_dets", None) or [])
+                    else:
+                        _img = None
+                    # ★ 任务过程录像（2026-10-06 用户要求）：有叠加就录叠加后的，否则录原帧
+                    self._rec.write(_img if _img is not None else frame)
                     if task.last_info["status"] == S.STATUS_DONE:
                         self._advance(now_ms, "%s_done(%s)"
                                       % (self.state, task.last_info["reason"]))
@@ -332,6 +531,8 @@ class AppController(object):
 
     def _log_task_frame(self, task, now_ms):
         """把本帧 last_info（phase/action/z/dx/dy/kpt/ratio/pass/…）写一行 JSON。"""
+        # ★ through 专表**独立于任务日志**：只设了 AUV_THROUGH_LOG 也要能写 ⇒ 放在早退之前
+        self._through_log.write(task.last_info, now_ms, self._frame_seq, task.name)
         if not self._task_log_path:
             return
         try:
@@ -401,6 +602,16 @@ class AppController(object):
         except Exception:
             pass
 
+        # ★ 任务过程录像收尾（把缓冲落盘、打印帧数）
+        try:
+            self._rec.close()
+        except Exception:
+            pass
+        # ★ through 专表收尾
+        try:
+            self._through_log.close()
+        except Exception:
+            pass
     def _model_desc(self):
         """本次运行实际会加载的权重（一眼确认没走错模型）。"""
         parts = []
@@ -450,14 +661,19 @@ def main():
     args = ap.parse_args()
     tasks = list(S.comm.tasks.enabled) if args.task == "all" else [args.task]
     for t in tasks:
-        if t not in TASK_CLASS:
-            print("未知任务: %s（可选 all|ball|gate）" % t)
+        if t not in TASK_NAMES:
+            print("未知任务: %s（可选 all|%s）" % (t, "|".join(TASK_NAMES)))
             sys.exit(2)
     ctrl = AppController(tasks)
     # 单任务运行（下水前）自检：后端/权重不可用就直接拒绝启动，避免入水后空跑
     bad = ctrl.check_ready(tasks) if len(tasks) == 1 else []
     if bad:
-        print("[MAIN] ✗ 任务 %s 的后端不可用，拒绝启动：%s" % (bad[0], ctrl._model_desc()))
+        print("[MAIN] ✗ 任务 %s 不可用，拒绝启动：%s" % (bad[0], ctrl._model_desc()))
+        task = ctrl.tasks.get(bad[0])
+        if task is not None and hasattr(task, "calibrated") and not task.calibrated:
+            seg = "place" if getattr(task, "mode", "") == "place" else "grab"
+            print("       原因：comm.%s.calibrated = false —— 占位值没标定完，"
+                  "机械闸拒绝下水（标定完再翻 true）" % seg)
         if "gate" in bad:
             print("       检查 cfg/vision.yaml → model.task_models.gate.path 是否存在，"
                   "并先跑 preview_detect.py --gate-kpt 自检")

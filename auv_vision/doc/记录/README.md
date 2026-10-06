@@ -31,3 +31,12 @@
 - 全文 7 处活引用（README / 待研究 / PnP 移植方案 / `common/vision/preprocess.py`）已同步改到本路径。
 - ⚠️ 文档描述的是**当时**的设计；参数与相位机的**当前值一律回 `cfg/*.yaml` 与代码**。
   （例：文首那段"正航向一次到位"写于 09-27，之后 `hdg.*` 又加了 `post_sway*`、`SWAY_BACK`。）
+
+## 之后新增的记录（自动登记）
+
+- `2026-10-02-板端新功能回灌（下位机转向+航向确认）.md`
+- `README_COMMUNICATION.md`
+- `前视USB相机低延迟推流方案.md`
+- `实验待测-runbook.md`
+- `算法说明-gate-PnP移植方案.md`
+- `算法说明-gate-角点逐点融合滤波.md`

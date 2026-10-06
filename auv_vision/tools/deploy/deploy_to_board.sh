@@ -22,6 +22,16 @@ done
 
 # 板端已废弃、需要删掉的文件（先备份到 bak/deploy_<stamp>/）
 DELETED=(
+  # 2026-10-06 测试目录 tests/tasks/{grab,place}/ → tests/tasks/handling/
+  tests/tasks/grab/__init__.py
+  tests/tasks/grab/test_cv_ball.py
+  tests/tasks/grab/test_drop.py
+  tests/tasks/grab/test_grab_flow.py
+  tests/tasks/grab/test_grab_motion.py
+  tests/tasks/grab/test_grab_targets.py
+  tests/tasks/grab/test_handling_modes.py
+  tests/tasks/place/__init__.py
+  tests/tasks/place/test_place_flow.py
   # 2026-10-06 `grab/`+`place/` 合并为 `handling/`：板端旧包要清
   grab/README.md
   grab/__init__.py
@@ -38,6 +48,8 @@ DELETED=(
   gate/motion/heading_align.py
   task1_2/ball_forward.py
   task1_2/run_ball_forward.sh
+  # 2026-10-06 结构迁移：task1_2/ → task/（ball.py 旧路径要删，否则板端同时有两份 ball）
+  task1_2/ball.py
   tests/test_ball_forward.py
   # 板端旧的 task1_2/turn_deg.py 必须删掉，否则"两个同名脚本、行为不同"必然踩坑。
 #   （细节与实测见 doc/注释历史.md）
@@ -237,7 +249,22 @@ if [ -f "$FORK_FILE" ]; then
   while read -r f; do [ -n "$f" ] && SKIP_FILES+=("$f"); done \
     < <(sed -e 's/#.*//' "$FORK_FILE" | awk 'NF{print $1}')
 fi
-is_skip() { local x="$1" s; for s in "${SKIP_FILES[@]}"; do [ "$s" = "$x" ] && return 0; done; return 1; }
+# 分叉行里带 `[sync+patch]` 标记的 = 「**照常上传**，上传后在板端打补丁」：
+#   这类文件本地与板端**必须不同**（如 settings.py 的 SIM_MODE），但整份跳过会让板端
+#   拿不到文件里的其它更新（2026-10-06 真踩到：板端缺 STATE_GRAB/STATE_PLACE）。
+PATCH_FILES=()
+if [ -f "$FORK_FILE" ]; then
+  while read -r f; do [ -n "$f" ] && PATCH_FILES+=("$f"); done \
+    < <(grep -F '[sync+patch]' "$FORK_FILE" | sed -e 's/#.*//' | awk 'NF{print $1}')
+fi
+is_patch() { local x="$1" s; for s in "${PATCH_FILES[@]}"; do [ "$s" = "$x" ] && return 0; done; return 1; }
+# ⚠️ 带 [sync+patch] 的**不算 skip**（要照常上传，步骤 3b 再打补丁）
+is_skip() {
+  local x="$1" s
+  is_patch "$x" && return 1
+  for s in "${SKIP_FILES[@]}"; do [ "$s" = "$x" ] && return 0; done
+  return 1
+}
 while IFS=$'\t' read -r _m f _v; do
   [ -f "$LOCAL/$f" ] || { n_miss_local=$((n_miss_local+1)); continue; }
   lm=$(md5sum "$LOCAL/$f" | cut -d' ' -f1)
@@ -281,6 +308,41 @@ else
   step "无需上传（板端已是最新）"
 fi
 
+# ---- 3b) 同步后补丁（[sync+patch] 的文件；必须在 md5 复核**之后**）----
+if [ "${#PATCH_FILES[@]}" -gt 0 ]; then
+  cat > "$TMPD/patch_settings.py" <<'PATCHPY'
+import sys
+
+p = 'base/cfg/settings.py'
+lines = open(p, encoding='utf-8').read().split('\n')
+hits = [i for i, l in enumerate(lines) if l.startswith('SIM_MODE = ')]
+if len(hits) != 1:
+    print('  x SIM_MODE 锚点 %d 个 -> 放弃' % len(hits)); sys.exit(2)
+i = hits[0]
+if lines[i].startswith('SIM_MODE = False'):
+    print('  = 板端已是 SIM_MODE=False（无需改）')
+else:
+    old = lines[i]
+    lines[i] = 'SIM_MODE = False' + old[len('SIM_MODE = True'):]
+    open(p, 'w', encoding='utf-8').write('\n'.join(lines))
+    print('  ok 板端 SIM_MODE: True -> False（这一行之外不动）')
+sys.path.insert(0, '.')
+import base.cfg.settings as S
+print('  - 运行期读到的 SIM_MODE =', S.SIM_MODE)
+PATCHPY
+  for f in "${PATCH_FILES[@]}"; do
+    case "$f" in
+      base/cfg/settings.py)
+        base64 -w0 "$TMPD/patch_settings.py" \
+          | timeout 120 "$STREAM" "cd $BOARD && base64 -d | python3 -" 2>&1 \
+          | grep -vE "Permanently added" | sed 's/^/        /'
+        step "补丁完成：$f（板端 SIM_MODE=False，代码其余部分跟本地一致）"
+        ;;
+      *) echo "[deploy] ⚠️ 未知的补丁目标 $f（[sync+patch] 目前只为 base/cfg/settings.py 实现）" ;;
+    esac
+  done
+fi
+
 # ---- 4) 删除已废弃文件（一次 SSH，先备份）----
 { echo "cd $BOARD"; echo "mkdir -p bak/deploy_$STAMP";
   for f in "${DELETED[@]}"; do
@@ -291,6 +353,7 @@ fi
     echo "[ -f '$f' ] && { mkdir -p bak/deploy_$STAMP/$(dirname "$f"); cp -p '$f' 'bak/deploy_$STAMP/$f'; rm -f '$f'; echo \"[removed+bak] $f\"; }"
   done
   echo "rmdir work 2>/dev/null"
+  echo "rmdir task1_2 2>/dev/null   # 2026-10-06 结构迁移后只剩空目录"
   echo "rmdir gate/vision 2>/dev/null; rmdir gate/data 2>/dev/null; rmdir gate/motion 2>/dev/null"
   echo "find . -name '*.sh' -not -path './bak/*' -exec chmod +x {} + 2>/dev/null; \
         find . -name __pycache__ -type d -not -path './bak/*' -prune -exec rm -rf {} + 2>/dev/null; echo CLEAN-OK"; } > "$TMPD/del.sh"
@@ -300,7 +363,7 @@ step "废弃文件处理完成"
 # ---- 5) 板端自检 ----
 {
   echo "cd $BOARD"
-  echo "python3 -m py_compile main.py preview_detect.py base/cfg/settings.py base/hw/camera.py base/hw/uart.py base/hw/telemetry.py common/vision/detector.py common/motion/PID.py common/vision/preprocess.py common/motion/turn_deg.py manual/recorder.py manual/stream.py manual/udp_server.py task1_2/ball.py gate/__init__.py gate/gate_task.py gate/percept/gate_postproc.py gate/percept/gate_detector.py gate/percept/gate_decode.py gate/percept/gate_frontend.py gate/percept/geometry.py gate/motion/hdg.py gate/percept/kpt_memory.py gate/percept/mock.py gate/motion/params.py gate/motion/modes.py gate/motion/channels.py gate/motion/hdg.py gate/motion/exits.py && echo COMPILE-OK"
+  echo "python3 -m py_compile main.py preview_detect.py base/__init__.py base/hw/__init__.py base/hw/camera.py base/hw/telemetry.py base/hw/uart.py base/cfg/__init__.py base/cfg/settings.py base/log/__init__.py base/log/turn_log.py common/__init__.py common/motion/PID.py common/motion/__init__.py common/motion/axis.py common/motion/drop.py common/motion/search_scan.py common/motion/turn_deg.py common/vision/__init__.py common/vision/detector.py common/vision/preprocess.py common/cfg/__init__.py common/cfg/cfgnode.py gate/__init__.py gate/gate_task.py gate/motion/__init__.py gate/motion/channels.py gate/motion/exits.py gate/motion/hdg.py gate/motion/modes.py gate/motion/params.py gate/percept/__init__.py gate/percept/down_view.py gate/percept/gate_decode.py gate/percept/gate_detector.py gate/percept/gate_frontend.py gate/percept/gate_postproc.py gate/percept/geometry.py gate/percept/kpt_memory.py gate/percept/mock.py task/__init__.py task/ball.py handling/handling_task.py handling/motion/__init__.py handling/motion/actions.py handling/motion/params.py handling/motion/phases.py handling/percept/__init__.py handling/percept/ball_tracker.py handling/percept/cage_color.py handling/percept/cv_ball.py handling/percept/grab_detector.py manual/__init__.py manual/cam_switch.py manual/recorder.py manual/stream.py manual/udp_server.py && echo COMPILE-OK"
   [ "$NO_TEST" = "1" ] || echo "echo '--- 全量 pytest ---'; timeout 600 python3 -m pytest tests/ -q > /tmp/auv_pytest.log 2>&1; tail -3 /tmp/auv_pytest.log; if grep -qE '[0-9]+ passed' /tmp/auv_pytest.log && ! grep -qE '[0-9]+ (failed|error)' /tmp/auv_pytest.log; then echo PYTEST-OK; else echo PYTEST-FAIL; fi"
   cat <<'PYEOF'
 echo '--- 配置快照 ---'

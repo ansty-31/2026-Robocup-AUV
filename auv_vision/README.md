@@ -14,9 +14,9 @@
 >   ③ 几何合法（四角顺序 + 不自交）与**重复框去重**（小框 conf 更低 **且** ≥2 条边重合 → 丢小框，
 >   **判据不是包含关系**）；④ 选门改成**近距离优先** `gate.select.mode: near`（框宽当测距代理；
 >   回退旧行为 = 改成 `corner`，一行）。落地细节与未验证项见 review §2/§3/§4。
-> - **本地 191 用例全绿**（原 168 + 新增 23 例 `tests/tasks/gate/test_gate_postproc.py`）。
+> - **本地 327 用例全绿**（用例数随开发增长，以 `python3 -m pytest tests/ -q` 输出为准）。
 >   **板端已同步**（2026-09-26 21:4x）：`check_board_parity.sh --board` **双向 95/95 一致**、
->   板端全量 pytest **191 passed**（原先靠"台架分叉"解释的 7 条失败随分叉统一而消失）。
+>   板端全量 pytest **与本地同数（当前 327 passed）**（原先靠"台架分叉"解释的 7 条失败随分叉统一而消失）。
 >   ⚠️ **板端 `SIM_MODE` 现在是本地值 `True`**（串口只打印、不驱动推进器）—— 实船/下水必须
 >   `AUV_SIM_MODE=0 python3 main.py --task gate`（或把那行改回 `False`）。
 >   ⚠️ 板上实测：**`hbm_runtime` 返回的 9 张量字典顺序不固定**（同一 bin 连跑两次排列都不同），
@@ -24,7 +24,7 @@
 >   ⚠️ **新权重在真实水域、有门场景下的精度/帧率仍未测**（板端只跑通了契约自检：9 张量 float32 形状全对）。
 > - **ALIGN.HDG（正航向）2026-09-23 修了 4 个症状**（转不动 / 转反 / 转过头 / 节拍慢）：
 >   符号在代码里定死（`dof_map.yaw.sign: +1` + `motion.turn_pid.imag_sign: +1`，**不再探向**），
->   转向下传与 `task1_2/run_ball_reverse.sh` 同形；顺序固定为"先居中 → 达标且本帧是 full → 才起转"
+>   转向下传与 `task/run_ball_reverse.sh` 同形；顺序固定为"先居中 → 达标且本帧是 full → 才起转"
 >   （`gate.hdg.entry_stale_ok: false`）；转向期间由 `gate_task._turn_inner_loop` 按
 >   `comm.gate.hdg.turn_period = 0.05 s`（**20 Hz**）轮询"下位机完成反馈"。
 >   ⚠️ **这条链路尚未在真实水域跑通过**（最新一趟板端日志里 `mode == full` 出现 0 次 ⇒ psi 一次都没测到），
@@ -41,17 +41,17 @@
 >   `bool('flase')=True` 而**实际一直开着**）。开启用 `enable: true` 或 `AUV_GATE_KPT_MEM=1`
 >   （优先级 `AUV_GATE_KPT_MEM` > `enable` > 兜底 `false`；helper API 在
 >   `gate/percept/kpt_memory.py::kpt_mem_enabled/enable_source/build_kpt_memory`）。
-> - **任务一 小球（ball）= `task1_2/ball.py`**（已定）。
+> - **任务一 小球（ball）= `task/ball.py`**（已定）。
 > - **过门的两条横向/转向约定（2026-09-20 用户定）**：
 >   **① 居中只有 sway 平移**（`align_yaw.{enable,in_px,in_pose}` 与其 PID **已整体删除**）；
 >   **② SEARCH 是左右平移扫视，不旋转**（原旋转脉冲已删除，`gate.search.{sweep_s,pause_s,sway}`）。
 >   gate 里**唯一的 yaw 来源**是 ALIGN.HDG 正航向（`gate/motion/hdg.py` +
 >   `common/motion/turn_deg.py`；**只给角度**，执行在下位机）。
 > - **限深保护（默认开启）**：下位机回传 14B 遥测帧（`0xAA55`+深度/姿态+校验和，
->   `base/hw/telemetry.py`）→ 深度 ≤ `comm.depth_guard.min_depth_m`（**现场定死 0.55 m，不准改**）时
+>   `base/hw/telemetry.py`）→ 深度 ≤ `comm.depth_guard.min_depth_m`（**现场定死值，2026-10-06 起为 0.50 m**）时
 >   **禁止上浮**（只压 heave，surge/sway/yaw 不动），机身顶不出水面。详见下文「限深保护」一节。
 > - **返回出发区（记忆返回）已整体移除**：`return_by_memory` 代码、交接协议与相关参数都不再存在，
->   当前撞球收尾是 `task1_2/run_ball_reverse.sh` 的**定时直线倒车**（开环，不做轨迹回放）。
+>   当前撞球收尾是 `task/run_ball_reverse.sh` 的**定时直线倒车**（开环，不做轨迹回放）。
 > - 以下功能**已确定不需要、已删除**，本项目不再提供：v1.3/v1.4 分层 gate（`vision/`+`data/`+`motion/`）、
 >   质量分 Q、线索 cues、帧守卫（`common/frame_stamp.py`）、`common/streak.py`、DOF ramp
 >   （`common/ramp.py`）、`comm.handover`、`comm.back`、`STATE_BACK`；过门侧另有
@@ -74,7 +74,7 @@ STM32 回传 14B 遥测帧（深度/姿态 → 限深保护）。
 
 ```
 auv_vision/
-├── main.py              # 装配/状态机入口（ball/gate；由 task1_2/run_ball_reverse.sh 或直接调用）
+├── main.py              # 装配/状态机入口（ball/gate；由 task/run_ball_reverse.sh 或直接调用）
 ├── preview_detect.py    # 下水前视觉自检（带识别框；--gate-kpt 看门框 + 4 角点）
 ├── manual.sh            # 手动模式唯一入口：遥控桥 + 录像 + 推流
 ├── manual/              # 手动模式三件套：udp_server.py(遥控桥) · recorder.py(录像) · stream.py(推流/接收库)
@@ -86,10 +86,11 @@ auv_vision/
 ├── common/              # 跨任务公共件（**两层**）：vision/ 图像 · motion/ 运动 · cfg/ 配置读取
 │   ├── vision/          #   detector.py(检测) · preprocess.py(图像链路)
 │   ├── motion/          #   PID.py · turn_deg.py(指定角度轴：yaw/pitch/roll，遥测完成标志 + 硬停)
-│   │                    #   search_scan.py(公共慢扫) · axis.py(轴动作/下潜到位/定时推力)
+│   │                    #   search_scan.py(yaw 慢扫，门用) · search_sweep.py(**任务三/四的平移扫视**) ·
+│   │                    #   axis.py(轴动作/下潜到位/定时推力；pitch/roll **±50° 硬限**)
 │   │                    #   drop.py(**横倾放球/倒球序列**：任务三倒错球、任务四放球共用)
 │   └── cfg/             #   cfgnode.py(cfg 节点读取 + **ball/gate 共用参数的唯一入口**)
-├── task1_2/             # 任务一（撞球）：
+├── task/             # 任务一（撞球）：
 │   ├── ball.py          #   任务一 撞球 BallTask
 │   ├── run_ball_reverse.sh  #   编排（8 步）：待机→(可选)下潜→(可选)前进→撞球→倒车→
 │   │                        #     前进 2s→**左转 90°（遥测闭环）**→过门任务（可 AUV_GATE_AFTER=0 截断）
@@ -143,7 +144,7 @@ auv_vision/
 │   ├── 注释历史.md      #   按文件/按键的历史索引（**入口**）：实测数字 / 试错 / 参数沿革 / 注意事项
 │   └── 注释历史/        #   索引的正文，按域分 7 个文件（cfg/gate/base-common/grab-task-manual/tools/tests/misc）
 ├── models/ · tests/     # 权重(.bin) · 无硬件测试套件（**按层分子目录**，见 tests/README.md）
-│                        #   tests/：**216 例**（以 `pytest tests/ -q` 输出为准）
+│                        #   tests/：**327 例**（以 `pytest tests/ -q` 输出为准）
 │                        #     platform/  test_base   平台：settings/11B 帧/遥测/限深保护/硬停
 │                        #                test_common 公共件：PID/图像链路(NV12·squish)/Det/cfgnode
 │                        #                test_paths 路径落点 · test_hud 叠加层
@@ -162,18 +163,22 @@ auv_vision/
 │                        #   分层块：`pytest tests/platform -q` / `tests/tasks` / `tests/tooling`
 ```
 
-分区语义：`base`（平台基础设施）/ `common`（跨任务公用）/ `task1_2`（任务一 撞球）/ `gate`（任务二 过门）/
+分区语义：`base`（平台基础设施）/ `common`（跨任务公用）/ `task`（任务一 撞球）/ `gate`（任务二 过门）/
 `grab`（任务三 夹取）/ `place`（任务四 放置）。
 依赖规则：任务代码只 import `base`/`common` 与同级任务模块；`main.py` 是唯一装配点。
 ⚠️ **任务三与任务四并列，谁也不 import 谁** —— 两者共用的动作必须在 `common/motion/`
-（例：横倾放球/倒球 = `common/motion/drop.py`；`tests/tasks/place` 有用例钉着这条）。
+（例：横倾放球/倒球 = `common/motion/drop.py`；`tests/tasks/handling` 有用例钉着这条）。
 
 ## 快速开始（本机，无硬件）
 
 ```bash
-python3 -m pytest tests/ -q              # 无硬件测试（**318 例**，2026-10-06 实测；platform/tasks/tooling 三层）
+python3 -m pytest tests/ -q              # 无硬件测试（**334 例**，以 `pytest tests/ -q` 输出为准）
 python3 main.py --task ball              # 只跑撞球（SIM/mock）
 python3 main.py --task gate              # 试跑过门（cfg model.mode: mock）
+AUV_TASK_LOG=log/grab.jsonl python3 main.py --task grab      # 任务三 夹取（感知全程下视）
+AUV_TASK_LOG=log/place.jsonl python3 main.py --task place     # 任务四 放置（运输 → 横倾放球 → 停动力 3s）
+AUV_TASK_LOG=log/full.jsonl python3 main.py --task handling   # 先夹取，成功后同一实例交接给放置
+#   ^ AUV_TASK_LOG 是**逐帧 JSON 日志**（相位/判据/通道/遥测），判读见下面的 analyze_task_log.py
 python3 preview_detect.py --gate-kpt     # 下水前：门框 + 4 角点 + 置信度（船不动）
 python3 tools/analyze/log/analyze_task_log.py log/*.jsonl   # 下水后：逐帧日志判读（相位/出口/通道能动力）
 python3 tools/analyze/log/feature_coverage.py log/*.jsonl   # 下水后：这轮**哪些功能没被用到**
@@ -182,12 +187,13 @@ python3 tools/analyze/calib/pnp_calib.py --report r.md log/pnp_*/pnp_z*.jsonl  #
 > `tests/` 与训练工程 `../RDKX5-YOLOv11n-/` **可以共享测试脚本**（唯一允许写入对方工作区的东西）；
 > 训练工程下的**其他文件只读**，不要在本工程的任务里顺手改它们。
 
-### 真机编排（.sh，见 task1_2/）
+### 真机编排（.sh，见 task/）
 ```bash
-cd task1_2 && ./run_ball_reverse.sh      # 待机→(可选)下潜→(可选)前进→撞球→倒车→前进2s→左转90°→过门
+cd task && ./run_ball_reverse.sh      # 待机→(可选)下潜→(可选)前进→撞球→倒车→前进2s→左转90°→过门
 AUV_GATE_AFTER=0 ./run_ball_reverse.sh   # 只做前 7 步（分段试，不接过门）
 AUV_SIM_MODE=1 ./run_ball_reverse.sh     # 台架：只打印不发串口（**改脚本后必跑一次干跑**）
 ./run_gate.sh                            # 只跑过门任务
+./run_grab.sh                            # ★ 只跑夹取任务（任务三；标定闸自检 + 相机占用清理 + 日志默认开）
 ```
 - **撞球后返回**：`run_ball_reverse.sh` 在 `main.py --task ball` 结束后**定时直线后退**
   （开环、不依赖视觉；`AUV_REV_S`/`AUV_REV_SURGE` 调时长与速度）；
@@ -196,7 +202,9 @@ AUV_SIM_MODE=1 ./run_ball_reverse.sh     # 台架：只打印不发串口（**�
   → `main.py --task gate`。转角可用 `AUV_TURN_LEFT/AUV_TURN_KP/AUV_TURN_KD` 覆盖；
   **没有遥测时 turn_deg 直接拒转（退出码 5）** —— 转向只有遥测 yaw 闭环，没有开环/盲转备案；
 - 单独试转向：`python3 common/motion/turn_deg.py --deg 90 --dir left`（`--help` 看全部旋钮）。
-- 下视相机 `cfg/vision.yaml camera.down` 与 `base/hw/camera.py`（sim/mipi）**保留**，仅策略不再使用。
+- 下视相机（`cfg/vision.yaml camera.down`：**usb `/dev/video0`**）**是任务三/四的感知源**
+  （`--task grab|handling` 直接吃下视；`camera.down.calibration: null` = 有意不去畸变）。
+  下视是**独占设备**：跑任务前先清掉残留进程，否则会被别的程序占住。
 
 ### 只用 gate 权重跑过门（单独下水测 gate）
 ```bash
@@ -210,11 +218,11 @@ python3 preview_detect.py --gate-kpt         # 下水前：门框 + 4 角点 + �
 
 ## 任务算法速览
 
-- **任务一 撞球**（task1_2/ball.py）：**SEARCH→CENTER→APPROACH→DASH→STOP** 运动链
+- **任务一 撞球**（task/ball.py）：**SEARCH→CENTER→APPROACH→DASH→STOP** 运动链
   （居中=仅 yaw+heave；接近=分级前进+仅 sway；面积(EMA)≥`dash_ratio` → 以分级最高速 `surge_fast`
   冲刺 `dash_dur_s`；不检测是否撞到；冲刺后 STOP 全 0 保持 `stop_hold_s` → DONE(hit)，
   总时限 `comm.ball.timeout_ms`）；
-- **撞球之后**（`task1_2/run_ball_reverse.sh`）：**定时直线倒车**（开环、不依赖视觉）→ 前进 2s
+- **撞球之后**（`task/run_ball_reverse.sh`）：**定时直线倒车**（开环、不依赖视觉）→ 前进 2s
   → **按角度左转 90°**（`common/motion/turn_deg.py`，遥测 yaw 闭环 + 转完硬停）→ 过门任务；
 - **任务二 过门**（`gate/gate_task.py` 只有编排；**两层结构** `gate/percept/` 感知 + `gate/motion/` 决策，
   2026-09-30 按方法簇拆分；**逻辑图见 `doc/设计/过门逻辑树.md`**，细则/参数见 `doc/记录/算法说明-gate-PnP移植方案.md`）：
@@ -236,6 +244,12 @@ python3 preview_detect.py --gate-kpt         # 下水前：门框 + 4 角点 + �
   角点逐点融合 `gate/percept/kpt_memory.py` 为**可选功能、2026-09-18 起默认关闭**（板端曾因拼写错 `flase` 实际开着）：
   开启用 `vision.gate.kpt_mem.enable: true` 或 `AUV_GATE_KPT_MEM=1`；关闭时角点单帧直用。
 
+- **任务三 夹取 + 任务四 放置**（`handling/`）：**同一个总调度两种模式** —— `mode="grab"` 走
+  `INIT→PITCH_UP→SEARCH→CENTER→APPROACH→LEVEL→ALIGN→DIP→RISE→VERIFY→(DUMP)→EXIT`，
+  `mode="place"` 走 `INIT→TRANSPORT→RELEASE→STOP`，`mode="full"` 夹取成功后**同一实例交接**给放置。
+  感知全程用**下视**（纯 CV 红球检测 + ROI 跟踪，不走 BPU）；相位/关键动作/兜底值拆在
+  `handling/motion/{phases,actions,params}.py`（与 `gate/` 同规）。细节见 `handling/README.md`。
+
 ## 参数（cfg/*.yaml）
 `vision.yaml`：camera(front/down)、`image.*`（**ball/gate 共用图像链路，勿改**）、`model.*`
 （含 `task_models.gate`）、`gate.*`（几何/keypoint/PnP/kpt_mem 开关）、`stream.*`；
@@ -256,15 +270,19 @@ python3 preview_detect.py --gate-kpt         # 下水前：门框 + 4 角点 + �
 下位机按 **14B 遥测帧**（`0xAA55` + 深度/目标深度/roll/pitch/yaw + 校验和，协议见 `base/hw/telemetry.py`）
 回传深度；`base/hw/uart.py` 在每次发帧**前**读空串口接收缓冲 → 用最新深度限深：
 
-> **当前深度 ≤ `comm.depth_guard.min_depth_m`（现场定死 **0.55 m**）→ 本帧禁止上浮**：heave 分量清零、
+> **当前深度 ≤ `comm.depth_guard.min_depth_m`（现场定死值，**2026-10-06 起 0.50 m**）→ 本帧禁止上浮**：heave 分量清零、
 > heave 轴当帧回中（`snap: true`，不等 ramp 平滑，防惯性继续上浮）；
 > **surge/sway/yaw 一律不动**——任务照常对准/前进，只是机身顶不出水面。
 
 - 生效范围：所有下发路径（任务的 `send_dof`、`set_motion` 预设，含手动模式键盘遥控"上浮"）；
   `send_frame_bytes` 原样发字节、不过该保护（只用于中性/急停/测试帧）。
-- 判据是"深度**不小于** 0.55"：深度**恰好 0.55 m 也算触底**，禁止上浮；0.56 m 起放行。
-  ⚠️ 这个值**用户 2026-09-18 定死、不准改**（有不变量用例守着）；本地曾长期写 0.3，
-  整文件覆盖板端配置时把板端的 0.55 冲掉过**两次** —— 所以 **cfg 不要整份推板端**（见 tools/README.md）。
+- 判据是"深度**不小于** 该值"：**恰好等于也算触底**（禁止上浮），比它深 1cm 起放行。
+  ⚠️ 这个值是**现场定死**的（有不变量用例守着）：2026-09-18 定 0.55 → **2026-10-06 用户下调为 0.50**
+  （为了让夹取翘头工作深度能真到 0.5）。**改它必须同时改** `base/hw/uart.py::_D_MIN_DEPTH_M`
+  与 `tests/platform/test_base.py` 的不变用例。
+  ⚠️ 下调等于**放宽安全边界**（露出水面 = 比赛立即停止）：抬头 30° 时机头抬高 ≈ (机长/2)·sin30°，
+  必须现场量机头（含相机壳）离水面的余量。
+  ⚠️ 历史上整文件覆盖板端 cfg 把现场值冲掉过**两次** ⇒ **cfg 不要整份推板端**（见 tools/README.md）。
 - 遥测缺失或超时（`stale_ms`，默认 500 ms）→ 默认**放行**（`stale_action: pass`，台架/仿真友好），
   非 SIM 下首次告警一次；要"断链也不盲上浮"就把 `stale_action` 设成 `block_up`
   （SIM/无串口仍放行，免得台架被锁死）。板上若一直打"没有新鲜深度遥测"告警 = 下位机没在上行遥测，
@@ -273,8 +291,8 @@ python3 preview_detect.py --gate-kpt         # 下水前：门框 + 4 角点 + �
 - 模块边界：协议/解析/重同步在 `base/hw/telemetry.py`（纯函数 + `TelemetryReceiver`，可单独测/复用），
   保护判定与下发在 `base/hw/uart.py`（`_apply_depth_guard`），任务代码**不感知**该保护。
 - 现场可见：`[UART←] depth=0.72m target=…`、
-  `[UART] 限深保护：depth=0.52m ≤ 0.55m → 禁止上浮(heave 1.00→0)`、
-  发帧行附 `[限深保护 depth=0.52m]`、画面叠加 `depth=0.52m guard=on min=0.55m`。
+  `[UART] 限深保护：depth=0.47m ≤ 0.50m → 禁止上浮(heave 1.00→0)`、
+  发帧行附 `[限深保护 depth=0.47m]`、画面叠加 `depth=0.47m guard=on min=0.50m`。
 
 ## 画面推流 / 手动模式（端到端约 60~90 ms）
 方案与实测数据见 `doc/记录/前视USB相机低延迟推流方案.md`；根目录只有一个入口脚本 `manual.sh`，
@@ -324,7 +342,7 @@ cd ../pc
   （比陆上验证点晚 ~33 cm，冲门更贴门）。要回填就**整组一起改**；
 - **遥测联通性**：下位机确认在按 `0xAA55` 14B 帧回传深度（板上应持续看到 `[UART←] depth=…`，
   看不到就是没回传、限深保护放行中）；并把下位机深度读数与人工卷尺/标尺核对（这是深度标定，
-  **不是**去改 `min_depth_m` —— 它已被用户定死在 0.55，有不变量用例守着）；
+  **不是**去改 `min_depth_m` —— 它是现场定死值（现 0.50），有不变量用例守着）；
 - ~~门框尺寸实测~~ **已实测（09-22）：外缘到外缘 77×56 cm** → `frame_w/frame_h=0.77/0.56`；
   仍待陆上 A1 用 `a` 复核"模型眼里的门宽"是否等于外缘（可能落在管子中心线上）；
 - **DOF 极性与速度标定**：surge/sway/heave 方向、`norm→m/s` 曲线、REACQUIRE 后退方向。

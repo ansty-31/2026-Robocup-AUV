@@ -30,7 +30,7 @@ def test_bite__motion_shared_value_is_pinned(monkeypatch):
         target()
 
 def test_bite__depth_guard_threshold_is_pinned(monkeypatch):
-    """改 comm.depth_guard.min_depth_m → **现场定死的 0.55** 不变量用例必须红。"""
+    """改 comm.depth_guard.min_depth_m → **现场定死值**（现 0.50）的不变量用例必须红。"""
     from tests.platform.test_base import test_settings_loads_real_yaml_values as target
     monkeypatch.setitem(S.comm.depth_guard, "min_depth_m", 0.99)
     with pytest.raises(AssertionError):

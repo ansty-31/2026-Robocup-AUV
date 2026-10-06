@@ -21,7 +21,13 @@ TURN_ANGLES=(
 # ⚠️ 角度**带符号**：正数=左转，负数=右转
 TURN_TIMEOUT="${AUV_TURN_TIMEOUT:-20}"
 TAG="${AUV_LOG_TAG:-run}"
-GATE_LOG_PREFIX="${AUV_GATE_LOG_PREFIX:-log/${TAG}gate}"
+# ★ 2026-10-07 用户定：**一趟一个目录**，本次所有日志都放进去（过门 1..N + through 专表）。
+#   为什么：原来是 log/<TAG>gate_<N>.jsonl —— 同趟内 4 个门各一份没问题，但**下一趟会复用同名**、
+#   main.py 用 "w" 打开 ⇒ 上一趟被截断。改成"一趟一目录"后历史自然分开。
+RUN_DIR="${AUV_LOG_DIR:-log/${TAG}_$(date +%m%d_%H%M)}"
+if [ -e "${RUN_DIR}" ]; then _n=1; while [ -e "${RUN_DIR}_${_n}" ]; do _n=$((_n+1)); done; RUN_DIR="${RUN_DIR}_${_n}"; fi
+mkdir -p "${RUN_DIR}"
+GATE_LOG_PREFIX="${AUV_GATE_LOG_PREFIX:-${RUN_DIR}/gate}"
 
 # 清理上次残留
 if pkill -f "[p]ython3 main.py --task" 2>/dev/null; then
@@ -34,7 +40,7 @@ echo " 过门单任务：待机 ${WAIT_S}s → 下潜 ${DESCEND_S}s → 前进 $
 echo "   过门 ${#TURN_ANGLES[@]} 次(单门 pass_target=1)"
 echo "   转角序列（现场代填，正=左转/负=右转）：${TURN_ANGLES[*]}"
 [ "${AUV_SIM_MODE}" = "1" ] && echo " ⚠️ AUV_SIM_MODE=1：只打印指令，不会真正驱动电机！"
-echo " 日志：过门 ${GATE_LOG_PREFIX}_<N>.jsonl"
+echo " 日志：本趟目录 ${RUN_DIR}/（过门 gate_<N>.jsonl，每个门一份；through 专表自动同目录）"
 echo "=================================================================="
 
 # ---- 权重自检（不加载模型，只看文件在不在；缺失立刻退出，别白下水）----

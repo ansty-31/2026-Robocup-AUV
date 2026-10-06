@@ -1,12 +1,25 @@
-# handling/ — 任务「夹取 + 放置」（**同一个总调度，两种模式**）
+# handling/ — 任务三「夹取」+ 任务四「放置」（**同一个总调度，两种模式**）
 
-> 2026-10-06 整合：原 `grab/`（任务三 夹取）与 `place/`（任务四 放置）合并到本目录。
-> 结构（与 `gate/` 同规）：`handling_task.py` 总调度 + `motion/{params,actions,phases}.py` + `percept/`。
-> 模式：`HandlingTask(mode="grab"|"place"|"full")`；`full` = 夹取完成后**同一实例交接**给放置。
+> 2026-10-06 整合：原 `grab/`（任务三 夹取）与 `place/`（任务四 放置）合并到本目录，
+> 结构**与 `gate/` 同规** —— 根目录一个总调度 + `motion/` 方法簇 + `percept/` 感知。
+>
+> | 文件 | 职责 |
+|---|---|
+> | `handling_task.py` | **总调度** `HandlingTask(mode="grab"\|"place"\|"full")` + 兼容壳 `GrabTask`/`PlaceTask` |
+> | `motion/params.py` | 相位常量（`PH_GRAB_*` / `PH_PLACE_*`）+ 兜底值表（`_D_*` / `_D_PLACE`） |
+> | `motion/actions.py` | 关键动作与小件：PID 构造/校验、执行原语、横倾放球序列、下发口 `_set_info` |
+> | `motion/phases.py` | 两个流程的相位处理（`GrabPhases` / `PlacePhases`） |
+> | `percept/` | 纯 CV 红球检测 + ROI 跟踪（下视，不走 BPU） |
+>
+> **模式语义**：`grab` 只夹取；`place` 只放置（从 `PH_PLACE_INIT` 起步，不需要感知）；
+> `full` = 夹取成功后 `_enter_place()` **同一实例交接**（限深下限与收尾由本任务继续持有，不重建对象）。
+> 装配：`main.py` 的 `build_task()` 按名字给 mode（`--task grab|place|handling`），相机 `down`。
 
-## 原 grab/README.md
+---
 
-# `grab/` — 任务三「夹取小球」分区
+## 一、夹取（原 `grab/`）
+
+### 概览
 
 > **现状（2026-10-06 晚）**：感知层 + **决策层都已在**，但**未标定、未装配、未上板**。
 > * `percept/`：纯 CV 红球检测（`cv_ball.py`）+ 流式 ROI 跟踪（`ball_tracker.py`）+ 工程接口
@@ -27,13 +40,14 @@
 > * 目标色：**现在用红球测逻辑与运动**（"红球外的可以都毙了" ⇒ 红掩膜天然只认红）；比赛用
   **粉球 / 黄球** ⇒ 阈值槽位、闸与量法见 §7。
 
-## 0. 决策层速览（口径来自用户 2026-10-06 的口令，逐条落在代码里）
+### 0. 决策层速览（口径来自用户 2026-10-06 的口令，逐条落在代码里）
 
 | # | 相位 | 动作 / 通道 | 关键判据 |
 |---|---|---|---|
-| 1 | `INIT` | 抬**任务级**限深下限到 `grab.depth_floor_m`(1.0m) | 只抬不降；全局 `min_depth_m`(0.55) 不动 |
-| 2 | `PITCH_UP` | 先下潜到位，再 `pitch +30°`（byte[7]=2） | 深度够深才抬头；到不了就放弃 |
-| 3 | `SEARCH` | `search_scan`（yaw 慢扫，复用公共件） | 检到球 |
+| 1 | `INIT` | 抬**任务级**限深下限到 `grab.depth_floor_m`(**0.50m**，与全局同值) | 只抬不降；全局 `min_depth_m`(0.50) 不动 |
+| 2 | `PITCH_UP` | 先下潜**到位**，再 `pitch +30°`（byte[7]=2） | 判据**严格** `深度 ≥ 下限`（不许拿容差啃硬边界）；到不了就放弃 |
+| 3 | `SEARCH` | **纯左右平移扫视**（`common/motion/search_sweep.py`：右→停→左→停、每轮时长翻倍、
+**占空比脉冲**「推一小段停一下」；幅值 0.20 < 门那套的 0.6）+ **定深**管 heave | 检到球 |
 | 4 | `CENTER` | **只 yaw**（不前进/不横移/不升降） | `\|dx\| ≤ eps` 连续 N 帧 |
 | 5 | `APPROACH` | surge 分级 + sway 修 dx（**同撞球**） | 圆面积占比 ≥ `dip_ratio` |
 | 6 | `LEVEL` | `pitch` 回水平：相对角 = `wrap180(抬头前遥测 − 当前遥测)` | 完成标志；**算不出就停手** |
@@ -43,10 +57,29 @@
 | 9b | `DUMP` | 右移→横倾倒出→回正→左移→后退→停稳→**重新抬头** | 第 2 次尝试默认对（`retry`） |
 | 10 | `EXIT` | **若还仰着头，先放平再结束** | 放平带超时兜底 |
 
+**三条安全线（2026-10-06 用户定）**：
+* **pitch/roll 不准超过 ±50°**：指令侧 `TurnCore` 夹紧（yaw 不受限）→ 姿态侧 `AxisMove` 实测超限就撤指令+停手
+  → 最外层看门狗按实测姿态停船。**只有一个数**：`comm.motion.axis.max_tilt_deg`。
+* **轴看门狗看守 yaw + pitch/roll**：yaw 走「同向饱和」老判据；pitch/roll 不走手动轴字节 ⇒ 另走
+  「|遥测角| > 限值 连续 `watchdog.tilt_hold_s`」那条（`comm.watchdog.axes` 里点名）。
+* **定深（用户 2026-10-06：翘头时深度控制在 0.5~0.6，不准太深也不准太浅）**：抬头工作段
+  （SEARCH/CENTER/APPROACH）由 `common/motion/depth_hold.py` 管 heave —— 太深上浮、太浅下潜、
+  区间内**不动手**（死区 0.02 防抖）；DIP/RISE 故意变深度 ⇒ 不插手。
+  ✅ 全局 `min_depth_m` **2026-10-06 已下调为 0.50** ⇒ 生效下沿 = `max(0.50, 0.50)` = **0.50**，
+  **0.5~0.6 整段可用**（工作点 = `target_m` 0.55）。若哪天把全局抬回去，生效下沿会跟着抬，
+  `DepthHold` 会在启动时打印一次（不静默）。
+* **任务级限深下限只抬不降** + 抬头前先下潜到位（见 §0 前两行）。
+  **翘头安全下限 = `grab.depth_floor_m` = 0.50**（与全局同值）；工作点 = `depth_hold.target_m` = 0.55。
+  它是**工作深度与安全下限同一个数**（下潜到它、上浮也被它禁住，正好稳在那儿）。
+  ⚠️ 一条必须记住：这与最早『抬头要**保证不出水面** ⇒ 下限增大』**方向相反** —— 用户 2026-10-06
+  把全局限深从 0.55 下调到 0.50 就是为了让工作深度能到 0.5 ⇒ **抬头 30° 的机头余量变小**，
+  机头抬高 ≈ (机长/2)·sin30°，**下水前必须现场量机头（含相机壳）离水面的余量**并记录；
+  要回退就把 `depth_guard.min_depth_m` 与 `grab.depth_floor_m` 一起改回 0.55/0.55（两行）。
+
 **倒球/放球的区别**：倒球（错球）在本任务内；**放球（横倾 30° + 断动力 3s）属任务四「放置」**
 （运输/放球，TBD）—— 本任务验色通过即结束，交接看 `GrabTask.holds_ball`。
 
-## 1. 为什么这条线不用 BPU（2026-10-06 板端实测）
+### 1. 为什么这条线不用 BPU（2026-10-06 板端实测）
 
 在 RDK X5 上拿撞球那版权重（`yolo11n_detect_bayese_640x640_nv12.bin`，与板端那颗 md5 完全相同）
 跑夹取场景的 700 帧，**按球大小分桶看命中率**：
@@ -66,7 +99,7 @@
 ⚠️ 前提说明：**那版权重本来就不是给夹取任务训的**，这段对比说明的是"能不能顺手复用"，不是
 "YOLO 不行"。真要为夹取训一版权重是另一件事（要补远距样本 + 标注 + 量化）。
 
-## 2. 算法一览（代码在 `percept/cv_ball.py`，参数在 `cfg/vision.yaml` 的 `grab.cv`）
+### 2. 算法一览（代码在 `percept/cv_ball.py`，参数在 `cfg/vision.yaml` 的 `grab.cv`）
 
 | 步骤 | 做什么 | 为什么 |
 |---|---|---|
@@ -77,7 +110,7 @@
 | 覆盖校验 | 拟合圆内红掩膜占比 ≥0.35 | 全盘≈0.95、被挡月牙≈0.5 |
 | 去重 | 圆 IoU>0.6 只留高分 | 同一球被切成几块时会出多个圆 |
 
-## 3. 板端性能与两个坑（都在代码注释里留了因）
+### 3. 板端性能与两个坑（都在代码注释里留了因）
 
 **A55 上每一次全图（1280×720）uint8 pass ≈ 2.6 ms（内存带宽受限）**，所以成本 ≈ pass 数 × 2.6 ms：
 
@@ -104,46 +137,47 @@
   （例 427×360），硬拉成正方形等于改纵横比、圆心回算就飘（单测抓到过 cy 差 52 px）。
   归一化代价实测：中心偏差 p50 0.71 px / p95 1.94 px、半径比 0.998（占球半径 0.38%），夹取足够。
 
-## 4. 怎么接进工程（装配层唯一改动点）
+### 4. 怎么接进工程（**已接**：2026-10-06）+ 命令行
 
 ```python
-# main.py · AppController.__init__（与 gate 同形，2 行）
-if name == "grab":
-    self.hub.register("grab", build_grab_backend())      # grab/percept/grab_detector.py
-# 之后：hub.detect_list("grab", frame) -> [Det]；要圆心/半径用 detector.circles(frame)
+# main.py · AppController.__init__（已落）
+if name in TASK_MODE:                                       # grab | place | handling
+    self.hub.register(HANDLING_NAME, build_grab_backend())  # HANDLING_NAME = "handling"
+self._need_down = any(TASK_CAM[t] == "down" for t in tasks)
+if self._need_down:
+    self.cams["down"] = create_camera("down")               # 下视独占 ⇒ 不再起 feeder
 ```
 
-**决策层写好之后仍然没动 `main.py`**（`calibrated: false` 就是那道闸）。要接的时候是这几处：
-```python
-TASK_CLASS["grab"] = GrabTask; TASK_CAM["grab"] = "down"
-self.cams["down"] = create_camera("down")           # 或复用 DownCamFeeder + wants_down()
-hub.register("grab", build_grab_backend())
-TASK_STATE["grab"] = S.STATE_...                    # 见 README §4 的两行
-```
-⚠️ **下视是 USB 1.1（/dev/video0, 1280×720@20fps）**：主循环直接 read 可能拖慢帧率 ⇒
-优先走已有的 `DownCamFeeder` 后台注入（`set_down_frame`/`wants_down`，gate 已用同一机制）。
-⚠️ `cfg/vision.yaml camera.down.calibration: null`（**没去畸变标定**）⇒ 圆心/半径带径向误差；
-要么补标定，要么把工作点收在画面中心附近（畸变最小）。另外 `main._uart_status` 的 HUD 仍显示
-全局 `min_depth_m`；任务级下限接上后应改显示 `uart.effective_min_depth_m`。
+⚠️ **hub 的键是任务实例的 `name`（`HandlingTask.name = "handling"`），不是 CLI 名 `grab`。**
+注册成 `"grab"` 的话 `hub.extra("handling")` 永远是 `None` ⇒ 感知**静默退回 legacy 模型**
+（= 用撞球那版 YOLO，正是本项目明确否掉的路）。`tests/tasks/handling/test_assembly_cli.py` 钉着这条。
 
-**肉眼看效果**（板端，工程根，不发运动指令）：
+**命令行（任务三 / 四下水就是这几条）**：
+
 ```bash
-python3 preview_detect.py --grab --show                  # 桌面终端
-python3 preview_detect.py --grab --stream --save grab_preview/   # 或推流给 PC + 存图
+# ★ 任务三 单任务夹取（对标 run_gate.sh；含标定闸自检 + 相机占用清理 + **逐帧日志默认开**）
+bash task/run_grab.sh
+# 直接调用（**日志要自己给**：AUV_TASK_LOG → 逐帧 JSON，就是 analyze_* 的输入）
+AUV_TASK_LOG=log/my_grab.jsonl python3 main.py --task grab
+AUV_TASK_LOG=log/my_place.jsonl python3 main.py --task place     # 只放置（不需要感知）
+AUV_TASK_LOG=log/my_full.jsonl  python3 main.py --task handling  # 先夹取，成功后同一实例交接
+AUV_SIM_MODE=1 bash task/run_grab.sh     # 台架干跑：只打印，不驱动电机（日志照写）
+python3 preview_detect.py --grab --camera down --show   # 只看感知（不建串口、船不动）
+
+# 下水后判读这份日志（相位/出口/通道能动力；以及"这轮哪些功能没被用到"）
+python3 tools/analyze/log/analyze_task_log.py log/my_grab.jsonl
+python3 tools/analyze/log/feature_coverage.py log/my_grab.jsonl
 ```
 
-**PC 侧离线验证**（无需相机/权重）：
-```bash
-python3 -m pytest tests/tasks/grab -q                    # 45 例（感知 18 + 运动原语 10 + 相位机 17）
-python3 - <<'PY'
-import cv2, sys; sys.path.insert(0, '.')
-from handling.percept.cv_ball import Params, detect, debug_maps
-img = cv2.imread('some.jpg')
-print(detect(img, Params.from_cfg()))
-PY
-```
+退出码：`0`=正常结束 / `2`=任务名非法 / `3`=**自检拒绝启动**（未标定 `calibrated=false`，或后端不可用）。
+也就是**未标定时命令有效、但不会下水** —— 那是设计，不是故障。实测：
+`comm.grab.calibrated=false` ⇒ `python3 main.py --task grab` 打印原因并退出 3。
 
-## 5. 参数（`cfg/vision.yaml` 的 `grab.*`）
+⚠️ 下视（`camera.down`：usb `/dev/video0`）是**独占设备**：跑之前先 `pkill -f "main.py --task grab"`，
+否则相机被占 ⇒ `camera.fallback_sim` 会静默回退模拟相机（= 追着假球开船）。
+⚠️ 下视**不去畸变是有意的**（用户定：畸变对小球的居中影响不大），`calibration: null` 不是欠账。
+⚠️ `main._uart_status` 的 HUD 仍显示全局 `min_depth_m`；任务级下限接上后应改显示 `uart.effective_min_depth_m`。
+### 5. 参数（`cfg/vision.yaml` 的 `grab.*`）
 
 | 键 | 默认 | 含义 |
 |---|---|---|
@@ -160,27 +194,27 @@ PY
 
 **删掉任一 key 都用代码同值默认**（`Params.from_cfg()` / `_cfg()` 兜底）⇒ 不改 cfg 也能跑。
 
-## 6. 还没做 / 未验证
+### 6. 还没做 / 未验证
 
 - **决策层已写、但全部未标定**：见上面 §0 的相位表；`comm.grab` 里标「占位·未标定」的值（下压/上升的
   秒数与幅值、surge/sway 增益、`dip_ratio`、验色 ROI 与 `red_percent_min`）都要现场实测后才上水。
 - **`up_sign` / `dump_sign` 未验证**：pitch/roll 的**物理方向**（抬头/低头、向左倾/向右倾）协议正值
   不保证。上板第一件事：`python3 common/motion/turn_deg.py --axis pitch --deg 5` 看机头往哪边走。
 - **`读取 percent` 的口径需确认**：本实现理解为「下视笼区 ROI 里目标色像素占比」；若原意是别的量
-  （如某个遥测字段），只需改 `grab/percept/cage_color.py` 一处。
+  （如某个遥测字段），只需改 `handling/percept/cage_color.py` 一处。
 - **粉球/黄球的阈值还没量**（用户 2026-10-06：比赛才是粉/黄；现在用红球测逻辑与运动）：
   槽位与闸已就位（`vision.grab.targets` + `Params.from_target`：未标定 ⇒ 不参与检测，
   **不会拿红球的默认值冒充**），**数值等实拍素材**；⚠️ 黄球的判据形式要重定
   （`R−max(G,B)` 对黄色恒 ≈0 ⇒ 色相带 或 min(R,G)−B，实测后再选）。
-- **任务四「放置」已建骨架**（`place/place_task.py`）：运输保持 roll 平衡 → 到点 → 横倾放球
-  → 停动力 3s；**「到点」的真实判据待定**（见 `place/README.md`）。放球序列与任务三倒错球
+- **任务四「放置」已建骨架**（`handling/handling_task.py`）：运输保持 roll 平衡 → 到点 → 横倾放球
+  → 停动力 3s；**「到点」的真实判据待定**（见本文件「二、放置」）。放球序列与任务三倒错球
   共用 `common/motion/drop.py`。
 - **运动原语不在本包**：轴动作/下潜到位/定时推力 = `common/motion/axis.py`；横倾放球/倒球 =
   `common/motion/drop.py`（任务四共用同一套 —— 依赖规则不许 `place` import `grab`）。
 - **修掉一个历史坑（2026-10-06）**：`cv_ball._cfg` / `grab_detector._cfg` 原来传的是
   `"grab.cv.dom_min"`，而 `S.get()` 只认 `vision.`/`comm.` 开头 ⇒ **`cfg/vision.yaml` 的整个
   `grab.*` 段从未生效**（只因 yaml 值与代码默认值相同才没暴露）。现在会真读了，
-  `tests/tasks/grab/test_grab_targets.py` 有用例钉住。
+  `tests/tasks/handling/test_grab_targets.py` 有用例钉住。
 - **接相机实时跑未验证**：本文所有秒数都是离线逐帧喂图；实时链路还要算上相机 read 与显示开销。
 - **换水质/相机高度要重标**：`dom_min`、`s_min`、`v_min` 对水质敏感（当前工作点是在 AUV 夹球池子这批素材上扫的）。
 - **CV 的短板**：球被黑瓦条挡到只剩 1–3 px 宽的红弧时，CV 与 YOLO 都漏（700 帧里约 43–55 帧）——
@@ -190,26 +224,28 @@ PY
   与 `RDKX5-YOLOv11n-/output/preview/small_ball/README.md`（PC+板端完整实测记录）。
   两份代码在 700 帧真图上**逐帧检出完全一致**（命中 549/549、0 差异）——同步时核对过。
 
-## 原 place/README.md
+---
 
-# `place/` — 任务四「放置」分区
+## 二、放置（原 `place/`）
+
+### 概览
 
 > **现状（2026-10-06 晚）**：相位机骨架已写（`place_task.py`），**未标定、未装配、未上板**。
 > 安全闸 `comm.place.calibrated: false` ⇒ `ready` 为假 ⇒ 装配层跳过它。
 
-## 1. 它是什么（用户口径）
+### 1. 它是什么（用户口径）
 
 任务三把球夹起来之后**交棒**给任务四：**运输 → 到点 → 放球**。
 * **运输路上保持 roll 平衡**，避免球从被动收球笼里滚出去；
 * 到点后：**横倾 30° → 球自动滚出 → 停掉所有动力 3s** → 放置结束。
 
-## 2. 与任务三的关系（结构纪律）
+### 2. 与任务三的关系（结构纪律）
 
 两个任务**并列**，谁也不 import 谁：
 
 ```
-grab/   = 任务三（感知 percept/ + 决策 grab_task.py）
-place/  = 任务四（只有决策 place_task.py；无感知）
+handling/ = 任务三 + 任务四（**同一总调度** `handling_task.py`，mode=grab|place|full；
+            感知在 `percept/`，相位/动作/兜底在 `motion/`）—— 2026-10-06 由原 `grab/` 与 `place/` 合并
      ↓ 两边都只 import ↓
 common/motion/axis.py   指定角度轴动作 / 下潜到位 / 定时推力
 common/motion/drop.py   横倾放球/倒球序列（任务三倒错球、任务四放球**同一套代码**）
@@ -217,11 +253,11 @@ common/motion/drop.py   横倾放球/倒球序列（任务三倒错球、任务�
 
 依据是 README 的依赖规则：「任务代码只 import `base`/`common` 与同级任务模块；
 `main.py` 是唯一装配点」。所以**跨任务共用的动作必须在 `common/`** —— 这也是
-`common/motion/drop.py` 从 `grab/motion/` 搬走的原因（`tests/tasks/place` 有一条用例钉着这点）。
+`common/motion/drop.py` 从 `grab/motion/` 搬走的原因（`tests/tasks/handling` 有一条用例钉着这点）。
 
 交接面：任务三 `GrabTask.holds_ball` → 任务四 `PlaceTask.holds_ball(True)`。
 
-## 3. 相位
+### 3. 相位
 
 | 相位 | 动作 | 判据/出口 |
 |---|---|---|
@@ -230,7 +266,7 @@ common/motion/drop.py   横倾放球/倒球序列（任务三倒错球、任务�
 | `RELEASE` | `common.motion.drop.BallDropSequence("release")`：横倾 30° → 断动力 3s | 序列 `done` |
 | `STOP` | 全 0 保持 → 结束 | — |
 
-## 4. ⚠️ 未定项（不编，等你定）
+### 4. ⚠️ 未定项（不编，等你定）
 
 1. **「到点」怎么判** —— 现在只有两个入口：`comm.place.transport_s` 计时（占位·未标定），
    或装配层/上位机判定后调 `task.arrived()`。**真实判据（视觉？定深？区域？）待定。**
@@ -242,10 +278,10 @@ common/motion/drop.py   横倾放球/倒球序列（任务三倒错球、任务�
 5. 放球后**要不要自动回正/后退** —— 用户口径是"结束"，所以**不回正不后退**（`release` 步骤表只有两步）；
    要改就改 `comm.motion.drop.release.steps` 或在 `comm.place.drop.release` 覆盖。
 
-## 5. 单独测这个动作（不占状态机）
+### 5. 单独测这个动作（不占状态机）
 
 ```bash
 python3 common/motion/drop.py --what release --prefix place   # 放球序列（台架/水池）
 python3 common/motion/drop.py --what dump    --prefix grab    # 任务三倒错球
-python3 -m pytest tests/tasks/place -q                        # 8 例（离线）
+python3 -m pytest tests/tasks/handling -q                        # 8 例（离线）
 ```

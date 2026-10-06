@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""tests/tasks/grab/test_drop.py — 横倾放球/倒球共享件（`common/motion/drop.py`）。
+"""tests/tasks/handling/test_drop.py — 横倾放球/倒球共享件（`common/motion/drop.py`）。
 
 它是**任务三（倒错球）与任务四（放球）共用**的那一个动作，所以验收重点是：
 步骤顺序、回正按遥测算、**限深下限只抬不降且恢复运行前的值**、缺 roll 遥测就停手、
@@ -41,7 +41,8 @@ class _Uart(object):
 
     @property
     def effective_min_depth_m(self):
-        return max(0.55, self.extra_min_depth_m)
+        # 与真件同源：下限 = max(cfg 的 site 值, 任务级下限)，别写死米数
+        return max(float(S.comm.depth_guard.min_depth_m), self.extra_min_depth_m)
 
     def set_extra_min_depth(self, m):
         self.extra_min_depth_m = max(0.0, float(m))
@@ -111,8 +112,12 @@ def test_steps_come_from_cfg_and_fall_back_when_deleted(monkeypatch):
                         S.Y(dict(steps=[{"name": "只走一步", "s": 0.5}])))
     seq = BallDropSequence("dump", log=lambda *a: None)
     assert [s["name"] for s in seq.steps] == ["只走一步"]
-    monkeypatch.setitem(S.comm.motion.drop, "dump", S.Y({}))       # 删掉 steps
-    assert [s.get("name") for s in _steps_of("dump")][0] == "右移", "删 cfg 要回代码兜底"
+    # ★ 2026-10-07 用户定：**删掉兜底** ⇒ 删 cfg 的 steps 必须**报名字**，不再回代码兜底
+    import pytest
+    from common.cfg.cfgnode import MissingCfg
+    monkeypatch.setitem(S.comm.motion.drop, "dump", S.Y({}))
+    with pytest.raises(MissingCfg):
+        _steps_of("dump")
 
 
 # --------------------------------------------------------------------------- #

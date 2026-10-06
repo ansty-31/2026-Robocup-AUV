@@ -2,7 +2,7 @@
 """tests/tasks/test_search_scan.py — 公共搜索扫描 `common/motion/search_scan.py`
 （详细用法、判据与实测见 doc/注释历史.md）"""
 import base.cfg.settings as S
-from common.motion.search_scan import Scan, _D_SCAN
+from common.motion.search_scan import Scan, _K_SCAN, _K_SCAN_PID
 
 DEADZONE = 0.138          # 执行器死区（与 tests/tasks/gate/test_gate_flow.py 同一常量）
 
@@ -83,10 +83,11 @@ def test_scan_output_within_outmax_and_above_actuator_deadzone():
         assert abs(c) <= om + 1e-9, "出力 %.3f 超 out_max %.3f" % (c, om)
     assert max(abs(c) for (_t, c, _y) in trace) >= DEADZONE, \
         "最大出力都不过执行器死区 %.3f ⇒ 实际 0 推力，等于没扫" % DEADZONE
-    # 兜底 out_max 必须**明显高于**执行器死区，否则"还剩二十几度就没推力"（当年 turn_deg 的警告）。
-    assert _D_SCAN["pid"]["out_max"] >= 1.05 * DEADZONE, \
-        "兜底 out_max=%.2f 已到执行器死区 %.3f 的下限（当年警告线就是 0.15）" \
-        % (_D_SCAN["pid"]["out_max"], DEADZONE)
+    # cfg 的 out_max 必须**明显高于**执行器死区，否则"还剩二十几度就没推力"（当年 turn_deg 的警告）。
+    import base.cfg.settings as _S
+    _om_cfg = float((_S.get("comm.motion.search_scan.pid", {}) or {}).get("out_max"))
+    assert _om_cfg >= 1.05 * DEADZONE, \
+        "cfg out_max=%.2f 已到执行器死区 %.3f 的下限（当年警告线就是 0.15）" % (_om_cfg, DEADZONE)
 
 
 def test_scan_converges_with_correct_polarity():
@@ -108,7 +109,8 @@ def test_scan_does_not_spin_when_polarity_is_wrong():
     sc = Scan()
     sim = _YawSim(yaw=0.0, sigma=-sc.sigma)     # ★ 故意反极性：船按相反方向响应
     trace, _t = _run(sc, sim, n_legs=1, dt_ms=100)
-    budget = 2.0 * sc.span + float(_D_SCAN["runaway_slack_deg"])
+    import base.cfg.settings as _S2
+    budget = 2.0 * sc.span + float(_S2.get("comm.motion.search_scan.runaway_slack_deg"))
     turned = abs(sc.sigma * sim.yaw)            # 实际转过的角度
     assert turned <= budget + 5.0, \
         "反极性下转了 %.0f°（预算 %.0f°）⇒ 防转圈失效，船会整圈转下去" % (turned, budget)
@@ -117,19 +119,13 @@ def test_scan_does_not_spin_when_polarity_is_wrong():
     assert zeros > 0, "越预算后从没停手过 ⇒ 会一路转圈"
 
 
-def test_search_scan_defaults_match_cfg():
-    """★ 守卫：`motion.search_scan` 的 **cfg 值与代码兜底必须一致**。"""
+def test_search_scan_cfg_keys_are_all_present():
+    """★ 2026-10-07 用户定：**删掉代码兜底** ⇒ 这里只做"必填检查"：
+    `motion.search_scan` 的每个键（含 `pid.*`）都必须在 cfg 里，缺则 `Scan()` 直接报名字。"""
     import base.cfg.settings as S
     cfg = S.get("comm.motion.search_scan", {}) or {}
-    bad = []
-    for k, v in _D_SCAN.items():
-        if k == "pid":
-            continue
-        got = cfg.get(k, None)
-        if got is None or abs(float(got) - float(v)) > 1e-9:
-            bad.append("%s：cfg=%s 兜底=%s" % (k, got, v))
-    for k, v in _D_SCAN["pid"].items():
-        got = (cfg.get("pid", {}) or {}).get(k, None)
-        if got is None or abs(float(got) - float(v)) > 1e-9:
-            bad.append("pid.%s：cfg=%s 兜底=%s" % (k, got, v))
-    assert not bad, "cfg 与代码兜底不一致（改了 cfg 就要同步兜底表）：\n  " + "\n  ".join(bad)
+    bad = [k for k in _K_SCAN if k != "pid" and cfg.get(k) is None]
+    pid = cfg.get("pid", {}) or {}
+    bad += ["pid.%s" % k for k in _K_SCAN_PID if pid.get(k) is None]
+    assert not bad, "cfg 缺 motion.search_scan 的键（代码已无兜底）：\n  " + "\n  ".join(bad)
+    Scan()      # 能构造出来 = 必填项齐全

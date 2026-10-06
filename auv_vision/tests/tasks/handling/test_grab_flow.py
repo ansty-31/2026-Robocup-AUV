@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""tests/tasks/grab/test_grab_flow.py — 任务三「夹取小球」相位机（`grab/grab_task.py`）的
+"""tests/tasks/handling/test_grab_flow.py — 任务三「夹取小球」相位机（`grab/grab_task.py`）的
 **相位顺序 + 安全属性**验收（离线，不碰硬件、不碰 BPU）。
 
 用户口径（2026-10-06）：抬头 30° → 扫描 → yaw 居中 → 对准前进 → 面积达标 → 回水平
@@ -84,7 +84,8 @@ class FakeUart(object):
 
     @property
     def effective_min_depth_m(self):
-        return max(0.55, self.extra_min_depth_m)
+        # 与真件同源：下限 = max(cfg 的 site 值, 任务级下限)，别写死米数
+        return max(float(S.comm.depth_guard.min_depth_m), self.extra_min_depth_m)
 
     def set_extra_min_depth(self, m):
         self.extra_min_depth_m = max(0.0, float(m))
@@ -212,16 +213,22 @@ def test_floor_is_raised_before_the_first_axis_command_and_cleared_at_exit(monke
     task, be = _task(monkeypatch, uart)
     _drive(task, uart, be, radius=_grow, frame=_red_frame())
     assert task.last_info["reason"] == "grab_ok"
-    assert uart.events[0] == "floor:1.00", "第一件事必须是抬下限，实际 %s" % uart.events[:2]
+    # ★ 判据是**顺序**（先抬下限、再发轴指令），**不是某个具体米数** ——
+    #   把阈值钉死在测试里等于"改 cfg 就假红"（本工程明令禁止，见 README 用例约定）。
+    floor = float(S.comm.grab.depth_floor_m)
+    assert uart.events[0] == "floor:%.2f" % floor, \
+        "第一件事必须是把下限抬到 cfg 值 %.2f，实际 %s" % (floor, uart.events[:2])
     first_turn = next(i for i, e in enumerate(uart.events) if e.startswith("turn:"))
     assert first_turn == 1, "抬下限与第一个轴指令之间不该插别的事：%s" % uart.events[:3]
     assert uart.extra_min_depth_m == pytest.approx(0.0), "任务结束必须撤回任务级下限"
-    assert float(S.comm.depth_guard.min_depth_m) == pytest.approx(0.55), "全局下限没被动过"
+    assert float(S.comm.depth_guard.min_depth_m) == pytest.approx(0.50), \
+        "全局限深是现场定死值（2026-10-06 定为 0.50），任务不许动它"
 
 
 def test_pitch_up_waits_for_depth_instead_of_driving_shallow(monkeypatch):
     """深度不够 ⇒ 先下潜；到不了就**放弃抬头**（不发任何轴指令）。"""
-    uart = FakeUart(depth=0.70)
+    from common.motion.axis import grab_cfg
+    uart = FakeUart(depth=float(grab_cfg()["depth_floor_m"]) - 0.15)   # ★ cfg 派生，别写死米数
     task, be = _task(monkeypatch, uart)
     _drive(task, uart, be, frames=200, radius=_grow, frame=_red_frame())
     assert task.last_info["reason"] == "depth_depth_timeout"
@@ -276,8 +283,12 @@ def test_happy_path_phase_order(monkeypatch):
 
 
 def test_center_uses_yaw_only(monkeypatch):
-    """居中段：只转 yaw，**不前进/不横移/不升降**（否则会撞目标）。"""
-    uart = FakeUart()
+    """居中段：只转 yaw，**不前进/不横移**（否则会撞目标）。
+
+    ⚠️ `heave` 这一路在抬头工作段（SEARCH/CENTER/APPROACH）已归**定深**管（用户 2026-10-06：
+    深度控制在 0.5~0.6）⇒ 这里把深度放进区间内，验证"定深不动手"时 heave 就是 0。
+    """
+    uart = FakeUart(depth=0.58)          # 区间内 ⇒ 定深不动作
     task, be = _task(monkeypatch, uart)
     task._phase = PH_GRAB_CENTER
     task._ensure_pids()

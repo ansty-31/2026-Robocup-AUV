@@ -3,12 +3,12 @@
 （详细用法、判据与实测见 doc/注释历史.md）"""
 from __future__ import annotations
 
-from common.cfg.cfgnode import flag, num
+from common.cfg.cfgnode import flag, num, req, req_flag, req_node, MissingCfg
 from common.motion.turn_deg import TurnCore
 import base.cfg.settings as S
 from base.log.turn_log import turn_log
 from common.cfg.cfgnode import flag, motion_node, num, sub
-from gate.motion.params import PH_ALIGN, SUB_HDG, SUB_GOLDEN, _D_Z, _D_HDG, _BOOL_KEYS
+from gate.motion.params import PH_ALIGN, SUB_HDG, SUB_GOLDEN, _K_HDG, _BOOL_KEYS
 from gate.motion.channels import _dof_clip
 
 # -*- coding: utf-8 -*-
@@ -33,14 +33,12 @@ def hdg_cfg(node=None):
             node = (S.comm.get("gate", None) or {}).get("hdg", None)
         except Exception:
             node = None
+    # ★ 2026-10-07：**无兜底** —— 逐键必填，缺哪个报哪个（`_K_HDG` 见 params.py）
     if not isinstance(node, dict):
-        return dict(_D_HDG)
-    out = dict(_D_HDG)
-    for k in _D_HDG:
-        if k in _BOOL_KEYS:
-            out[k] = flag(node, k, _D_HDG[k])
-        elif node.get(k) is not None:
-            out[k] = num(node, k, _D_HDG[k])
+        raise MissingCfg("cfg 缺 comm.gate.hdg（代码已无兜底）")
+    out = {}
+    for k in _K_HDG:
+        out[k] = req_flag(node, k) if k in _BOOL_KEYS else req(node, k)
     return out
 
 
@@ -110,6 +108,11 @@ class HeadingAligner(object):
         if cap > 0 and deg > cap:
             deg = cap
         self.last_target_deg = deg
+        # ★ 2026-10-07：**实际下发量进日志**（这一行就是答案，别再靠 cfg 反推了）
+        if hasattr(self, "last_info"):
+            self.last_info["turn_deg"] = round(float(deg), 2)
+            self.last_info["turn_dir"] = str(self.last_dir)
+            self.last_info["turn_raw_psi"] = round(float(raw), 2)
         kw = dict(self.turn_kwargs)
         kw.setdefault("timeout", float(self.cfg.get("turn_timeout_s", 8.0)))
         self._core = TurnCore(deg=deg, left=left, log=self.log, **kw)
@@ -298,12 +301,8 @@ class GateHdg(object):
     def _turn_inner_loop(self, yaw_cmd, now_ms=0):
         """转向期间按 `comm.gate.hdg.turn_period`（默认 0.05s=20Hz）轮询"下位机完成反馈"。"""
         import time as _time
-        # 缺配置也要能跑（都走 _D_HDG 的兜底）
-        try:
-            period = float(num(sub(self._G, "hdg"), "turn_period",
-                                _D_HDG.get("turn_period", 0.05)) or 0.05)
-        except Exception:
-            period = 0.05
+        # ★ 2026-10-07：无兜底 —— 缺键即报名字
+        period = req(sub(self._G, "hdg"), "turn_period")
         period = max(0.01, min(0.2, period))
         t_wall0 = _time.monotonic()
         budget = float(self._hdg_cfg.get("turn_timeout_s", 8.0)) + 1.0
@@ -335,7 +334,7 @@ class GateHdg(object):
         return yaw_cmd
     def _hdg_turns_full(self):
         """**本门转向次数是否已达上限** `hdg.max_turns`（0/负 = 不限）。"""
-        cap = int(num(sub(self._G, "hdg"), "max_turns", _D_HDG["max_turns"]) or 0)
+        cap = int(req(sub(self._G, "hdg"), "max_turns") or 0)
         return cap > 0 and self._hdg_turns >= cap
 
     def _hdg_ready(self, mode, now_ms):

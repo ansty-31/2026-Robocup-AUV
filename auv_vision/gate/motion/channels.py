@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import numpy as np
-from common.cfg.cfgnode import flag, merge, motion_num, num, sub
+
+import base.cfg.settings as S
+from common.cfg.cfgnode import flag, merge, motion_num, num, sub, req, req_flag, req_node, MissingCfg
 from gate.percept.gate_postproc import pick as postproc_pick
 from gate.percept.gate_frontend import parse_kpt_mode, width_range_depth, MODE_FULL, MODE_P3P, MODE_WIDTH
 from gate.percept.geometry import gate_pose
-from gate.motion.params import (PH_SEARCH, PH_ALIGN, SUB_SWAY_BACK, _D_Z, _D_SURGE,
-                                _D_KPT, _D_SEARCH, _D_HDG, _D_PNP, _D_LOCK, _D_SELECT)
+from gate.motion.params import PH_SEARCH, PH_ALIGN, SUB_SWAY_BACK
 
 def _dof_clip(v):
     return float(max(-1.0, min(1.0, v)))
@@ -25,21 +26,43 @@ class GateChannels(object):
     def _set_info(self, action, mode="", substate="",
                   z=None, dx=0.0, dy=0.0, sway=0.0, heave=0.0,
                   surge=0.0, yaw=0.0, kpt=0, ratio=None, kpt_raw=None,
-                  hdg=None, hdg_skip=None, hdg_state=None):
+                  hdg=None, hdg_skip=None, hdg_state=None, turn_deg=None, turn_dir=None):
         # hdg_skip：居中达标却跳过正航向的原因（只在那个瞬间有意义；传 None 表示本帧不涉及）
         if hdg_skip is not None:
             self.last_info["hdg_skip"] = hdg_skip
         if hdg_state is not None:
             self.last_info["hdg_state"] = str(hdg_state)
+        # ★ 2026-10-07 用户定：**把"实际下发给下位机的转向角/方向"记进逐帧日志**。
+        #   为什么：`yaw`(DOF) 与 `hdg_tgt` 恒为 0，转向走的是 `uart.request_turn(deg,dir)` 另一条路
+        #   ⇒ 日志里查不到"到底下发了多少度"，只能靠猜（我据此把 15° 猜错过一次）。
+        #   这两项**一旦写下就常驻** `last_info`（每次转向刷新），所以任一帧都能看到最近一次的下发量。
+        if turn_deg is not None:
+            self.last_info["turn_deg"] = round(float(turn_deg), 2)
+        if turn_dir is not None:
+            self.last_info["turn_dir"] = str(turn_dir)
         if self._post_sway_until_ms is not None:
             _now = self._now_ms if self._now_ms is not None else 0
-            _kmin = int(num(sub(self._G, "hdg"), "post_sway_kpt_min",
-                            _D_HDG["post_sway_kpt_min"]) or 0)
+            _kmin = int(req(sub(self._G, "hdg"), "post_sway_kpt_min") or 0)
             _kcur = self._post_sway_kpt_count()
-            _fresh = self.frames > int(getattr(self, "_post_sway_frame0", -1) or -1)
-            if _fresh and (_kmin <= 0 or _kcur >= _kmin):
+            # ★★ 2026-10-06 用户定：**转向后先连停 settle 帧，再看画面**。
+            #   实测（帧 17 转完 → 帧 18 仍报 kpt=4）：转向后前若干帧**还是转向前采的旧画面**
+            #   （相机/流水线滞后），拿它判"门回来了"没有意义 —— 旧代码在下一帧就
+            #   `_kcur(4) >= _kmin(2)` 立刻关窗 ⇒ **sway_back 一帧都没发**（整个日志 0 次）。
+            #   所以：必须等**新画面**（`frames > frame0 + settle`）才允许按画面收手。
+            _settle = int(req(sub(self._G, "hdg"), "post_sway_settle_frames") or 0)
+            _f0 = int(getattr(self, "_post_sway_frame0", -1) or -1)
+            _fresh = self.frames > (_f0 + _settle)
+            # 收手判据（方案 A）：**门可见 且 已居中**才算"光轴对齐完成"。
+            #   居中判据**调用 align 的** px_x/px_y（用户 2026-10-06 定），不另立一套。
+            _al = req_node(self._G, "align")
+            _dxn = abs(float(self.last_info.get("dx") or 0.0))
+            _dyn = abs(float(self.last_info.get("dy") or 0.0))
+            _centered = (_dxn <= req(_al, "px_x")
+                         and _dyn <= req(_al, "px_y"))
+            if _fresh and (_kmin <= 0 or (_kcur >= _kmin and _centered)):
                 self._post_sway_until_ms = None
-                self.last_info["sway_exit"] = "kpt_off" if _kmin <= 0 else "kpt>=%d" % _kmin
+                self.last_info["sway_exit"] = ("kpt_off" if _kmin <= 0
+                                               else "kpt>=%d且居中" % _kmin)
             elif _now >= self._post_sway_until_ms:
                 self._post_sway_until_ms = None         # 窗口到期 ⇒ **安全兜底**退出（绝不永久停摆）
                 self.last_info["sway_exit"] = "expire"
@@ -67,12 +90,40 @@ class GateChannels(object):
             "hdg_tgt": round(float(self._hdg.last_target_deg or 0.0), 1)})
         self.uart.send_dof(_dof_clip(surge), _dof_clip(sway),
                            _dof_clip(heave), _dof_clip(yaw))
+    def _center_ref(self):
+        """**居中判据的基准 = 相机主点（光轴）**，不是画面几何中心。
+
+        ★★ 2026-10-07 用户定 + 实测确认：前视相机 `cx,cy = (702.27, 409.14)`，
+        而画面几何中心是 `(640, 360)` —— 差 **(+62.3, +49.1) px = 归一化 (0.0973, 0.1365)**。
+
+        用画面中心当基准时：**门完美落在光轴上**（tvec=[0,0,z]）也会读出
+        `dxn=0.0973 / dyn=0.1365` ⇒ 任何 `px_y < 0.1365` 的阈值**物理上永远无法满足**
+        ⇒ `aligned` 恒 False ⇒ 转向链/居中闸全不启动（实船卡在门口一动不动就是这个）。
+
+        "居中"的物理含义本来就是"与光轴对齐"，所以基准必须是主点。
+        """
+        c = self.camera
+        cx = float(getattr(c, "cx", 0.0) or (self.w / 2.0))
+        cy = float(getattr(c, "cy", 0.0) or (self.h / 2.0))
+        return cx, cy
+
     def _speed(self, tier):
-        """进近速度档：`gate.surge.<tier>` 显式覆盖 → `motion.surge_<tier>`（**与撞球共用**）→ 代码兜底。"""
-        return num(sub(self._G, "surge"), tier, motion_num("surge_" + tier))
+        """进近速度档：`gate.surge.<tier>` 显式覆盖 → `motion.surge_<tier>`（**与撞球共用**）→ 代码兜底。
+
+        ⚠️ `num(node, key, default)` 的 default 是**先求值**的，所以 `motion_num("surge_xxx")`
+        在 `motion.surge_xxx` 不存在时会先抛 KeyError（实船踩：creep 档就崩在这）。
+        这里改成"**先试、失败再退**"，保证任何档位名都不会炸。
+        """
+        v = sub(self._G, "surge")
+        if v is not None and v.get(tier) is not None:
+            return float(v.get(tier))
+        try:
+            return float(motion_num("surge_" + tier))
+        except Exception:
+            raise MissingCfg("cfg 缺 comm.gate.surge.%s（代码已无兜底）" % tier)
     def _through_speed(self):
         """本次冲刺速度 = `comm.gate.surge.through`。"""
-        return num(sub(self._G, "surge"), "through", _D_SURGE["through"])
+        return req(sub(self._G, "surge"), "through")
     def _start_search(self, new_round=False):
         """回到"等门"状态。"""
         # 2026-10-03 用户定：**删掉 SEARCH 扫视** —— 直接回 ALIGN 原地等门（不左右扫）
@@ -113,18 +164,18 @@ class GateChannels(object):
             self._kpt_mem.reset()
     def _search_sweep(self, now_ms):
         """SEARCH：左右平移扫视，**每轮时长按 2 的次幂递增**（用户 2026-09-27 定）。"""
-        s = merge(sub(self._G, "search"), _D_SEARCH)
-        base = num(s, "sweep_s", _D_SEARCH["sweep_s"]) * 1000.0
-        pause = max(0.0, num(s, "pause_s", _D_SEARCH["pause_s"]) * 1000.0)
+        s = req_node(self._G, "search")
+        base = req(s, "sweep_s") * 1000.0
+        pause = max(0.0, req(s, "pause_s") * 1000.0)
         if base <= 0:
             return 0.0
-        cap = max(base, num(s, "sweep_max_s", _D_SEARCH["sweep_max_s"]) * 1000.0)
-        v = num(s, "sway", _D_SEARCH["sway"])
+        cap = max(base, req(s, "sweep_max_s") * 1000.0)
+        v = req(s, "sway")
         if self._search_entry_ms is None:
             self._search_entry_ms = now_ms
         t = now_ms - self._search_entry_ms
         # ★ 固定搜索时长：过完门/丢门后最多扫 max_ms，到点就不再扫（保持静止，等门自己出现）
-        max_ms = num(s, "max_ms", 0) * 1000.0
+        max_ms = req(s, "max_ms") * 1000.0
         if max_ms > 0 and t > max_ms:
             return 0.0
         k, t0, sweep = 0, 0.0, base          # 先定位当前落在第几轮（每轮时长翻倍）
@@ -153,7 +204,7 @@ class GateChannels(object):
         kc = None if d is None else getattr(d, "kpt_conf", None)
         if kc is None:
             return 0
-        thr = num(sub(self._V, "keypoint"), "conf_thr", _D_KPT["conf_thr"])
+        thr = req(sub(self._V, "keypoint"), "conf_thr")
         return int((np.asarray(kc) >= thr).sum())
 
     def _uart_yaw(self):
@@ -179,9 +230,10 @@ class GateChannels(object):
                 obj3s = self.obj3[ids]
                 img2s = np.asarray(kp)[ids]
                 res = gate_pose(self.camera, obj3s, img2s, prev=None,
-                                reproj_thr=float(_D_PNP["reproj_px"]),
-                                z_bounds=(float(_D_PNP["z_min"]), float(_D_PNP["z_max"])),
-                                refine=bool(_D_PNP["refine"]))
+                                reproj_thr=req(sub(self._V, "pnp"), "reproj_px"),
+                                z_bounds=(req(sub(self._V, "pnp"), "z_min"),
+                                          req(sub(self._V, "pnp"), "z_max")),
+                                refine=req_flag(sub(self._V, "pnp"), "refine"))
                 if res is not None:
                     return float(res[1].ravel()[2])
             elif mode == MODE_WIDTH and len(ids) == 2:
@@ -195,20 +247,51 @@ class GateChannels(object):
     def _pick_gate(self, dets):
         """选目标门 = **z 优先 + 同时相信"面积最大"**（★ 2026-10-05 用户定）。
         ⚠️ **k 一致性检验不在这里** —— 它和跳变保护同性质，是"**选定之后保护锁定**"用的，"""
-        conf_thr = num(sub(self._V, "keypoint"), "conf_thr", _D_KPT["conf_thr"])
+        conf_thr = req(sub(self._V, "keypoint"), "conf_thr")
         gates = [d for d in dets if getattr(d, "kind", None) == "gate"]
         if not gates:
             return None
         k_true = float(self.camera.fx) * float(self.frame_w_m) / float(self.w or 1)
-        best, best_z = None, None
-        for d in gates:
-            z = self._z_est(d, conf_thr)
-            ratio = (float(d.w) / float(self.w)) if (self.w and getattr(d, "w", 0)) else 0.0
-            if ratio > 1e-6 and k_true > 0:
-                z_area = k_true / ratio          # 面积（框占比）反推的 z
-                z_eff = float(z) if (z is not None and float(z) >= z_area) else z_area
-            else:
-                z_eff = z
-            if best is None or (z_eff is not None and (best_z is None or z_eff < best_z)):
-                best, best_z = d, z_eff
-        return best
+        # ★★ 2026-10-06 用户定：**选门还是 near（z_eff 最小）；k 一致性只做"检验"** ——
+        #   先按 near 选出目标，再算当前所有候选的 k：若选中的那扇**不是当前最大 k**
+        #   （k 小 = z 报得比实际近 = 测距崩了，实船同一扇门 z 抖 ±35% 导致 k 在 0.48~0.87 跳），
+        #   就**退回去**（本帧不采纳、原地 hold），而不是把"看着更近的崩解"选走。
+        k_max_ratio = float(req(sub(self._G, "select"), "k_max_ratio"))
+        # ★★ 2026-10-06 用户定：**先按 near（z_eff 最小）选，若它的 k 不是当前最大档，
+        #   就把它排除掉、在剩下的里重新选**，直到选中的那扇 k 达标（或没得选 ⇒ None）。
+        #   k 小 = z 报得比实际近（测距崩了）—— 实船同一扇门框占比稳定而 z 抖 ±35%，
+        #   k 在 0.48~0.87 跳，纯按 near 会把这扇"看着更近的崩解"选走（一开始就锁到了**后边那扇**）。
+        k_max_ratio = float(req(sub(self._G, "select"), "k_max_ratio"))
+
+        def _k_of_sel(d):
+            r = (float(d.w) / float(self.w)) if (self.w and getattr(d, "w", 0)) else 0.0
+            zz = self._z_est(d, conf_thr)
+            return (float(zz) * r) if (zz is not None and r > 1e-6) else None
+
+        cand = list(gates)
+        while cand:
+            best, best_z = None, None
+            for d in cand:
+                z = self._z_est(d, conf_thr)
+                ratio = (float(d.w) / float(self.w)) if (self.w and getattr(d, "w", 0)) else 0.0
+                if ratio > 1e-6 and k_true > 0:
+                    z_area = k_true / ratio          # 面积（框占比）反推的 z
+                    z_eff = float(z) if (z is not None and float(z) >= z_area) else z_area
+                else:
+                    z_eff = z
+                if best is None or (z_eff is not None and (best_z is None or z_eff < best_z)):
+                    best, best_z = d, z_eff
+            if best is None:
+                return None
+            if k_max_ratio <= 0:
+                return best
+            ks = [_k_of_sel(d) for d in cand]
+            have = [k for k in ks if k is not None]
+            kbest = _k_of_sel(best)
+            if not have or kbest is None or kbest >= k_max_ratio * max(have):
+                return best
+            if S.DEBUG:
+                print("[GATE] 选门 k 检验不通过：选中的 k=%.3f < %.2f×最大 %.3f ⇒ 排除它重新选"
+                      % (kbest, k_max_ratio, max(have)))
+            cand = [d for d in cand if d is not best]      # ★ 排除他，重新选
+        return None

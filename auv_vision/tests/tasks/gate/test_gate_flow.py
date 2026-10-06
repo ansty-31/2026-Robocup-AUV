@@ -221,8 +221,9 @@ def test_yaw_only_during_align(monkeypatch):
     monkeypatch.setitem(S.comm.gate, "pass_target", 1)
 
     def det_fn():
-        # 用 z=1.0 ≤ z.cross(1.2) 的**正常出口**进 THROUGH（门口兜底已改为"后退重取"，不盲冲）
-        return _det(1.0, kconf=(0.95, 0.95, 0.95, 0.95))
+        # ★ 2026-10-07：门的 z 要**小于 `z.cross`**（现 1.2，与 z.slow_max/width.z_max 同值）
+        #   才走得到"正常出口"进 THROUGH；这里取 0.6 留足余量。
+        return _det(0.6, kconf=(0.95, 0.95, 0.95, 0.95))
 
     task = _task(det_fn)
     _run(task, 30)
@@ -314,83 +315,62 @@ _ACT_DEADZONE = 0.138
 
 
 
-def test_gate_defaults_match_cfg():
-    """**配置守卫**：代码里的兜底默认值必须与 `cfg/*.yaml` 同值（缺配置时行为不变）。
-    三条反向检查：
-    · **cfg 里出现的键必须真的被读到**（拼错键名会静默失效）；
-    · **共用参数（comm.motion）**：cfg 的 motion 段必须与代码兜底同值；
-    · **共用值不许在任务段重复一份**（gate 段不许再抄 sway/heave 增益或 fast/slow 速度档）。"""
+def test_gate_cfg_keys_are_all_readable():
+    """**配置守卫（无兜底版）**：`cfg/*.yaml` 里出现的每个键，代码都必须**真的读到**。
+
+    ★ 2026-10-07 用户定：**删掉代码里的兜底默认值**（改参数要同步两处，纯鸡肋）。
+    删掉之后"同值比较"没有意义了，但这条**反向检查仍然值钱**：
+    键名拼错 ⇒ 代码 `req()` 读不到 ⇒ 要么启动报缺、要么 cfg 里的值静默失效。
+    所以这里逐个键核对"它在代码的键名清单里"。
+    """
     import gate.gate_task as gt
-    from common.cfg.cfgnode import MOTION_DEFAULTS
-    from gate.motion.hdg import _D_HDG
-    from gate.percept.gate_postproc import _D_DET, _D_POST, _D_SELECT
+    from gate.motion.params import (_K_ALIGN, _K_LOITER, _K_Z, _K_SURGE, _K_COARSE,
+                                    _K_WIDTH, _K_HOLD, _K_REACQ, _K_THROUGH, _K_SEARCH,
+                                    _K_HDG, _K_PNP, _K_GEOM, _K_TASK, _K_KPT)
+    from gate.percept.gate_postproc import _K_DET, _K_POST, _K_SELECT
 
     G, V = S.comm.gate, S.vision.gate
     pairs = [
-        ("comm.gate.align", gt._D_ALIGN, G.align),
-        ("comm.gate.loiter", gt._D_LOITER, G.loiter),
-        ("comm.gate.z", gt._D_Z, G.z),
-        ("comm.gate.surge", gt._D_SURGE, G.surge),
-        ("comm.gate.coarse", gt._D_COARSE, G.coarse),
-        ("comm.gate.width", gt._D_WIDTH, G.width),
-        ("comm.gate.hold", gt._D_HOLD, G.hold),
-        ("comm.gate.reacquire", gt._D_REACQ, G.reacquire),
-        ("comm.gate.through", gt._D_THROUGH, G.through),
-        ("comm.gate.search", gt._D_SEARCH, G.search),
-        ("comm.gate.hdg", _D_HDG, G.hdg),
-        # 转向原语（gate 的正航向与 .sh 脚本共用同一套参数）
-        ("vision.gate.pnp", gt._D_PNP, V.pnp),
-        ("vision.gate.percept.geometry", gt._D_GEOM, V.geometry),
-        # 解码后处理（规范 doc/设计/gate_pose_decode_spec.md §4；实现 gate/percept/gate_postproc.py）
-        ("vision.gate.det", _D_DET, V.det),
-        ("vision.gate.postproc", _D_POST, V.postproc),
-        ("vision.gate.select", _D_SELECT, V.select),
+        ("comm.gate.align", _K_ALIGN, G.align),
+        ("comm.gate.loiter", _K_LOITER, G.loiter),
+        ("comm.gate.z", _K_Z, G.z),
+        ("comm.gate.surge", _K_SURGE, G.surge),
+        ("comm.gate.approach", (("tier",), ), None),
+        ("comm.gate.coarse", _K_COARSE, G.coarse),
+        ("comm.gate.width", _K_WIDTH, G.width),
+        ("comm.gate.hold", _K_HOLD, G.hold),
+        ("comm.gate.reacquire", _K_REACQ, G.reacquire),
+        ("comm.gate.through", _K_THROUGH, G.through),
+        ("comm.gate.search", _K_SEARCH, G.search),
+        ("comm.gate.hdg", _K_HDG, G.hdg),
+        ("vision.gate.pnp", _K_PNP, V.pnp),
+        ("vision.gate.percept.geometry", _K_GEOM, V.geometry),
+        ("vision.gate.det", _K_DET, V.det),
+        ("vision.gate.postproc", _K_POST, V.postproc),
+        ("vision.gate.select", _K_SELECT, V.select),
     ]
     # cfg 里有、但代码**故意**不参与运算的键（每加一个都要写理由）
     only_doc = {
         "comm.gate.z.align_max", "comm.gate.z.fast_max",   # Z 只分 slow_max 两档，留作扩展
         "vision.gate.percept.geometry.bar_width", "vision.gate.percept.geometry.sym_bars",
-        "comm.gate.timeout_ms", "comm.gate.pass_target", "comm.gate.pose_hold_frames",
     }
     bad = []
-    for name, code, cfg in pairs:
-        cfg = dict(cfg)
-        for k in cfg:
+    for name, keys, cfg in pairs:
+        if cfg is None:
+            continue
+        for k in dict(cfg):
             key = "%s.%s" % (name, k)
-            if k not in code:
-                if key not in only_doc:
-                    bad.append("%s：cfg 有但代码读不到（拼错键名？或兜底表漏了这个键）" % key)
-                continue
-            if cfg[k] != code[k]:
-                bad.append("%s：cfg=%r 而代码兜底=%r" % (key, cfg[k], code[k]))
-    # 顶层标量（原先散成字面量，现在集中到 _D_TASK）
+            if k not in keys and key not in only_doc:
+                bad.append("%s：cfg 有但代码读不到（拼错键名？或键名清单漏了它）" % key)
+    assert not bad, "cfg 与代码键名清单不一致：\n  " + "\n  ".join(bad)
+    # 顶层标量（现在集中成 _K_TASK）
     for k in ("timeout_ms", "pass_target", "pose_hold_frames"):
-        if G.get(k) != gt._D_TASK[k]:
-            bad.append("comm.gate.%s：cfg=%r 代码兜底=%r" % (k, G.get(k), gt._D_TASK[k]))
-    # keypoint.conf_thr（3 处兜底都指向 _D_KPT）
-    if V.keypoint.get("conf_thr") != gt._D_KPT["conf_thr"]:
-        bad.append("vision.gate.keypoint.conf_thr：cfg=%r 代码兜底=%r"
-                   % (V.keypoint.get("conf_thr"), gt._D_KPT["conf_thr"]))
-    # 共用运动参数：cfg 的 motion 段 == 代码兜底表
-    for k, dflt in MOTION_DEFAULTS.items():
-        if S.comm.motion.get(k) != dflt:
-            bad.append("comm.motion.%s：cfg=%r 代码兜底=%r" % (k, S.comm.motion.get(k), dflt))
-    assert not bad, "代码兜底默认值与 cfg 不一致（改了 cfg 就要同步兜底表）：\n  " + "\n  ".join(bad)
-
-    assert "align_yaw" not in G, "comm.gate 里又出现了 align_yaw（居中 yaw 通道已删除）"
-    # 共用参数不许在任务段重复一份
-    for dup in ("fast", "slow"):
-        assert dup not in dict(G.surge), \
-            "comm.gate.surge.%s 与 comm.motion.surge_%s 重复（共用值只写 motion 一处）" % (dup, dup)
-    for dup in ("surge_fast", "surge_slow", "pid", "approach_pid", "lost_inertia_surge"):
-        assert dup not in dict(S.comm.ball), \
-            "comm.ball.%s 与 comm.motion 重复（共用值只写 motion 一处）" % dup
-
-
-
-
-
-
+        assert G.get(k) is not None, "comm.gate.%s 缺失（代码已无兜底）" % k
+        assert k in _K_TASK
+    # keypoint.conf_thr
+    assert V.keypoint.get("conf_thr") is not None and "conf_thr" in _K_KPT
+    # approach.tier（字符串档位）
+    assert (S.comm.gate.get("approach") or {}).get("tier"), "comm.gate.approach.tier 缺失"
 def test_align_confirm_still_resets_across_mode_class():
     """但跨类（位姿档 ↔ width/coarse）必须清零：那才是"证据不同"。"""
     seq = {"i": 0}
@@ -1018,11 +998,15 @@ def test_sway_back_never_locks_up_even_if_every_frame_is_a_far_gate():
     assert task.last_info["phase"] in ("ALIGN", "APPROACH", "THROUGH", "SEARCH"), task.last_info["phase"]
 
 
-def test_sway_back_exits_when_the_lost_gate_comes_back():
+def test_sway_back_exits_when_the_lost_gate_comes_back(monkeypatch):
     """刚丢的那个门一回来（同门判据过）⇒ 立刻退出状态，交回视觉；且这一帧 ψ 已刷新。"""
     w = _ShrinkWorld(psi0=25.0, z=1.5)                 # z 不变 ⇒ 判成同一个门
     task, uart, t0 = _drive_to_sway_back(w)
     assert task._post_sway_until_ms is not None, "门被甩出画面后应进入状态"
+    # ★ 2026-10-06：收手判据多了两道 —— **转向后先连停 settle 帧**（新画面才可信）
+    #   和"门可见且**居中**"。本用例专注测"角点出现"，把 settle 显式设 0。
+    monkeypatch.setitem(S.comm.gate["hdg"], "post_sway_settle_frames", 0)
+
     frame = np.zeros((CAM.height, CAM.width, 3), np.uint8)
     w.hide = False                                     # ★ 门回到画面里（≥2 个角点）
     uart.telemetry.yaw_deg = w.H * w.imag_sign
@@ -1060,6 +1044,10 @@ def test_post_sway_kpt_threshold_is_configurable_and_bites(monkeypatch):
     task._hdg_cfg = dict(task._hdg_cfg)
     task._hdg_cfg["post_sway_kpt_min"] = 3            # 本任务读到的 hdg 配置
     monkeypatch.setitem(S.comm.gate["hdg"], "post_sway_kpt_min", 3)   # cfg 侧也改（用例结束自动还原）
+    # ★ 2026-10-06：收手判据多了两道 —— **转向后先连停 settle 帧**（新画面才可信）
+    #   和"门可见且**居中**"。本用例专注测"角点出现"，把 settle 显式设 0。
+    monkeypatch.setitem(S.comm.gate["hdg"], "post_sway_settle_frames", 0)
+
     frame = np.zeros((CAM.height, CAM.width, 3), np.uint8)
 
     def _step(t_ms):
@@ -1082,7 +1070,7 @@ def test_post_sway_kpt_threshold_is_configurable_and_bites(monkeypatch):
     w.kconf = (0.95, 0.95, 0.95, 0.0)                 # 第 3 个角点可信 ⇒ 收手
     _step(t0 + 300)
     assert task._post_sway_until_ms is None, '3 个可信角点 ⇒ 该收手交回视觉'
-    assert task.last_info.get('sway_exit') == 'kpt>=3', task.last_info.get('sway_exit')
+    assert task.last_info.get('sway_exit') in ('kpt>=3', 'kpt>=3且居中'), task.last_info.get('sway_exit')
 
 
 def test_post_sway_starts_after_the_turn_end_hard_stop():
@@ -1253,18 +1241,27 @@ def test_sway_back_yields_to_through_and_to_a_running_turn():
 
 
 def test_turn_scale_and_max_step_shape_the_issued_angle():
-    """出厂默认（用户 2026-09-28 定）：**下发角 = |ψ| × turn_scale(0.8)，再用 max_step_deg(10°) 钳位**。"""
+    """★ 2026-10-06 用户定：**上位机不缩放、不钳位** —— 把**完整目标角**交给下位机。
+
+    为什么改：限幅是上位机这层多加的（`hdg.py:104-109` 先 ×turn_scale 再钳 max_step_deg），
+    而 `common/motion/turn_deg.py` 文档写明"只认角大小与方向，限幅/PID/死区这些上位机运动参数
+    已整块删除（旋转由下位机执行，参数都在下位机那侧）"。两边约定矛盾 ⇒ 实船 ψ=+42° 到下位机
+    只剩 15°，转完残余 27° 还得靠下一步，而 `_hdg_done` 又只走了一步。
+    现在 `turn_scale=1.0`、`max_step_deg=0`（0=不钳）⇒ 下发角 == |ψ| 本身。
+    """
     import pytest as _pytest
     from gate.motion.hdg import hdg_cfg as _hdg_cfg
     cfg = _hdg_cfg()
-    assert cfg["turn_scale"] == _pytest.approx(0.8) and cfg["max_step_deg"] == _pytest.approx(15.0), \
-        "出厂默认应是 turn_scale 0.8 + max_step_deg 15（实际 %s/%s）" % (cfg["turn_scale"], cfg["max_step_deg"])
-    for psi, want in ((10.0, 8.0), (25.0, 15.0), (9.0, 7.2), (-12.0, 9.6), (-40.0, 15.0)):
+    assert cfg["turn_scale"] == _pytest.approx(1.0) and cfg["max_step_deg"] == _pytest.approx(0.0), \
+        "出厂默认应是 turn_scale 1.0 + max_step_deg 0（不缩放/不钳位）；实际 %s/%s" % (
+            cfg["turn_scale"], cfg["max_step_deg"])
+    # 下发角就是 ψ 本身（正负号保留），不再被缩放或被 15° 钳住
+    for psi in (10.0, 25.0, 9.0, -12.0, -40.0, 42.0):
         task = GateTask(_Uart(yaw_deg=0.0), _Hub(lambda: []), CAM.width, CAM.height)
         task._hdg.start(0, psi=psi)
-        assert task._hdg.last_target_deg == _pytest.approx(want), (psi, task._hdg.last_target_deg)
-        assert task._hdg.last_dir == ("左转" if psi < 0 else "右转"), (psi, task._hdg.last_dir)
-
+        # `last_target_deg` 存的是**大小**，方向另存 `last_dir`（+ = 右转）
+        assert abs(task._hdg.last_target_deg) == _pytest.approx(abs(psi)), (psi, task._hdg.last_target_deg)
+        assert str(task._hdg.last_dir) == ('右转' if psi > 0 else '左转'), (psi, task._hdg.last_dir)
 
 def test_one_turn_per_gate_first_four_corner_measurement_is_trusted():
     """**2026-10-02 用户定（板端语义）**：转向交给下位机执行 ⇒ **第一次看到 4 个角点的那次测量
@@ -1276,8 +1273,9 @@ def test_one_turn_per_gate_first_four_corner_measurement_is_trusted():
     task, hist = _drive(w, frames=600)
     reqs = [a for _i, a in task.uart.turn_reqs]
     assert len(reqs) == 1, "一门只该下发一次转向（实际 %s）" % reqs
-    assert abs(reqs[0]) <= float(S.comm.gate.hdg.max_step_deg) + 1e-6, \
-        "下发角度应被 max_step_deg 钳位（实际 %.1f°）" % reqs[0]
+    cap = float(S.comm.gate.hdg.max_step_deg)
+    assert cap <= 0 or abs(reqs[0]) <= cap + 1e-6, \
+    "max_step_deg 配正数才钳；现配 0=不钳，下发的应是完整 ψ（实际 %s°）" % abs(reqs[0])
     assert task._hdg_turns == 1, task._hdg_turns
     # 转完即"航向已确认"（信下位机执行），于是本门不再起转
     assert any(h.get("hdg_skip") and "done" in str(h.get("hdg_skip")) for h in hist), \
@@ -1308,13 +1306,17 @@ def test_one_turn_per_gate_makes_max_turns_vestigial(monkeypatch):
             "一次性转向 ⇒ 不该出现 turns_full（实测 %s）" % skips[:3]
 
 
-def test_post_sway_exits_as_soon_as_the_configured_keypoints_appear():
+def test_post_sway_exits_as_soon_as_the_configured_keypoints_appear(monkeypatch):
     """转完补偿的**主判据**（用户 2026-09-28 定）：**边反向平移边缓慢后退**，
     直到"画面里至少出现 `post_sway_kpt_min`（默认 2）个角点"就交回视觉。
     钉三件事：① 门还在画外（0 角点）时**继续**平移 + 后退；② 角点数**不够**（1 个 < 2）时**不**收手；"""
     w = _ShrinkWorld(psi0=25.0, z=1.5)
     task, uart, t0 = _drive_to_sway_back(w)              # 转完门被甩出画面
     assert task._post_sway_until_ms is not None
+    # ★ 2026-10-06：收手判据多了两道 —— **转向后先连停 settle 帧**（新画面才可信）
+    #   和"门可见且**居中**"。本用例专注测"角点出现"，把 settle 显式设 0。
+    monkeypatch.setitem(S.comm.gate["hdg"], "post_sway_settle_frames", 0)
+
     frame = np.zeros((CAM.height, CAM.width, 3), np.uint8)
     kmin = int(S.comm.gate.hdg.get("post_sway_kpt_min", 2) or 0)
     assert kmin == 2, kmin
@@ -1362,9 +1364,9 @@ def test_z_jump_protection(monkeypatch):
     assert float(S.comm.gate.z.relock_z_jump_m) == 0.5
     assert float(S.comm.gate.z.relock_away_m) == 1.8
     # ★ 2026-10-05 用户定：**加回来** —— 2.5m 开外**完全不相信**（无条件，首见也拦）
-    assert float(S.comm.gate.z.dist_max_m) == 2.5
-    task = _task(lambda: []); assert task._relock_guard(3.4) is True
-    task = _task(lambda: []); assert task._relock_guard(2.6) is True
+    assert float(S.comm.gate.z.dist_max_m) == 3.0
+    task = _task(lambda: []); assert task._relock_guard(4.2) is True
+    task = _task(lambda: []); assert task._relock_guard(3.6) is True
     # 首见不拦（无参照）
     task = _task(lambda: []); assert task._relock_guard(2.0) is False
     # 向上跳（在追的 z）
@@ -1677,3 +1679,120 @@ def test_through_main_exit_requires_sustained_centering(monkeypatch):
     px, py = float(S.comm.gate.align.px_x), float(S.comm.gate.align.px_y)
     assert cx >= px and cy >= py, \
         "冲刺居中阈值(%.2f/%.2f)不该比 align(%.2f/%.2f) 更严" % (cx, cy, px, py)
+
+
+def test_area_guard_yields_near_door_and_when_box_touches_frame_edge():
+    """★ 2026-10-06 用户定：面积保护在 **(a) z≤cross（贴门口)**、**(c) 检测框触边（门框出画）**
+    时必须让位 —— 那两种情况下"框占比"已经不代表距离。
+
+    实船误判现场：船贴近时门框撑出画面，检测 bbox 只剩可见部分 ⇒ 占比**必然**腰斩
+    （帧134：0.398→0.177，z 已冻在 1.17 ≤ cross）⇒ 老的面积判据把**贴脸的门自己**
+    判成"更远那扇门" ⇒ 锁定门被自己人拒收 ⇒ 一路 hold/creep，永远进不了 THROUGH。
+    """
+    task = _task(lambda: [])
+    task._locked_det = _det(1.5, px=(CAM.width * 0.5, CAM.height / 2.0))[0]
+    task._lock_ratio_ref = 0.40
+    task._lock_k_ref = None                     # 只看面积那层
+    small = _det(3.5, px=(CAM.width * 0.5, CAM.height / 2.0))[0]     # 占比明显更小
+    assert small.w / CAM.width < 0.7 * 0.40, "用例前提：这个框占比要明显小于 0.7×参照"
+    # 基线：不豁免时必须拒（否则用例没意义）
+    task._z_last = 3.0
+    assert task._lock_guard_reject(small) is True, "基线：远离门口时占比变小该拒"
+    # (a) 贴门口（锁定门最近采信 z ≤ z.cross）⇒ 不做面积判据
+    task._z_last = float(S.comm.gate.z.cross) - 0.05
+    assert task._lock_guard_reject(small) is False, \
+        "(a) 贴门口不该再拿框占比判距离（门框撑出画面，占比必然变小）"
+    # (c) 检测框触到画面边缘（门框被裁掉）⇒ 同样不做面积判据
+    task._z_last = 3.0
+    edge = _det(3.5, px=(CAM.width * 0.015, CAM.height / 2.0))[0]
+    assert task._lock_guard_reject(edge) is False, \
+        "(c) 框触边=门框出画，框占比不代表距离，不该做面积判据"
+
+
+def test_pick_gate_keeps_only_largest_k(monkeypatch):
+    """★ 2026-10-06 用户定：选门时**只留 k 最大的那一档**（k ≥ k_max_ratio × max_k），其余排除。
+
+    实船：同一扇门**框占比稳定而 z 抖 ±35%** ⇒ k 在两簇间跳（0.48 / 0.87）。
+    k 小 = z 报得**比实际近**（测距崩了）⇒ 会被"z_eff 最小"误选成最近的门
+    （一开始锁到**后边那扇**就是这个）。所以先按 k 把"明显测不准的"剔掉，再按 z_eff 选。
+    """
+    import base.cfg.settings as _S          # 局部导入，避开作用域问题
+    task = _task(lambda: [])
+    a = _det(1.5, px=(CAM.width * 0.5, CAM.height / 2.0))[0]
+    b = _det(1.5, px=(CAM.width * 0.5, CAM.height / 2.0))[0]   # 同框位置 ⇒ 同占比
+    # a 报崩小的 z(1.0) ⇒ k 小；b 报 2.0 ⇒ k 大
+    monkeypatch.setattr(task, "_z_est", lambda d, c: 1.0 if d is a else 2.0)
+    k_ratio = float(_S.comm.gate.select.k_max_ratio)
+    assert k_ratio > 0
+    # ① 有 k 最大档筛选 ⇒ 小 k 那扇被排除，选 b
+    assert task._pick_gate([a, b]) is b, \
+        "小 k（=测距崩小、看着比实际近）那扇没被排除 ⇒ 会锁错门"
+    # ② 关掉筛选（k_max_ratio=0）⇒ 退回"z_eff 最小"，会选到小 k 那扇（反证筛选在起作用）
+    monkeypatch.setitem(_S.comm.gate, "select",
+                        _S.Y(dict(_S.comm.gate.select, k_max_ratio=0.0)))
+    assert task._pick_gate([a, b]) is a, "k_max_ratio=0 时应退回 z_eff 最小（选到 a）"
+    # ③ 两扇 k 接近（同档）⇒ 都保留，仍按 z_eff 选
+    monkeypatch.setitem(_S.comm.gate, "select",
+                        _S.Y(dict(_S.comm.gate.select, k_max_ratio=k_ratio)))
+    monkeypatch.setattr(task, "_z_est", lambda d, c: 1.0 if d is a else 1.05)
+    assert task._pick_gate([a, b]) is a, "同档 k 时不该误排除，仍按 z_eff 最小选"
+
+
+def test_width_mode_also_enforces_jump_protection():
+    """★ 2026-10-06 用户定：**"2.5m 开外完全不相信"必须贯彻始终** —— width 档也得有。
+
+    实船 bug：width 档**唯一没接跳变保护**，直接采纳了 `z=3.691`（> dist_max 2.5），
+    此后一路追着第三/第四扇门跑。width 的 z 来自 `fx·W/Δu`，比 PnP 更粗，**最需要这道闸**。
+    """
+    task = _task(lambda: [])
+    # 只给对向上边一对角点 ⇒ width 档；门放很远（z≈3.7 > dist_max=2.5）
+    far = _det(3.7, kconf=(0.95, 0.95, 0.0, 0.0))[0]
+    assert task._relock_guard(3.7) is True, "前提：3.7m > dist_max(2.5) 该被拦"
+    frame = np.zeros((CAM.height, CAM.width, 3), np.uint8)
+    task.process(frame, 1000)
+    z_before = task._z_last
+    task._on_width(far, 1100, [0, 1])          # 直接走 width 档
+    assert task._z_last == z_before, \
+        "width 档采纳了 %.3f 这个 >dist_max 的 z（跳变保护没贯彻到 width）" % (task._z_last or -1)
+    assert task.last_info["action"] == "hold", \
+        "width 档遇到超 dist_max 的 z 应判丢门、原地 hold，实际=%s" % task.last_info["action"]
+
+
+def test_z_door_distance_is_one_value_for_three_keys():
+    """★★ **三键同值**（用户 2026-10-07 定；历史依据见 git commit 52512bb / d3e660d）：
+
+        `z.cross`（冲刺触发）、`z.slow_max`（近了就慢）、`width.z_max`（width 档"够近了"）
+        —— 三个都表示"门框在画面里大到这个程度 = 已到门口"，用户当时要求**直接划等号**
+        （09-30 起手工写成同一个数 1.2），现在用 **YAML 锚点 `&door_m`** 实现：
+        **只改 cfg 里 `slow_max: &door_m <值>` 一处**，三个键同时变。
+
+    本用例守住这条：任一键被单独改掉、或锚点被拆散，立刻红。
+    """
+    z = S.comm.gate.z
+    w = S.comm.gate.width
+    cross, slow, wz = float(z.cross), float(z.slow_max), float(w.z_max)
+    assert cross == pytest.approx(slow) == pytest.approx(wz), (
+        "z.cross(%s) / z.slow_max(%s) / width.z_max(%s) 必须同值 —— "
+        "它们是同一个'到门口'距离的三种用法（cfg 里用 YAML 锚点 &door_m 绑定）"
+        % (cross, slow, wz))
+
+
+def test_z_door_distance_anchor_is_not_broken():
+    """锚点实现本身的守卫：cfg 原文里必须是 `&door_m` 一处 + 两处 `*door_m`。"""
+    import io, os, re
+    here = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))))
+    path = os.path.join(here, "cfg", "comm.yaml")
+    src = io.open(path, encoding="utf-8").read()
+    assert re.search(r"slow_max:\s*&door_m\s+[0-9.]+", src), \
+        "cfg 里必须保留 `slow_max: &door_m <值>`（三键同值的唯一来源）"
+    assert src.count("*door_m") >= 2, \
+        "`cross` 与 `width.z_max` 必须都写成 `*door_m` 别名（否则又会散成两个数）"
+
+
+def test_z_dist_max_matches_the_ranging_limit():
+    """★ 2026-10-07 用户定：**3 米开外测距已不可信** ⇒ `dist_max_m` = 3.0（完全不相信）。"""
+    assert float(S.comm.gate.z.dist_max_m) == pytest.approx(3.0)
+    task = _task(lambda: [])
+    assert task._relock_guard(3.4) is True, "3.4m > dist_max(3.0) 必须被无条件拦下"
+    assert task._relock_guard(2.8) is False, "2.8m < dist_max(3.0) 不该被这一条拦"

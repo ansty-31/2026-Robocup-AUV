@@ -9,7 +9,7 @@
 
 ```bash
 cd /home/ansty/RDKX5/auv_vision/auv_vision
-python3 -m pytest tests/tasks/grab -q      # 感知层 18 例
+python3 -m pytest tests/tasks/handling -q      # 感知层 18 例
 python3 -m pytest tests/ -q                # 全工程回归（当前 191 例）
 ```
 
