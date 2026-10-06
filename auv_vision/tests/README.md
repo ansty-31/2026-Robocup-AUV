@@ -4,7 +4,7 @@
 与 `AUV_STREAM=0`（绝不新建推流 socket）。**秒级跑完，不需要板子/相机/水池。**
 
 ```bash
-python3 -m pytest tests/ -q                     # 全部（327 例）
+python3 -m pytest tests/ -q                     # 全部（**370 例**，2026-10-07）
 python3 -m pytest tests/platform -q             # 只跑平台与公共件
 python3 -m pytest tests/tasks -q                # 只跑任务层
 python3 -m pytest tests/tooling -q              # 只跑工具层
@@ -22,7 +22,7 @@ tests/
 │   ├── test_base.py         settings 真实取值 + **限深下限 0.55 不变量**、11B 下发帧布局/极性、
 │   │                        DOF→轴字节、**真串口(pty)** 收发、0xAA55 14B 遥测解析与错位重同步、
 │   │                        深度不足禁上浮/下潜照旧/超时放行、stop_hard 与急停真的停住
-│   ├── test_common.py       PID（死区/限幅/微分/抗 windup）、图像链路（NV12 打包色度保真、
+│   ├── test_common.py       PID（死区/限幅/微分/抗 windup、**执行器死区补偿 bias**）、图像链路（NV12 打包色度保真、
 │   │                        **squish 而非 letterbox**、**D 链序唯一**）、Det 助手与按类挑选、
 │   │                        cfgnode（缺键兜底、字符串布尔坑、**共用 comm.motion 参数的唯一来源**）
 │   ├── test_paths.py        路径落点（部署脚本默认目录、cfg 绝对路径、标定 yaml 文件头）
@@ -77,6 +77,19 @@ python3 -m pytest tests/_bite_probe.py -q        # 10 passed = 9 条真的会咬
   这是对的，不是假红）。
 
 > 新增/改动用例后请顺手跑一次：一条"怎么改都不红"的用例等于没有测试。
+
+## 2026-10-07 新增（阈值/机制重设的守卫）
+
+| 用例 | 钉什么 |
+|---|---|
+| `test_gate_flow.py::test_through_requires_the_mode_own_centering_range` | 过门居中闸必须是**本档位自己的对中带**（位姿档/width/coarse 各一套），且与 `through.center_x/center_y` 取 AND |
+| `test_gate_flow.py::test_through_is_two_stage_fast_then_slow` | 两段式冲刺：段① `fast_ms` 用 `surge.through`、段② 降到 `surge.creep`；`fast_ms=0` 整段满速（回退路径） |
+| `test_gate_flow.py::test_gate_sway_is_proportional_not_bang_bang` | 按 cfg 反算饱和起点 `(out_max−bias)/kp`；非零输出**全部 ≥ 执行器死区 0.138**（不许"白发"指令） |
+| `test_common.py::test_pid_bias_lifts_output_above_actuator_deadzone` | PID `bias`（执行器死区补偿）：死区内 0、出死区即抬到死区值、线性升、负误差对称、`bias=0` 回归 |
+
+> 同轮把若干**夹具**按新基准对齐（不是放宽断言）：`_aligned_px()` 的"已对准"落点含纵向零点
+> `align.dy_target`；`_HullWorld` 的 `z` 必须**明显大于** `z.cross`（原来写 1.5 = 新的 `cross`，
+> 靠浮点尾数侥幸过关）；`gate/percept/mock.py` 的默认位姿把门画在零点上而不是光轴上。
 
 ## 约定
 

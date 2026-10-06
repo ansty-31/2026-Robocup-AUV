@@ -14,7 +14,7 @@
 >   ③ 几何合法（四角顺序 + 不自交）与**重复框去重**（小框 conf 更低 **且** ≥2 条边重合 → 丢小框，
 >   **判据不是包含关系**）；④ 选门改成**近距离优先** `gate.select.mode: near`（框宽当测距代理；
 >   回退旧行为 = 改成 `corner`，一行）。落地细节与未验证项见 review §2/§3/§4。
-> - **本地 327 用例全绿**（用例数随开发增长，以 `python3 -m pytest tests/ -q` 输出为准）。
+> - **本地 370 用例全绿**（2026-10-07；用例数随开发增长，以 `python3 -m pytest tests/ -q` 输出为准）。
 >   **板端已同步**（2026-09-26 21:4x）：`check_board_parity.sh --board` **双向 95/95 一致**、
 >   板端全量 pytest **与本地同数（当前 327 passed）**（原先靠"台架分叉"解释的 7 条失败随分叉统一而消失）。
 >   ⚠️ **板端 `SIM_MODE` 现在是本地值 `True`**（串口只打印、不驱动推进器）—— 实船/下水必须
@@ -36,6 +36,15 @@
 > - **任务二 过门（gate）= 扁平 v1.2 版**（`gate/` 两层结构；源自 v1.2 原版 + 2026-09-18 新增正航向 + 2026-09-26 新增后处理，
 >   2026-09-30 把相位机按方法簇拆分、`gate_task.py` 提到 `gate/` 作总调度），
 >   这是**定版方案**，不再有分层结构。
+> - ★ **2026-10-07 过门阈值/机制按实船日志重设**（依据 `log/rungate_20261006_postsway` 385 帧；
+>   成篇记录 **`doc/记录/2026-10-07-gate-阈值与运动重设.md`**，数据特性分析 `log/FEATURES_20261006_postsway.md`）：
+>   `align` **分档 + 纵向零点 `dy_target=−0.30`**（`px_x/px_y/confirm_frames = 0.10/0.15/5`；
+>   width `0.14/0.06`、coarse `0.18/0.10`）；`z.cross`（=`slow_max`=`width.z_max`）**1.2→1.5**；
+>   `pnp.z_max` **15.0→3.0**；`through` 改**两段式**（`fast_ms=2000` 快冲 + 到 `confirm_ms=6000` 降速保持）
+>   且**过门居中闸 = 本档对中带**（`through.loose=1.0`）；`hdg` 新增 `psi_ema_frames=10`（ψ 先平滑再比 tol）
+>   与 `body_delta_max_deg=1.0`（转向前"机身稳"，与 align **并行**计数）；
+>   `select.k_lo_ratio 0.75→0.30`；`motion.pid_sway` `kp 8→1` + 新增 `bias=0.138`（执行器死区补偿，
+>   **ball 共用会一并变**）。⚠️ `through` 两个时长**尚未标定**（本趟日志 THROUGH 从未触发）。
 > - `kpt_memory`（门角点逐点软融合）是**可选开关、2026-09-18 起默认关闭**：
 >   `cfg/vision.yaml → vision.gate.kpt_mem.enable: false`（板端曾因拼写错 `flase` 被
 >   `bool('flase')=True` 而**实际一直开着**）。开启用 `enable: true` 或 `AUV_GATE_KPT_MEM=1`
@@ -144,7 +153,7 @@ auv_vision/
 │   ├── 注释历史.md      #   按文件/按键的历史索引（**入口**）：实测数字 / 试错 / 参数沿革 / 注意事项
 │   └── 注释历史/        #   索引的正文，按域分 7 个文件（cfg/gate/base-common/grab-task-manual/tools/tests/misc）
 ├── models/ · tests/     # 权重(.bin) · 无硬件测试套件（**按层分子目录**，见 tests/README.md）
-│                        #   tests/：**327 例**（以 `pytest tests/ -q` 输出为准）
+│                        #   tests/：**370 例**（2026-10-07；以 `pytest tests/ -q` 输出为准）
 │                        #     platform/  test_base   平台：settings/11B 帧/遥测/限深保护/硬停
 │                        #                test_common 公共件：PID/图像链路(NV12·squish)/Det/cfgnode
 │                        #                test_paths 路径落点 · test_hud 叠加层
@@ -172,7 +181,7 @@ auv_vision/
 ## 快速开始（本机，无硬件）
 
 ```bash
-python3 -m pytest tests/ -q              # 无硬件测试（**334 例**，以 `pytest tests/ -q` 输出为准）
+python3 -m pytest tests/ -q              # 无硬件测试（**370 例**，2026-10-07；以实际输出为准）
 python3 main.py --task ball              # 只跑撞球（SIM/mock）
 python3 main.py --task gate              # 试跑过门（cfg model.mode: mock）
 AUV_TASK_LOG=log/grab.jsonl python3 main.py --task grab      # 任务三 夹取（感知全程下视）
@@ -230,7 +239,10 @@ python3 preview_detect.py --gate-kpt         # 下水前：门框 + 4 角点 + �
   ALIGN 子状态 GOLDEN/**HDG(正航向)**/**SWAY_BACK(转后回找)**/CREEP/HOLD/REACQUIRE → APPROACH → THROUGH（机身过门判据）。
   门 = 闭合矩形框(红 PVC，**实测外缘 0.77×0.56 m**，管外径 5cm，悬空，对称无朝向要求)。
   **直冲出口两条**（任一成立即进 THROUGH，且都要先过 `through.require_align_deg` 航向闸门）：
-  ① `Z≤z.cross` 连续 `z.cross_confirm_frames` 帧（实测有效，勿动）；② 在门口超时兜底
+  ① `Z≤z.cross` 连续 `z.cross_confirm_frames` 帧（实测有效，勿动）
+  **并且**落在**本档位自己的居中范围内**连续 `through.center_frames` 帧
+  （★ 2026-10-07 用户定"务必在各自要求的居中范围内触发过门"：闸 = 本档对中带 × `through.loose`，
+  与 `through.center_x/center_y` 取 AND ⇒ 只会更严）；② 在门口超时兜底
   `loiter.*`（框占比 ≥ 阈值 + 在安全带内持续超时 → 自己拍板直冲）。
   ⚠️ **原「近距丢门判过门」这条出口已按用户要求移除**：驱动相位的代码先摘掉，2026-10-01 再把残留的
   死代码（`_near_lost` / `_fresh_z` / `_z_ms`）与失效 cfg 键（`z.near_lost_m` / `z.z_stale_ms`）一并删掉；
@@ -348,9 +360,12 @@ cd ../pc
 - **DOF 极性与速度标定**：surge/sway/heave 方向、`norm→m/s` 曲线、REACQUIRE 后退方向。
   工具：`tools/check/boat/check_dof_sign.py`（用**视觉**当独立真值——相机是唯一不受 DOF/遥测符号影响的量）；
   yaw 侧已按手动挡既成事实定死 `+yaw = 右转`（`dof_map.yaw.sign: +1`），**不要再为转向去改它**；
-- **冲刺与兜底标定**：`surge.through`(0.6) 与 `through.confirm_ms`(2500) 决定"能不能冲出去"、
+- **冲刺与兜底标定**：`surge.through`(0.6) 与 `through.{fast_ms(2000), confirm_ms(6000)}` 决定"能不能冲出去"、
   `loiter.{timeout_ms,dx_max,dy_max}` 决定"在门口等多久才拍板"——
-  判据 = 通过时无接触（30 分）且不超时；**换模型后 `confirm_ms` 尚未按新航速复核**；
+  判据 = 通过时无接触（30 分）且不超时；
+  ⚠️ **2026-10-07：两段时长仍未标定**（本趟日志 THROUGH 从未触发）。按实测 `surge=0.30 → 17.3cm/s` 外推，
+  2s 快冲 + 4s 慢冲合计只走 **1.01~1.25 m**，而 `z.cross=1.5` 起冲要走的几何距离是 **2.4~2.6 m**
+  ⇒ 下水若冲不过去**优先加 `fast_ms`**（段② 慢冲比它差 4~5 倍）；
 - **小角度过冲的收尾（2026-10-02 已随上位机闭环删除）**：原先 `turn_pid.deadzone_deg=6` 按目标缩放 /
   加最小舵效地板 `max(0.15,|out|)`（执行器死区 0.138 ⇒ 误差 <10.4° 时现在一点舵效都没有）/ 加大 `kd`；
 - **SEARCH 平移扫视标定**：`gate.search.sway`(**0.45** ≈ 25% 推力档) 是否真的能把船左右挪动、

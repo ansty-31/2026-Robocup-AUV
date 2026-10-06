@@ -251,11 +251,20 @@ depth_m = (pressure_01mbar - s_surface_pressure_01mbar) / 980.665f;
 - 相位机 `SEARCH → ALIGN(GOLDEN/HDG/CREEP/HOLD/REACQUIRE) → APPROACH → THROUGH`
 - **居中只有 sway 平移**（yaw 居中通道已删除）；**SEARCH 是左右平移扫视**（不旋转）
 - **ALIGN.HDG 离散正航向**：测→转→停稳→再测，让机身与门法向平行
-- 过门判定三条出口：`z.cross` 连续确认 / 近距丢门（z 新鲜或框占比）/ 门口超时兜底 `loiter.*`
+- 过门判定**两条**出口：`z.cross` 连续确认（**且必须落在本档位自己的居中范围内**）/ 门口超时兜底 `loiter.*`
+  —— 原「近距丢门判过门」已移除；**冲刺为两段式**（快冲 + 降速保持）
+- ★ **2026-10-07 过门阈值/机制按实船日志重设**（依据 `auv_vision/log/rungate_20261006_postsway` 385 帧）：
+  成篇记录 **`auv_vision/doc/记录/2026-10-07-gate-阈值与运动重设.md`**，
+  数据特性分析 `auv_vision/log/FEATURES_20261006_postsway.md`，
+  现行逻辑与参数速查 `auv_vision/doc/设计/过门逻辑树.md`（§8）。
+  摘要：`align` 分档 + 纵向零点（`px_x/px_y/confirm_frames=0.10/0.15/5`、`dy_target=−0.30`）；
+  `z.cross`（=`slow_max`=`width.z_max`）**1.2→1.5**；`pnp.z_max` **15→3**；
+  `through` 两段式（`fast_ms=2000` + `confirm_ms=6000`）+ 过门居中闸 = 本档对中带；
+  `hdg` 新增 ψ 平滑与"机身稳"；`motion.pid_sway` `kp 8→1` + `bias=0.138`（执行器死区补偿，**ball 共用**）。
 
 ## 测试
 
-无硬件测试位于 `auv_vision/tests/`（**107 例，全部走 pytest**；旧的分文件脚本已删除，
+无硬件测试位于 `auv_vision/tests/`（**370 例**，2026-10-07；全部走 pytest；旧的分文件脚本已删除，
 不要再单独 `python3 tests/test_xxx.py`）。
 
 ```bash

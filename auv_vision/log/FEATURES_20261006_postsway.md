@@ -261,6 +261,9 @@
 
 # 附：本轮落地（2026-10-07，commit `e28aea2` + `db673cd`）
 
+> 成篇记录（改了什么/为什么/怎么回退）：**`doc/记录/2026-10-07-gate-阈值与运动重设.md`**。
+> 本文是**数据特性**那一半；那份是**决策与落地**那一半。
+
 基线与回档：`git reset --hard checkpoint-pre-gate-tune`（动手前）/ `git reset --hard db673cd`（本轮后）。
 `python3 -m pytest tests/ -q` → **368 passed**。
 

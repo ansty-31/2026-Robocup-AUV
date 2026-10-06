@@ -201,6 +201,24 @@
 ### (模块)（docstring 搬出）
 - pid_kw(node, defaults)      按 (kp,ki,kd,out_max,deadzone) 造 PID 参数（out_max 兼作 ±限幅）
 - 分层：本模块**不 import 任何东西**（不读文件、不碰 yaml），所以
+### `pid_kw` 新增可选键 `bias`（2026-10-07）
+- `bias` = **执行器死区补偿**，与 `kp/ki/kd/out_max/deadzone` 五个必填键不同：它是**可选**的
+  （`node.get("bias", 0.0)`），缺省 0 ⇒ 与加它之前完全一致（不会因为老 cfg 缺键而崩）。
+- 由 `common/motion/PID.py` 消费：出死区后先把输出抬到执行器死区之上再随 kp 线性升。
+  动机见 `cfg.md` 的 `### motion.pid_sway`（sway 一直顶满）。
+
+
+## common/motion/PID.py
+
+- **2026-10-07 · 新增可选参数 `bias`（执行器死区补偿）**：`update()` 里 `out = kp·e + ki·I + kd·ḋ`，
+  若 `bias > 0` 则 `out = copysign(min(|out| + bias, out_max), out)`，再照旧夹到 `[out_min, out_max]`。
+  为什么需要它：推进器 `|DOF| < 0.138` 推力为 0，所以"按 kp 算出来 0.05"等于没推力 ——
+  控制器会表现成"要么顶满、要么不动"（实测 sway 饱和 63%）。`bias` 取执行器死区值即：
+  误差刚出死区就给"有推力的最小指令"，之后线性升到 `out_max`。
+  `bias=0`（默认）时逐行等价于旧实现；用例 `test_pid_bias_lifts_output_above_actuator_deadzone` 钉住
+  （含 `bias=0` 的回归断言与负误差对称性）。
+
+### (无 heading 的历史)
 
 ## base/hw/camera.py
 

@@ -38,6 +38,10 @@ tools/
 └── analyze/                      # ③ 离线判读与标定（吃日志/dump/录制数据，出结论与参数建议）
     ├── log/                      #   判读日志
     │   ├── analyze_task_log.py   #     逐帧日志判读 ①~⑧（相位/出口/水平通道能动力/进 THROUGH 偏了多少）
+    │   ├── replay_gate_log.py    #     **回放**：把日志里的（门框/角点/时刻）重建成 Det 喂给 GateTask，
+    │   │                         #       逐帧与日志当时的 phase/substate/action/mode 对齐给一致率；
+    │   │                         #       `--ref=axis|img`（主点/画面中心两域）、`--old`（还原日志当时的代码行为）
+    │   │                         #       `--selftest`（合成往返：Δz<1e-7 m、Δψ<2e-6°）
     │   ├── feature_coverage.py   #     **这轮哪些功能没被用到**（相位/子状态/档位/动作 + ✔✘ 清单）
     │   ├── analyze_kpt_dump.py   #     preview --dump 的角点可得率 / PnP 命中率（标定 conf_thr/vis_thr/reproj_px）
     │   ├── analyze_heading.py    #     PnP 安装角（bias）与航向噪声底（静态 dump）

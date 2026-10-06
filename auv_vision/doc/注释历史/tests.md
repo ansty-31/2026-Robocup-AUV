@@ -87,6 +87,10 @@
 
 ### test_preprocess_chain_domain_switch（docstring 搬出）
 - 3. 非法值要**当场报错**，不能静默退回某个域 —— 静默退回 = 拿错域的图喂权重。
+### 2026-10-07 新增：`test_pid_bias_lifts_output_above_actuator_deadzone`
+- 死区内不补偿（仍为 0）→ 刚出死区立刻是执行器死区值 → 随 kp 线性升 → 上限仍是 `out_max`；
+  负误差对称；`bias=0` 时逐值等于旧行为（回归）。
+
 
 ## tests/tasks/gate/test_gate_postproc.py
 
@@ -126,6 +130,17 @@
   结论 → 反向平移必须是主循环里的一个状态，判据照跑、ψ 每帧刷新，只覆盖本帧下发的指令
 ### 共用 PID 增益
 - sway 反号那次事故就是"两任务各一套参数"的产物 · 结论 → 增益只写 `comm.motion` 一处
+### 2026-10-07 新增的三个用例（阈值/机制重设的守卫）
+- `test_through_requires_the_mode_own_centering_range`：过门居中闸必须是**本档位自己的对中带**
+  （位姿档 `align.px_x` / width `width.align_x` / coarse `coarse.align_x`），
+  且与 `through.center_x/center_y` 取 AND（把上限调小 ⇒ 立即以它为准）。
+  钉的是用户定的一句"务必在各自要求的居中范围内触发过门"。
+- `test_through_is_two_stage_fast_then_slow`：段① `fast_ms` 用 `surge.through`、段② 降到 `surge.creep`；
+  逐帧查 `through_stage` 字段；`fast_ms=0` 必须整段满速（旧行为，可一行回退）。
+- `test_gate_sway_is_proportional_not_bang_bang`：按 cfg 反算理论饱和起点 `(out_max−bias)/kp`，
+  逐个误差档核对"未到起点不许顶满、过了起点必须顶满"，并断言**非零输出全部 ≥ 执行器死区 0.138**
+  （否则是"白发"指令）。钉的是"sway 一直顶在 ±0.55"这个病。
+
 
 ## tests/tasks/test_motion.py
 
