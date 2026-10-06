@@ -24,7 +24,9 @@ def test_settings_loads_real_yaml_values():
     if S.vision.gate.kpt_mem.enable:
         assert float(S.vision.gate.kpt_mem.recall_conf) < \
             float(S.vision.gate.keypoint.conf_thr)
-    assert S.vision.gate.pnp.z_max == 15.0
+    # ★ 2026-10-07 用户定：远端距离参数一律压到 ≤3m（`z_max` 15.0 → 3.0）：
+    #   它是唯一被代码读的远端距离键（`_z_est` 的 z_bounds / width 的 clip / gate_pose 的 z_bounds）。
+    assert S.vision.gate.pnp.z_max == 3.0
     assert S.comm.frame.header == 0xA5
     #    这一条专门钉**数值**：改了它必须有人来解释。
     assert float(S.comm.depth_guard.min_depth_m) == pytest.approx(0.50), \

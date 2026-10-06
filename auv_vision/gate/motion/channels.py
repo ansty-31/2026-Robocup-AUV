@@ -100,12 +100,93 @@ class GateChannels(object):
         `dxn=0.0973 / dyn=0.1365` ⇒ 任何 `px_y < 0.1365` 的阈值**物理上永远无法满足**
         ⇒ `aligned` 恒 False ⇒ 转向链/居中闸全不启动（实船卡在门口一动不动就是这个）。
 
-        "居中"的物理含义本来就是"与光轴对齐"，所以基准必须是主点。
+        "居中"的物理含义本来就是"与光轴对齐"，所以**横向**基准必须是主点。
+        ⚠️ **纵向还有第二个偏置**（相机装得比门中心高 + 抬头），见 `_dy_target()`。
         """
         c = self.camera
         cx = float(getattr(c, "cx", 0.0) or (self.w / 2.0))
         cy = float(getattr(c, "cy", 0.0) or (self.h / 2.0))
         return cx, cy
+
+    def _dy_target(self):
+        """**纵向零点偏置** `comm.gate.align.dy_target`（归一化）。
+
+        ★ 2026-10-07 用户定，实测依据（`log/rungate_20261006_postsway`，主点基准下）：
+        `dyn` 的中位是 **−0.30**，且逐档分别为 full −0.200 / width −0.277 / coarse −0.337
+        ⇒ 门**恒在光轴下方**（≈13cm @1.8m），物理来源是"相机比门中心高 + 常态抬头"。
+        不把这个偏置搬掉，任何纵向阈值都在偏置上打滑（`heave` 也会永久单向压）。
+        缺键 ⇒ 0.0（= 旧语义，**不崩**）。
+        """
+        al = sub(self._G, "align") or {}
+        return float(al.get("dy_target", 0.0) or 0.0)
+
+    def _aligned(self, dxn, dyn, node=None, kx="px_x", ky="px_y"):
+        """**对中判据（分档）**：`|dxn| ≤ kx` 且 `|dyn| ≤ ky`。
+
+        ⚠️ `dyn` 传进来时**已经**减掉了纵向零点（`comm.gate.align.dy_target`，见各档的算法处）
+        —— 那是**全局的测量约定**，不是某一条判据的私事：`through.center_y`、`loiter.dy_max`、
+        `heave` 的 PID 目标全都吃同一个 `dyn`，只在 align 里减会让它们全部错位。
+
+        ★ 2026-10-07 用户定：**各档位的居中依赖不同，不共用一套带**（原因见 cfg 注释）。
+        `node` 给档位自己的 cfg 节点（如 `comm.gate.width` / `comm.gate.coarse`），
+        它没有那两个键时**回退到 `comm.gate.align`**（缺键不崩）。
+        """
+        al = sub(self._G, "align") or {}
+        nd = node or {}
+        ax = nd.get(kx, al.get("px_x", 0.15))
+        ay = nd.get(ky, al.get("align_y", al.get("px_y", 0.15)))
+        return abs(float(dxn)) <= float(ax) and abs(float(dyn)) <= float(ay)
+
+    def _center_ok(self, dxn, dyn, node=None, kx="px_x", ky="px_y"):
+        """**过门（THROUGH）触发前的居中闸**：必须落在**本档位自己的**居中范围内。
+
+        ★ 2026-10-07 用户定："务必在各自要求的居中范围内触发过门"。
+        实现 = `本档位对中带 × through.loose`（默认 1.0 = 完全等同该档要求），
+        再与 `through.center_x/center_y`（2026-10-05 定的"抗抖动"上限）取 **AND** ——
+        两道都过才许冲，所以这条改动**只可能更严**，不会把旧闸放松。
+        """
+        f = float((sub(self._G, "through") or {}).get("loose", 1.0) or 1.0)
+        al = sub(self._G, "align") or {}
+        nd = node or {}
+        ax = float(nd.get(kx, al.get("px_x", 0.15))) * f
+        ay = float(nd.get(ky, al.get("align_y", al.get("px_y", 0.15)))) * f
+        tc = sub(self._G, "through") or {}
+        return (abs(float(dxn)) <= min(ax, float(tc.get("center_x", 1.0)))
+                and abs(float(dyn)) <= min(ay, float(tc.get("center_y", 1.0))))
+
+    def _body_quiet(self, now_ms=None):
+        """**机身是否稳**（转向前置条件）：遥测的横滚/纵倾/航向**帧间变化**是否都在门限内。
+
+        ★ 2026-10-07 用户定："转之前一定是 align 成功，然后稳住 —— 重点是稳定机身，
+        居中本身问题不大。本质是解决 align 末尾还在乱动、不够稳健。"
+
+        实测依据（触发帧 f17）：|Δtyaw|=0.13°、|Δtrol|=0.24°、|Δtpit|=0.09°（全在中位以下），
+        而 |Δψ|=26.4° ⇒ 那次起转是**图像 ψ 的噪声**推出去的，**机身其实是静的**。
+        所以"稳机身"必须看**遥测**，不能看图像；图像侧的 ψ 用 `hdg.psi_ema_frames` 平滑解决。
+
+        门限 `comm.gate.hdg.body_delta_max_deg`（0 = 关掉这条判据，退回旧行为）。
+        ⚠️ **无遥测时 fail-open（返回 True）**：不能因为遥测缺失就把转向永久锁死；
+        第一帧没有基准也返回 False（这一帧不算稳）。
+        """
+        node = sub(self._G, "hdg") or {}
+        thr = float(node.get("body_delta_max_deg", 0.0) or 0.0)
+        if thr <= 0:
+            return True
+        tel = getattr(self.uart, "telemetry", None)
+        cur = None if tel is None else (getattr(tel, "roll_deg", None),
+                                        getattr(tel, "pitch_deg", None),
+                                        getattr(tel, "yaw_deg", None))
+        prev = getattr(self, "_body_prev", None)
+        self._body_prev = cur
+        if cur is None or any(v is None for v in cur):
+            if not getattr(self, "_body_quiet_warned", False):
+                self._body_quiet_warned = True
+                if S.DEBUG:
+                    print("[GATE] 遥测缺横滚/纵倾/航向 ⇒ 『机身稳』判据 fail-open（不拦转向）")
+            return True
+        if prev is None or any(v is None for v in prev):
+            return False
+        return all(abs(float(a) - float(b)) <= thr for a, b in zip(cur, prev))
 
     def _speed(self, tier):
         """进近速度档：`gate.surge.<tier>` 显式覆盖 → `motion.surge_<tier>`（**与撞球共用**）→ 代码兜底。
@@ -131,6 +212,7 @@ class GateChannels(object):
         self.substate = ""
         self._post_sway_until_ms = None      # 换门/重新搜索 → 反向平移状态作废
         self._hdg_f = None
+        self._hdg_s = None            # ★ ψ 的**慢 EMA**（判据与目标角用；见 modes._on_pose）
         self._hdg_deg = None
         self._hdg_ms = None
         self._hdg_turns = 0               # 新门 ⇒ 逐小步逼近的次数重新计

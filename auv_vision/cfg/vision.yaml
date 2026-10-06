@@ -84,7 +84,12 @@ gate:  # 过门
             sigma_init_px: 8.0, sigma_lambda: 0.15, sigma_floor_px: 0.5,
             w_min: 0.0, conf_floor: 0.05, recall_conf: 0.45, conf_decay: 0.35,
             max_missing_frames: 5, min_frames: 2}
-  pnp: {reproj_px: 20.0, z_min: 0.2, z_max: 15.0, refine: true,
+  # ★★ 2026-10-07 用户定：**远端 z 压缩 = 压阈值**（不是缩放实测值）：
+  #   `z_max` 15.0 → **3.0**（"cfg 里任何大于 3.0m 的距离参数都压回来"）。
+  #   它是**唯一有代码读**的远端距离键（`_z_est` 的 z_bounds、width 档的 clip、gate_pose 的 z_bounds）。
+  #   效果（实测 width 档的 4 个台阶）：3.123 / 3.383 / 3.691 / 4.060 全部越界，
+  #   叠加 `comm.gate.z.dist_max_m=2.5` ⇒ 远端彻底不可信；full 档最大 1.958 不受影响。
+  pnp: {reproj_px: 20.0, z_min: 0.2, z_max: 3.0, refine: true,
         max_z_jump_m: 0.8}
 
 grab:  # 任务三 夹取小球（**纯 CV 感知，不走 BPU**；实测见 grab/README.md）

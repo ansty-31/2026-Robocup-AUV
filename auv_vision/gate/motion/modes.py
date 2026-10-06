@@ -47,7 +47,10 @@ class GateModes(object):
         c = self.camera.project(np.zeros((1, 3), np.float32), rvec, tvec)[0]
         _cx0, _cy0 = self._center_ref()          # ★ 基准=主点（光轴），不是画面中心
         dxn = float((c[0] - _cx0) / (self.w / 2.0))
-        dyn = float((c[1] - _cy0) / (self.h / 2.0))
+        # ★ 2026-10-07 用户定：**纵向零点**在**算 dyn 的地方**统一减掉（全局测量约定）。
+        #   它是相机装高 + 常态抬头造成的固定偏置（实测 dyn 中位 −0.30，逐档 −0.20/−0.28/−0.34）；
+        #   不在这里减，`through.center_y`/`loiter.dy_max`/heave 的零点就全错位。
+        dyn = float((c[1] - _cy0) / (self.h / 2.0)) - self._dy_target()
         hist = getattr(self, "_pose_hist", None)
         if hist is None:
             hist = self._pose_hist = []
@@ -55,21 +58,32 @@ class GateModes(object):
         del hist[:-8]
         if mode == MODE_FULL:
             psi_deg, _pit_deg = gate_normal_angles_deg(rvec, tvec)
+            # 快 EMA(≈4 帧)：**只用于日志/诊断**（`hdg_fast`），不再参与判据
             self._hdg_f = psi_deg if self._hdg_f is None else \
-                self._hdg_f + 0.4 * (psi_deg - self._hdg_f)     # EMA(≈4 帧)
-            self._hdg_deg = self._hdg_f
+                self._hdg_f + 0.4 * (psi_deg - self._hdg_f)
+            # ★★ 2026-10-07 用户定：**判据与目标角都用平滑后的 ψ**。
+            #   实测：ψ 的帧间跳 7.8° 是真实航向(tyaw)帧间跳 0.33° 的 **24 倍**
+            #   ⇒ ψ 在该频段是噪声主导；拿未平滑的 ψ 去比 tol，等于让噪声决定要不要起转、
+            #   以及转多少度（实船 f17 就是被 26.4° 的跳变推进 tol 窗口里、下发 0° 空转一次）。
+            #   窗口 `comm.gate.hdg.psi_ema_frames`（缺键 ⇒ 1 帧 = 不平滑，不崩）。
+            _k = int(num(sub(self._G, "hdg"), "psi_ema_frames", 1) or 1)
+            _a = 1.0 if _k <= 1 else 2.0 / (float(_k) + 1.0)
+            self._hdg_s = psi_deg if getattr(self, "_hdg_s", None) is None else \
+                self._hdg_s + _a * (psi_deg - self._hdg_s)
+            self._hdg_deg = self._hdg_s
             self._hdg_ms = now_ms
+            # 诊断：把**未参与判据**的快 EMA 也写进日志（判据用 `hdg`，两者一起看就知道平滑吞掉了多少）
+            self.last_info["hdg_fast"] = round(float(self._hdg_f), 1)
             # 航向确认使用冲刺闸门的配置阈值；真正完成的 hdg DONE 也会保持确认。
             align_deg = req(sub(G, "through"), "require_align_deg")
             self._hdg_ok_tick(align_deg)          # 航向"已 OK"锁存（连续 ok_frames 帧判据）
         sway, yaw = self._lateral_out(dxn, now_ms), 0.0
         heave = -_dof_clip(self._pid_heave_px.update(dyn, now_ms))
-        aligned = abs(dxn) <= req(al, "px_x") and \
-            abs(dyn) <= req(al, "px_y")
+        aligned = self._aligned(dxn, dyn, al)          # ★ 分档 + 纵向零点（见 channels._aligned）
         #   不是 align 的 px_x/px_y（用户："最后进冲刺的居中闸不要像 align 那样严"）。
-        _tc = req_node(G, "through")
-        _ok_c = abs(dxn) <= req(_tc, "center_x") and \
-            abs(dyn) <= req(_tc, "center_y")
+        # ★ 2026-10-07 用户定：过门居中闸 = **本档位（位姿档）自己的居中范围**；
+        #   与 through.center_x/center_y 取 AND（见 channels._center_ok）。
+        _ok_c = self._center_ok(dxn, dyn, al)
         self._center_ok_cnt = (getattr(self, "_center_ok_cnt", 0) + 1) if _ok_c else 0
         dx_m, dy_m = dxn, dyn            # 日志里 dx/dy **统一是像素归一化**
         cross = req(zc, "cross")
@@ -97,7 +111,11 @@ class GateModes(object):
             self.substate = SUB_GOLDEN
             if self._loiter_commit(dxn, dyn, float(det.w) / float(self.w), now_ms):
                 return
-            if aligned:
+            # ★★ 2026-10-07 用户定：**"最近 confirm_frames 帧同时满足 align 与机身稳"（并行）**。
+            #   原来只数 align（`_center_cnt`），末尾几帧机身还在晃就已经起转。
+            #   ⚠️ 为什么不是"align 5 帧 + 再稳 5 帧"（串行 10 帧）：实船 385 帧里
+            #   `align ∧ 机身静` 的 **10 帧窗口恒为 0**，串行等于永远不起转。
+            if aligned and self._body_quiet(now_ms):
                 self._center_cnt += 1
                 if self._center_cnt >= int(req(al, "confirm_frames")):
                     if self._hdg_ready(mode, now_ms):
@@ -185,14 +203,13 @@ class GateModes(object):
         cx, cy = bbox_center(det)
         _cx0, _cy0 = self._center_ref()          # ★ 基准=主点
         dxn = (aim_x - _cx0) / (self.w / 2.0)
-        dyn = (cy - _cy0) / (self.h / 2.0)
-        # 对中判据（归一化像素偏差）：**全档位统一**（位姿档也用这一套，见 _on_pose）
-        aligned = abs(dxn) <= req(al, "px_x") and \
-            abs(dyn) <= req(al, "px_y")
+        dyn = (cy - _cy0) / (self.h / 2.0) - self._dy_target()   # ★ 纵向零点（全局约定）
+        # 对中判据（归一化像素偏差）：**分档**（width 有自己的带，见 channels._aligned）
+        aligned = self._aligned(dxn, dyn, W, "align_x", "align_y")
         #   不是 align 的 px_x/px_y（用户："最后进冲刺的居中闸不要像 align 那样严"）。
-        _tc = req_node(G, "through")
-        _ok_c = abs(dxn) <= req(_tc, "center_x") and \
-            abs(dyn) <= req(_tc, "center_y")
+        # ★ 2026-10-07 用户定：过门居中闸 = **本档位（width）自己的居中范围**；
+        #   与 through.center_x/center_y 取 AND（见 channels._center_ok）。
+        _ok_c = self._center_ok(dxn, dyn, W, "align_x", "align_y")
         self._center_ok_cnt = (getattr(self, "_center_ok_cnt", 0) + 1) if _ok_c else 0
         if self.phase == PH_SEARCH:
             self.phase = PH_ALIGN
@@ -245,9 +262,9 @@ class GateModes(object):
         cx, cy = bbox_center(det)
         _cx0, _cy0 = self._center_ref()          # ★ 基准=主点
         dxn = (cx - _cx0) / (self.w / 2.0)
-        dyn = (cy - _cy0) / (self.h / 2.0)
-        aligned = abs(dxn) <= req(C, "align_x") and \
-            abs(dyn) <= req(C, "align_y")
+        dyn = (cy - _cy0) / (self.h / 2.0) - self._dy_target()   # ★ 纵向零点（全局约定）
+        # 对中判据：**coarse 档自己的带**（`coarse.align_x/align_y`）+ 纵向零点（见 channels._aligned）
+        aligned = self._aligned(dxn, dyn, C, "align_x", "align_y")
 
         if self.phase == PH_SEARCH:
             self.phase = PH_ALIGN

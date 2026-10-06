@@ -105,14 +105,26 @@ class _Hub(object):
         return self.fn()
 
 
+def _aligned_px(cam=CAM):
+    """**判据意义上的"已对准"落点**（像素）。
+
+    ★ 2026-10-07 用户定：横向基准是**主点**（`cx,cy`）、纵向另有**零点偏置**
+    `comm.gate.align.dy_target`（数据实测 −0.30：门恒在光轴下方/上方一侧，
+    `dyn` 中位 = −0.30）。所以"已对准"不再是画面正中，而是
+    `dxn = 0` 且 `dyn = dy_target` 的那个落点。
+    """
+    dy = float((S.comm.gate.align or {}).get("dy_target", 0.0) or 0.0)
+    return (float(cam.cx), float(cam.cy) + dy * float(cam.height) / 2.0)
+
+
 def _det(z, px=None, kconf=(0.95, 0.95, 0.95, 0.95), cam=CAM):
     """整门框 bbox（4 角投影）+ 指定角点置信度。
 
-    px=None → 门原点放在画面正中（= 已对准：dxn/dyn≈0）；
+    px=None → 门原点放在**判据意义上的"已对准"**落点（见 `_aligned_px`）；
     px=(u,v) → 放在指定像素（用于构造"没对准"）。
     """
     if px is None:
-        px = (cam.width / 2.0, cam.height / 2.0)
+        px = _aligned_px(cam)
     tvec = cam.backproject_z(float(px[0]), float(px[1]), float(z))
     uv = cam.project(OBJ3, np.zeros(3), tvec)
     x0, y0 = float(uv[:, 0].min()), float(uv[:, 1].min())
@@ -519,7 +531,11 @@ def test_stale_z_does_not_fake_a_pass():
 class _HullWorld(object):
     """假船 + 遥测：psi = psi0 − 机身转角（右转 ⇒ psi 变小）。"""
 
-    def __init__(self, psi0=20.0, z=1.5, gain=60.0, imag_sign=-1.0):
+    def __init__(self, psi0=20.0, z=2.0, gain=60.0, imag_sign=-1.0):
+        # ⚠️ z 必须**明显大于** `comm.gate.z.cross`（2026-10-07 由 1.2 提到 1.5）：
+        #   否则每帧都落进"够近"分支（`_on_pose` 里的 `z <= cross`），**永远走不到 ALIGN 的转向逻辑**；
+        #   原来写 1.5 正好等于 cross，靠浮点尾数侥幸过关 —— 边界上不可依赖。
+        #   上限是 `vision.gate.pnp.z_max`（2026-10-07 压到 3.0）。
         # `common/motion/turn_deg.py::yaw_sign()` 与 log/_board_gate_one_latest.jsonl。
         self.psi0 = float(psi0)
         self.z = float(z)
@@ -543,7 +559,10 @@ class _HullWorld(object):
         theta = self.psi0 - self.H
         R = cv2.Rodrigues(np.array([0.0, np.radians(theta), 0.0]))[0]
         rvec = cv2.Rodrigues(R)[0].ravel()
-        tvec = np.array([0.0, 0.0, self.z])
+        # ★ 2026-10-07：门心放到**判据意义上的"已对准"**落点（含纵向零点 dy_target），
+        #   否则新判据会把这个"门心在光轴上"的假世界判成"没对准"。
+        _px = _aligned_px(CAM)
+        tvec = CAM.backproject_z(_px[0], _px[1], self.z).reshape(3, 1)
         uv = CAM.project(OBJ3, rvec, tvec)
         x0, y0 = float(uv[:, 0].min()), float(uv[:, 1].min())
         x1, y1 = float(uv[:, 0].max()), float(uv[:, 1].max())
@@ -929,7 +948,7 @@ def test_sway_back_is_a_main_loop_state_and_keeps_measuring(monkeypatch):
     自转的根因（2026-09-27，证据见 doc/注释历史.md）。
     场景：转完之后视野里是**更远的门**（z 1.5→2.2 m，Δz=0.7 > same_z_m=0.5 ⇒ 判成"不是我刚丢的门"）。
     """
-    w = _ShrinkWorld(psi0=25.0, z=1.5)
+    w = _ShrinkWorld(psi0=25.0, z=2.0)
     n_det = {"n": 0}                                   # 数"检测有没有被调用"（旁路=不调用）
     _orig_det = w.det
 
@@ -980,7 +999,7 @@ def test_sway_back_is_a_main_loop_state_and_keeps_measuring(monkeypatch):
 
 def test_sway_back_never_locks_up_even_if_every_frame_is_a_far_gate():
     """**回归用例**：状态内每帧都被判成"远门"时，也**绝不永久停摆**。"""
-    w = _ShrinkWorld(psi0=25.0, z=1.5)
+    w = _ShrinkWorld(psi0=25.0, z=2.0)
     task, uart, t0 = _drive_to_sway_back(w, z_after_turn=2.2)
     assert task._post_sway_until_ms is not None
     frame = np.zeros((CAM.height, CAM.width, 3), np.uint8)
@@ -1000,7 +1019,7 @@ def test_sway_back_never_locks_up_even_if_every_frame_is_a_far_gate():
 
 def test_sway_back_exits_when_the_lost_gate_comes_back(monkeypatch):
     """刚丢的那个门一回来（同门判据过）⇒ 立刻退出状态，交回视觉；且这一帧 ψ 已刷新。"""
-    w = _ShrinkWorld(psi0=25.0, z=1.5)                 # z 不变 ⇒ 判成同一个门
+    w = _ShrinkWorld(psi0=25.0, z=2.0)                 # z 不变 ⇒ 判成同一个门
     task, uart, t0 = _drive_to_sway_back(w)
     assert task._post_sway_until_ms is not None, "门被甩出画面后应进入状态"
     # ★ 2026-10-06：收手判据多了两道 —— **转向后先连停 settle 帧**（新画面才可信）
@@ -1038,7 +1057,7 @@ def test_post_sway_kpt_threshold_is_configurable_and_bites(monkeypatch):
     ② 第 3 个角点出现才收手，且 `sway_exit` 报 `kpt>=3`；
     ③ 角点置信度低于 `vision.gate.keypoint.conf_thr` 的**不算数**（否则"看到角点"会虚高）。
     """
-    w = _ShrinkWorld(psi0=25.0, z=1.5)
+    w = _ShrinkWorld(psi0=25.0, z=2.0)
     task, uart, t0 = _drive_to_sway_back(w)
     assert task._post_sway_until_ms is not None
     task._hdg_cfg = dict(task._hdg_cfg)
@@ -1079,7 +1098,7 @@ def test_post_sway_starts_after_the_turn_end_hard_stop():
     2026-10-02：转向改成"下位机执行、上位机等完成" ⇒ 整次转向在**同一帧内**跑完，
     "转向中把门甩出画面"这类逐帧编排不再成立：改成**下发转向那一帧之后**就把门藏起来。
     """
-    w = _ShrinkWorld(psi0=25.0, z=1.5)
+    w = _ShrinkWorld(psi0=25.0, z=2.0)
     uart = _BlockingStopUart(cost_s=0.7)
     task = GateTask(uart, _Hub(lambda: w.det()), CAM.width, CAM.height)
     task._hdg_cfg = dict(task._hdg_cfg)
@@ -1155,7 +1174,7 @@ class _CoarseAfterTurn(_HullWorld):
 
 def test_sway_back_without_z_falls_back_to_box_ratio():
     """没有 z（coarse）时走占比退路：框缩到 50%（< 70%）⇒ 判"不是同一个门" ⇒ 继续推、到期退出。"""
-    w = _CoarseAfterTurn(psi0=25.0, z=1.5, scale=0.5)
+    w = _CoarseAfterTurn(psi0=25.0, z=2.0, scale=0.5)
     task, uart, t0 = _drive_to_sway_back(w)
     assert task._post_sway_until_ms is not None, "门被甩出画面后应进入反向平移状态"
     frame = np.zeros((CAM.height, CAM.width, 3), np.uint8)
@@ -1177,7 +1196,7 @@ def test_turn_without_completion_never_confirms_heading(monkeypatch):
     —— 于是即便门已经在跟前，也不会盲冲。
     """
     monkeypatch.setitem(S.comm.gate["hdg"], "turn_timeout_s", 1.0)
-    w = _HullWorld(psi0=20.0, z=1.5)
+    w = _HullWorld(psi0=20.0, z=2.0)
     uart = _Uart(yaw_deg=0.0, world=w)
     uart.turn_replies = 10 ** 6                    # 收了请求但**永不回报完成**
     uart.world = None          # 也不许真的转过去（否则 ψ 会合法地变正、闸门自然放行）
@@ -1220,7 +1239,7 @@ def test_sway_back_yields_to_through_and_to_a_running_turn():
     """**互锁回归（2026-09-27 用户问「平移窗口会不会把旋转/冲刺卡死」）**：
     `_set_info` 是唯一下发口，平移若在里面**无条件覆盖** 调用方的 action，就会出现两种抢指令：
     约定：**平移让位于转向与冲刺**（它只是"把门拉回视野"的最低优先级补偿），并且立刻作废窗口。"""
-    w = _ShrinkWorld(psi0=25.0, z=1.5)
+    w = _ShrinkWorld(psi0=25.0, z=2.0)
     task, uart, t0 = _drive_to_sway_back(w, z_after_turn=2.2)   # 判成远门 ⇒ 窗口保持存活
     assert task._post_sway_until_ms is not None
     # ① 冲刺帧：surge 必须原样发出去，且窗口作废
@@ -1230,7 +1249,7 @@ def test_sway_back_yields_to_through_and_to_a_running_turn():
         "冲刺的 surge 被平移压掉了：%r" % (uart.frames[-1],)
     assert task._post_sway_until_ms is None, "进冲刺就该作废平移窗口"
     # ② 转向帧：yaw 必须原样发出去（窗口活着时也不许清零）
-    task, uart, t0 = _drive_to_sway_back(_ShrinkWorld(psi0=25.0, z=1.5), z_after_turn=2.2)
+    task, uart, t0 = _drive_to_sway_back(_ShrinkWorld(psi0=25.0, z=2.0), z_after_turn=2.2)
     assert task._post_sway_until_ms is not None
     task._hdg.state = "turn"                     # 假装又起转了（生产里起转前会清窗口）
     task._set_info("hdg", yaw=-0.30)
@@ -1310,7 +1329,7 @@ def test_post_sway_exits_as_soon_as_the_configured_keypoints_appear(monkeypatch)
     """转完补偿的**主判据**（用户 2026-09-28 定）：**边反向平移边缓慢后退**，
     直到"画面里至少出现 `post_sway_kpt_min`（默认 2）个角点"就交回视觉。
     钉三件事：① 门还在画外（0 角点）时**继续**平移 + 后退；② 角点数**不够**（1 个 < 2）时**不**收手；"""
-    w = _ShrinkWorld(psi0=25.0, z=1.5)
+    w = _ShrinkWorld(psi0=25.0, z=2.0)
     task, uart, t0 = _drive_to_sway_back(w)              # 转完门被甩出画面
     assert task._post_sway_until_ms is not None
     # ★ 2026-10-06：收手判据多了两道 —— **转向后先连停 settle 帧**（新画面才可信）
@@ -1364,9 +1383,10 @@ def test_z_jump_protection(monkeypatch):
     assert float(S.comm.gate.z.relock_z_jump_m) == 0.5
     assert float(S.comm.gate.z.relock_away_m) == 1.8
     # ★ 2026-10-05 用户定：**加回来** —— 2.5m 开外**完全不相信**（无条件，首见也拦）
-    assert float(S.comm.gate.z.dist_max_m) == 3.0
+    # ★ 2026-10-07 用户定：dist_max_m = **2.5**（"远端阈值保持 2.5"；3 米开外本就不准）
+    assert float(S.comm.gate.z.dist_max_m) == 2.5
     task = _task(lambda: []); assert task._relock_guard(4.2) is True
-    task = _task(lambda: []); assert task._relock_guard(3.6) is True
+    task = _task(lambda: []); assert task._relock_guard(2.8) is True
     # 首见不拦（无参照）
     task = _task(lambda: []); assert task._relock_guard(2.0) is False
     # 向上跳（在追的 z）
@@ -1517,7 +1537,8 @@ def test_gate_lock_k_consistency_rejects_a_different_gate(monkeypatch):
     a = _det(1.5, px=(CAM.width * 0.5, CAM.height / 2.0))[0]        # 锁定门
     b = _det(1.5, px=(CAM.width * 0.5, CAM.height / 2.0))[0]        # 同位干扰门
     # a 的 k 正常；b 让 _z_est 报一个崩小的 z ⇒ k 明显偏小 ⇒ 必须被判"不是同一扇"
-    monkeypatch.setattr(task, "_z_est", lambda d, c: 1.5 if d is a else 0.45)
+    # ★ 2026-10-07：`k_lo_ratio` 0.75→0.30 ⇒ 干扰门的 k 要明显更小才构得成"偏小"（0.20 而非 0.45）
+    monkeypatch.setattr(task, "_z_est", lambda d, c: 1.5 if d is a else 0.20)
     task._gate_lock([a], frame_w)                     # 锁上 a，建立 k 参照
     assert task._lock_k_ref is not None, "刚锁上就该建立 k 参照"
     k_lo = float(S.comm.gate.select.k_lo_ratio)
@@ -1647,6 +1668,34 @@ def test_lock_guard_runs_before_center_matching(monkeypatch):
     monkeypatch.setattr(task, "_k_of", lambda d: None)             # 模拟 coarse：测不出 k
     assert task._lock_guard_reject(small) is True, \
         "k 测不出时必须退回比面积，占比小太多=更远那扇门"
+
+
+def test_through_requires_the_mode_own_centering_range():
+    """★ 2026-10-07 用户定：**务必在"各自要求的居中范围"内触发过门**。
+
+    过门居中闸用的必须是**本档位自己的对中带**（× `through.loose`，默认 1.0 = 等同该档要求），
+    而不是一套全局常数；并与 `through.center_x/center_y`（2026-10-05 定的抗抖动上限）取 AND。
+    """
+    task = _task(lambda: [])
+    al = S.comm.gate.align
+    w = S.comm.gate.width
+    # ① 位姿档：按 align.px_x 判
+    assert task._center_ok(float(al.px_x) * 0.9, 0.0, al) is True
+    assert task._center_ok(float(al.px_x) * 1.1, 0.0, al) is False
+    # ② width 档：同一套数值下判定**不同** —— 这就是"各档各自"（width 的横向带比位姿档宽）
+    assert task._center_ok(float(w.align_x) * 0.9, 0.0, w, "align_x", "align_y") is True
+    assert task._center_ok(float(w.align_x) * 1.1, 0.0, w, "align_x", "align_y") is False
+    assert float(w.align_x) > float(al.px_x), "本用例前提：width 的横向带比位姿档宽（实测 2.3 倍）"
+    # ③ 纵向：width 的带更紧 ⇒ 同一个 dyn 在位姿档过、在 width 档不过
+    _dyn = (float(al.px_y) + float(w.align_y)) / 2.0
+    assert task._center_ok(0.0, _dyn, al) is True
+    assert task._center_ok(0.0, _dyn, w, "align_x", "align_y") is False
+    # ④ 与 through.center_x/center_y 取 AND：把上限调小 ⇒ 立即以它为准（只会更严）
+    import base.cfg.settings as _S
+    task._G = _S.Y(dict(_S.comm.gate, through=_S.Y(dict(_S.comm.gate.through,
+                                                       center_x=0.01, center_y=0.01))))
+    assert task._center_ok(0.0, 0.0, al) is True
+    assert task._center_ok(0.05, 0.0, al) is False, "through.center_x 更紧时必须由它拦下"
 
 
 def test_through_main_exit_requires_sustained_centering(monkeypatch):
@@ -1791,8 +1840,12 @@ def test_z_door_distance_anchor_is_not_broken():
 
 
 def test_z_dist_max_matches_the_ranging_limit():
-    """★ 2026-10-07 用户定：**3 米开外测距已不可信** ⇒ `dist_max_m` = 3.0（完全不相信）。"""
-    assert float(S.comm.gate.z.dist_max_m) == pytest.approx(3.0)
+    """★ 2026-10-07 用户定：**远端阈值保持 2.5**（"3 米开外测距不准，但远端不放大"）。
+
+    注：数据上 z 在 1.958–3.123 之间是**空带** ⇒ dist_max 取该区间内任何值行为完全相同；
+    2.5 落在空带正中，与 relock_away_m=1.8 同侧，是数据支持的取值。
+    """
+    assert float(S.comm.gate.z.dist_max_m) == pytest.approx(2.5)
     task = _task(lambda: [])
-    assert task._relock_guard(3.4) is True, "3.4m > dist_max(3.0) 必须被无条件拦下"
-    assert task._relock_guard(2.8) is False, "2.8m < dist_max(3.0) 不该被这一条拦"
+    assert task._relock_guard(2.8) is True, "2.8m > dist_max(2.5) 必须被无条件拦下"
+    assert task._relock_guard(2.4) is False, "2.4m < dist_max(2.5) 不该被这一条拦"

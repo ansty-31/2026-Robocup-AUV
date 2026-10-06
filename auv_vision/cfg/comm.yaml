@@ -237,8 +237,31 @@ ball:  # 任务一 撞球：运动链 SEARCH→CENTER→APPROACH→DASH→STOP
 gate:  # 任务二 过门
   timeout_ms: 50000  # 任务级兜底
   pass_target: 1  # 完成计数目标：单门 1
-  align: {confirm_frames: 4, px_x: 0.15, px_y: 0.10}  # 现用值
+  # ★★ 2026-10-07 用户定（依据 log/rungate_20261006_postsway 的 385 帧实测）：
+  #   **对中带按档位分开、并且 px_x > px_y**（原来只有一套 0.15/0.10，与几何和数据都不符）。
+  #   数据（主点基准 + 去纵向偏置后，有测量帧各档的目标通过率 60% 分位）：
+  #     full  |dx| 中位 0.068 / |dy| 中位 0.105 → px/py = 0.69
+  #     width |dx| 中位 0.130 / |dy| 中位 0.055 → px/py = 2.31
+  #     coarse|dx| 中位 0.158 / |dy| 中位 0.070 → px/py = 1.86
+  #   注意纵向**零点不在 0**：{dyn} 的中位是 −0.30（相机比门中心高 + 抬头），
+  #   所以 `dy_target=-0.30` 把纵向量心搬到 0 附近；不做这一步，任何纵向阈值都在偏置上打滑。
+  #   `confirm_frames` 4→5：用户定"align 成功 5 帧"(与机身静取交，见 hdg.body_delta_max_deg)。
+  align: {confirm_frames: 5, px_x: 0.10, px_y: 0.15, dy_target: -0.30}
+  # ★ width 档自己的对中带（2026-10-07 用户定）：数据说 width 档横向误差是纵向的 2.3 倍，
+  #   用 full 那套带会把 width 帧全部判成"未对准"。缺键时回退到 align.px_x/px_y（不崩）。
   hdg: {enable: true, tol_deg: 8.0, max_step_deg: 0.0, turn_scale: 1.0, timeout_ms: 30000,
+        # ★★ 2026-10-07 用户定：**ψ 先平滑再比 tol**（不要放宽 tol）。
+        #   实测：ψ(EMA0.4) 的帧间跳 7.8°，而真实航向(tyaw)帧间跳只 0.33° ⇒ **24 倍**，
+        #   ψ 在该频段是噪声主导 ⇒ 用它的分布定 tol 是循环论证（原 8° 曾因此一次都起不来）。
+        #   几何上界：tol=8° 在 1.5m 过门距离上带来 21cm 横向漂移（门洞半宽 35cm）；
+        #   20° 会带来 55cm（直接出界）。⇒ **tol 保持 8°，把 ψ 先做 psi_ema_frames 帧 EMA**。
+        psi_ema_frames: 10,
+        # ★★ 2026-10-07 用户定：**转向前必须"机身稳"**（重点是稳机身后再转，不是居中本身）。
+        #   实测（触发帧 f17）：|Δtyaw|=0.13°、|Δtrol|=0.24°、|Δtpit|=0.09°（全在中位以下）
+        #   而 |Δψ|=26.4° ⇒ 那次起转是被图像噪声推出去的，机身其实是静的。
+        #   门限 1.0°/帧 是遥测帧间跳的 ~p65（0.5°/帧 会给 0 个 5 帧窗口，太严）；
+        #   判定为**并行**：最近 confirm_frames 帧**同时**满足 align 与"机身静"。
+        body_delta_max_deg: 1.0,
         # ★ ok_frames（2026-10-04 用户定）：**连续多少帧** ψ 都在 tol_deg 内才算"航向已 OK"。
 #   （细节与实测见 doc/注释历史.md）
         ok_frames: 5,
@@ -250,18 +273,25 @@ gate:  # 任务二 过门
         #   —— 转向后前几帧还是转向前的旧画面，拿它判"门回来了"没意义（实测帧18仍报 kpt=4）。
         post_sway_settle_frames: 8}
   loiter: {enable: true, near_ratio: 0.50, timeout_ms: 6000, dx_max: 0.25, dy_max: 0.30, pose_hist_ms: 1500.0, pose_hist_min: 3}
-  z: {align_max: 4.0, fast_max: 3.0,
+  z: {align_max: 3.0, fast_max: 3.0,
       # ★★ 2026-10-07 用户定：**三个"到门口"的距离键直接划等号** ——
       #   `z.slow_max`（近了就慢） / `z.cross`（冲刺触发） / `width.z_max`（width 档"够近了"）。
       #   ⚠️ 用 **YAML 锚点**实现：**只改下面 `&door_m` 这一处**，三个键同时变；
       #     历史上它们是手工写成同一个数（09-30 起 cross/slow_max 都是 1.2），
       #     散在三个地方、改一个忘一个 ⇒ 现在钉成一个来源。
       #   物理含义：门框在画面里大到这个程度 = 已到门口。
-      slow_max: &door_m 1.2,
+      #   ★ 2026-10-07 用户定：值 1.2 → **1.5**（"近端 z 适当放大，利于果断冲门"）。
+      #   数据依据：full 档 z<1.5 的 9 帧里 k=z×ratio 的 std 只有 3.3%（z∈[1.5,2.0) 是 3.7%），
+      #   是全程最稳的一段；把冲刺门限放到 1.5，参与 z≤cross 计数的帧从 14 → 22、最长连续 7 → 11 帧，
+      #   而 cross_confirm_frames=4 的要求才第一次真正可满足。
+      #   远端侧（>3m）无动作空间：z 实测在 1.958–3.123 之间是空带，
+      #   dist_max_m / relock_away_m 取该区间内任何值行为完全相同。
+      slow_max: &door_m 1.5,
       cross: *door_m,
-        # ★ dist_max_m（2026-10-04 用户定）：z 超过它 ⇒ **完全不相信**这一帧位姿
+        # ★ dist_max_m：z 超过它 ⇒ **完全不相信**这一帧位姿
+        #   ★ 2026-10-07 用户定：**保持 2.5**（"3 米开外测距不准，但远端阈值不放大"）。
 #   （细节与实测见 doc/注释历史.md）
-        dist_max_m: 3.0,  # ★ 2026-10-07 用户定：**3 米开外测距已不可信** ⇒ 完全不相信（原来是 2.5）
+        dist_max_m: 2.5,
       cross_confirm_frames: 4,  # 连续 z≤cross 帧数才判过门(防单帧 PnP 错解冲出去)
       # ★ 与 cross 同值：近了就进 THROUGH，不会因为太近而长时间 search/back_slow
 #   （细节与实测见 doc/注释历史.md）
@@ -276,13 +306,24 @@ gate:  # 任务二 过门
   surge: {creep: 0.20, lost_backward: 0.20, reacquire: 0.25, through: 0.6}
   width:  # width 档
     z_max: *door_m   # ★ 与 z.cross / z.slow_max 同一个值（YAML 锚点，改 &door_m 一处即可）
-  coarse: {far_ratio: 0.18, near_ratio: 0.55, align_x: 0.33, align_y: 0.29}
+    # ★ 2026-10-07 用户定：width 档**自己的**对中带（各 mode 的居中依赖不同，不共用一套）。
+    #   数据（主点基准 + 去纵向偏置，width 有测量 68 帧）：|dx| 中位 0.130 / |dy| 中位 0.055
+    #   ⇒ 60% 分位给 (0.14, 0.06)。缺键时回退到 align.px_x/px_y。
+    align_x: 0.14
+    align_y: 0.06
+  # ★ 2026-10-07 用户定：coarse 档对中带 0.33/0.29 → **0.18/0.10**（原值过松：
+  #   实测只有 50% 的 coarse 帧落进去，且落在阈值附近的帧最多——收紧后仍覆盖 60% 分位）。
+  coarse: {far_ratio: 0.18, near_ratio: 0.55, align_x: 0.18, align_y: 0.10}
   hold: {max_frames: 20}  # HOLD 无进展帧数 → REACQUIRE(只在"未对准"时累加)
   reacquire: {max_ms: 800,  # 单次后退上限(ms)
               max_times: 2,  # 连续这么多次仍拿不到角点 → 放弃后退, 改原地 HOLD
               stop_ratio: 0.75,  # 闭环后退: 框占比退到进入时的 75% 就停
               reset_after_ms: 3000}  # 距上次后退超过这么久 → 重新允许 max_times 次后退
-  through: {confirm_ms: 2000, confirm_frames: 8, require_align_deg: 8.0,
+  # ★★ 2026-10-07 用户定：**过门必须在"各档位自己的居中范围"内触发**。
+  #   `loose` = 本档对中带 × 它（**1.0 = 完全等同该档的居中要求**；>1 才允许比对准更松）。
+  #   它与下面的 `center_x/center_y`（2026-10-05 定的"抗抖动上限"）取 **AND**
+  #   ⇒ 两道都过才许冲，所以这条只会更严，不会把旧闸放松。
+  through: {confirm_ms: 2000, confirm_frames: 8, require_align_deg: 8.0, loose: 1.0,
             # ★ center_frames（2026-10-05 用户定）：**够近那条主出口**要求"居中成功"
 #   （细节与实测见 doc/注释历史.md）
             center_frames: 4, center_x: 0.20, center_y: 0.25}
@@ -293,7 +334,11 @@ gate:  # 任务二 过门
   lock: {match_ratio: 0.20, miss_frames: 5, stable_frames: 5}
   # ★ 选门：z 与**框占比**配合判据（2026-10-04 用户定）。
 #   （细节与实测见 doc/注释历史.md）
-  select: {k_check: true, k_lo_ratio: 0.75, k_hi_ratio: 1.40, k_max_ratio: 0.90}   # 选门 = z 优先 + 面积最大 + k 一致性保护
+  # ★ 2026-10-07 用户定：k 一致性带宽按**实测两个总体**改（0.75/1.40 → **0.30/1.45**）。
+  #   实测 k=z×ratio 在数据上只有两群：低群 0.150–0.251（中位 0.211）、高群 0.593–1.008（中位 0.768）。
+  #   同门正常波动（width 0.693–1.008 ÷ 参照 0.78）只有 ×0.89~×1.29 ⇒ 落在带内；
+  #   而 f65→f66 那次"单帧塌陷"把 k 打到 0.150（÷参照 = ×0.19）⇒ 新下限 0.30 能拦住它。
+  select: {k_check: true, k_lo_ratio: 0.30, k_hi_ratio: 1.45, k_max_ratio: 0.90}   # 选门 = z 优先 + 面积最大 + k 一致性保护
   pose_hold_frames: 10  # 帧间防抖：丢姿态时的保持帧数
 
 debug:  # 通信调试

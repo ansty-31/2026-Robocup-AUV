@@ -122,7 +122,11 @@ class GateExits(object):
         if self.phase == PH_ALIGN:
             # ⚠️ 这里**不再中止正航向**：转向是自包含动作（`_step` 顶部已把转向接管，
             if self._post_sway_until_ms is not None and now_ms < self._post_sway_until_ms:
-                self._set_info("sway_back", z=self._z_last, sway=self._post_sway)
+                #   ⚠️ 这里**不要**自己把 action 写成 "sway_back"：`_set_info` 的平移块会在窗口
+                #   仍开着时把它覆盖成 sway_back；而窗口**恰在这一帧关闭**时，预置的名字撤不回来，
+                #   于是"状态已结束"却还记/发一帧 sway_back 指令（用户 2026-10-07 指出）。
+                #   传中性动作，让唯一的仲裁口去决定。
+                self._set_info("hold", z=self._z_last)
                 return
             near_r = req(sub(self._G, "z"), "near_lost_ratio")
             last_r = float(getattr(self, "_dbg_ratio", 0.0) or 0.0)

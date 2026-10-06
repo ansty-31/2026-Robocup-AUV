@@ -18,6 +18,7 @@ SUB_REACQUIRE = "REACQUIRE"
 SUB_SWAY_BACK = "SWAY_BACK"
 _K_ALIGN = (
     "confirm_frames",
+    "dy_target",      # ★ 2026-10-07：纵向**零点偏置**（归一化；数据实测 = −0.30）
     "px_x",
     "px_y"
 )
@@ -61,6 +62,8 @@ _K_COARSE = (
     "near_ratio"
 )
 _K_WIDTH = (
+    "align_x",        # ★ 2026-10-07：width 档**自己的**对中带（各 mode 的居中依赖不同）
+    "align_y",
     "z_max",
 )
 _K_TASK = (
@@ -82,6 +85,7 @@ _K_REACQ = (
 )
 _K_THROUGH = (
     "center_frames",
+    "loose",          # ★ 2026-10-07：过门居中闸 = 本档对中带 × 它（默认 1.0 = 等同该档要求）
     "center_x",
     "center_y",
     "confirm_frames",
@@ -123,6 +127,7 @@ _K_GEOM = (
 )
 
 _K_HDG = (
+    "body_delta_max_deg",   # ★ 2026-10-07：转向前"机身稳"门限（°/帧，三个遥测量同时）
     "enable",
     "max_step_deg",
     "max_turns",
@@ -132,6 +137,7 @@ _K_HDG = (
     "post_sway_kpt_min",
     "post_sway_ms",
     "post_sway_settle_frames",
+    "psi_ema_frames",       # ★ 2026-10-07：ψ 先 EMA 这么多帧再比 tol（ψ 噪声是真实航向的 24 倍）
     "stop_hard",
     "timeout_ms",
     "tol_deg",

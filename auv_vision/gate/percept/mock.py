@@ -51,7 +51,14 @@ class MockGateBackend(object):
             return None
         lat = self.lat_bias * max(0.0, 1.0 - f / max(self.align_frames, 1))
         rvec = np.array([0.02, -0.01, 0.0], np.float64)
-        tvec = np.array([lat, 0.0, z], np.float64).reshape(3, 1)
+        # ★ 2026-10-07：**"已对准"的落点 = 纵向零点** `comm.gate.align.dy_target`。
+        #   判据里的 `dyn` 是相对那个零点的偏差（相机装高 + 抬头造成的固定偏置），
+        #   所以 mock 的"艇正对门心"必须把门画在 `dyn = 0` 处，而不是光轴上（光轴上 = dyn 偏 −0.30）。
+        #   缺键 ⇒ 0.0（退回旧语义，不崩）。
+        import base.cfg.settings as _S
+        _dy = float((_S.comm.gate.get("align") or {}).get("dy_target", 0.0) or 0.0)
+        ty = _dy * (self.h / 2.0) * z / self.camera.fy
+        tvec = np.array([lat, ty, z], np.float64).reshape(3, 1)
         return rvec, tvec
 
     def _pose(self):

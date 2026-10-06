@@ -158,8 +158,9 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         self._hdg_done = not flag(self._hdg_cfg, "enable", True)
         self._hdg_ok = False              # 本门是否满足冲刺前航向条件；每次换门清零
         self._hdg_ok_cnt = 0              # ★ 连续落进 tol_deg 的帧数（ok_frames 判据用）
-        self._hdg_f = None                # EMA 状态（只吃 full 帧，避免 p3p 垃圾污染）
-        self._hdg_deg = None              # 最近一次 full 帧测到的航向误差（度）
+        self._hdg_f = None                # 快 EMA(≈4 帧)：只用于日志 hdg_fast
+        self._hdg_s = None                # ★ 慢 EMA(psi_ema_frames 帧)：**判据与目标角用这个**
+        self._hdg_deg = None              # 交给判据的航向误差（度）= 上面的慢 EMA
         self._hdg_ms = None               # 上面那个值的时刻
         self._hdg_turns = 0               # 本门已转向次数（**无上限**；逐小步逼近，仅用于日志）
         self._hdg_turns_last_ms = None    # 上一次转向**结束**的时刻（判"有没有新的 ψ"用）
@@ -216,6 +217,10 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         self._hdg_skip_logged = False
         self._hdg_turns = 0
         self._hdg_turns_last_ms = None
+        self._hdg_f = None                # ★ 复位时把 ψ 的 EMA 状态也清掉（原来漏了）
+        self._hdg_s = None
+        self._hdg_deg = None
+        self._hdg_ms = None
         self._post_sway_until_ms = None
         self._post_sway = 0.0
         self._post_sway_back = 0.0        # 同时叠加的**缓慢后退**分量（负=后退）
