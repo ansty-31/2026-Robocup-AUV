@@ -256,3 +256,69 @@
 3. **纵深尺度**：`k` 相对 `fx·W/w` 在 width 档偏高 40%、full 档偏高 14% ⇒ 前向 cm/s 有同量级不确定度。
 4. **垂向幅值—速率关系**：日志里没有 ≥6 帧的恒定 `heave` 段 ⇒ `heave` 需要单独做台阶测试。
 5. **`sway` 的比例增益**：`sway` 在数据上只有三态，`kp / out_max / deadzone` 的组合无法从本日志分离。
+
+---
+
+# 附：本轮落地（2026-10-07，commit `e28aea2` + `db673cd`）
+
+基线与回档：`git reset --hard checkpoint-pre-gate-tune`（动手前）/ `git reset --hard db673cd`（本轮后）。
+`python3 -m pytest tests/ -q` → **368 passed**。
+
+## 落地值（cfg 实际生效）
+
+| 键 | 旧 | 新 | 依据（本节 §组1/组2） |
+|---|---|---|---|
+| `align.confirm_frames` | 4 | **5** | 用户定"align 成功 5 帧"，与"机身稳"**并行** |
+| `align.px_x` | 0.15 | **0.10** | 主点基准 + 去偏置后 full `\|dx\|` 中位 0.068（60 分位） |
+| `align.px_y` | 0.10 | **0.15** | full `\|dy\|` 中位 0.105；full 的 px/py = 0.69 |
+| `align.dy_target` | — | **−0.30** | `dyn` 实测中位 −0.30（逐档 −0.20 / −0.28 / −0.34） |
+| `width.align_x / align_y` | — | **0.14 / 0.06** | width 横向误差是纵向 2.3 倍 |
+| `coarse.align_x / align_y` | 0.33 / 0.29 | **0.18 / 0.10** | 60 分位 |
+| `z.slow_max`(= `cross` = `width.z_max`) | 1.2 | **1.5** | full `z<1.5` 的 k 最稳（std 3.3%）；参与计数帧 14→22、最长连续 7→11 |
+| `pnp.z_max` | 15.0 | **3.0** | ">3m 的距离参数压回来"；width 四台阶全部越界 |
+| `z.align_max` | 4.0 | **3.0** | 同上（该键无代码读，纯一致性） |
+| `z.dist_max_m` | 3.0 → **2.5** | 2.5 | 用户 04:28 手改；且 z 在 1.958–3.123 是空带，取区间内任何值等价 |
+| `hdg.psi_ema_frames` | — | **10** | ψ 帧间跳 7.8° 是真实航向 0.33° 的 24 倍 |
+| `hdg.body_delta_max_deg` | — | **1.0** | 遥测帧间跳 p65；0.5°/帧 会给 0 个 5 帧窗口 |
+| `hdg.tol_deg` | 8.0 | 8.0（不变） | 几何界 8~10°（20° 在 1.5m 上带 55cm 漂移，直接出界） |
+| `select.k_lo_ratio / k_hi_ratio` | 0.75 / 1.40 | **0.30 / 1.45** | 拦得住 f65→f66 的 5× 塌陷；同门正常波动 0.89–1.29 落在带内 |
+| `through.loose` | — | **1.0** | 过门居中闸 = **本档对中带 × loose**，与 `center_x/center_y` 取 AND |
+| `through.fast_ms / confirm_ms` | — / 2000 | **8000 / 10000** | 两段式冲刺（见 §组5 与 `exits._tick_through`）；**未标定** |
+
+未改：`surge.creep=0.20`（只提占空比，按用户定）、`sway` 极性（实测正确）、
+`width/coarse` **各自一套**对中带（用户定"先用目前数据结果"）、
+兜底 `creep_through` **不加**居中闸（仍只看 `loiter.dx_max/dy_max`）。
+
+## 机制落地
+
+1. **纵向零点全局**：在算 `dyn` 的三处（`_on_pose`/`_on_width`/`_on_coarse`）统一减 `dy_target`
+   —— 它是**测量约定**，`through.center_y`/`loiter`/`heave` 同源，只在 align 里减会让它们全部错位。
+2. **对中判据分档**：`channels._aligned(dxn, dyn, node, kx, ky)`，缺键回退到 `align`。
+3. **转向前置条件**：`align ∧ 机身稳`，**并行**数 `confirm_frames` 帧
+   （串行"align 5 帧 + 再稳 5 帧"= 10 连续帧，实测窗口恒为 0）。
+   机身稳 = 遥测 `|Δroll|,|Δpitch|,|Δyaw| ≤ 1.0°/帧`（无遥测 fail-open）。
+4. **ψ 先 EMA 10 帧再比 tol**，目标角也用平滑值；快 EMA(≈4 帧) 只留日志 `hdg_fast`。
+5. **过门居中闸**：`channels._center_ok(...)` = 本档对中带 × `through.loose`，与
+   `through.center_x/center_y` 取 AND（**只可能更严**）。
+6. **两段式冲刺**：段①`fast_ms` 用 `surge.through` 快冲，段②到 `confirm_ms` 降到 `surge.creep`；
+   新增日志字段 `through_stage`；`fast_ms=0` = 旧行为。
+7. 修 `exits._tick_lost`：不再自己预置 `action="sway_back"`（窗口恰在该帧关闭时撤不回来，
+   会记/发一帧已结束状态的指令）。
+
+## 回放验证（同一趟日志、新参数）
+
+- **转向**：f7 触发，`ψ_ema = −0.1°` → 判"已平行"、不下发。
+  ⇒ 10 帧 EMA 之后航向误差就是 0.1°，**说明当时机身本来就是正的**；日志 f17 那次是被 ±30° 的
+  测量噪声推进 tol 窗口的 —— ψ 平滑这条被数据验证。
+- **过门**：仍未触发，拦下原因明确 `off_center(连续居中 0/4 帧)` 346 帧
+  ⇒ 新闸在起作用：这趟船从未连续 4 帧落在它自己档位的居中范围内。
+  ⚠️ **失效模式因此从"偏着冲"变成"永远不冲→超时"**，这是"务必在居中范围内过门"的代价。
+- 一致性：`mode` 98.2%、`phase` 79.7%。
+
+## 未标定 / 待实测
+
+- **`through.fast_ms`、`through.confirm_ms`**：本趟日志 THROUGH 从未触发 ⇒ 无冲刺实测。
+  估算：`surge=0.30` 实测稳态 17.3cm/s，按有效推力外推到 0.60 ⇒ **0.29~0.49 m/s**
+  （1.7× 不确定度），走完 2.4~2.6m 要 4.9~8.9s。开环时间法**不能同时**保证"穿过"与"不过冲"，
+  现取值优先保证穿过。**下水后按实际走过的距离收。**
+- `surge.creep=0.20` 的稳态速度、`heave` 的幅值-速率关系、横向速率极性：均需开环台阶实测。
