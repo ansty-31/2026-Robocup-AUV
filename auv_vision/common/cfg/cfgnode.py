@@ -57,7 +57,9 @@ def pid_kw(node, where=""):
     """
     om = req(node, "out_max")
     out = dict(kp=req(node, "kp"), ki=req(node, "ki"), kd=req(node, "kd"),
-               out_min=-om, out_max=om, deadzone=req(node, "deadzone"))
+               out_min=-om, out_max=om, deadzone=req(node, "deadzone"),
+               # `bias` = **执行器死区补偿**（可选；缺省 0 = 不补偿，行为与加它之前一致）
+               bias=float(node.get("bias", 0.0) or 0.0))
     return out
 
 

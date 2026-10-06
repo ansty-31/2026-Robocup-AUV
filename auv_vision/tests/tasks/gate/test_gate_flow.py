@@ -273,6 +273,42 @@ def test_no_speed_preset_inside_actuator_deadzone():
 
 
 
+def test_gate_sway_is_proportional_not_bang_bang():
+    """★ 2026-10-07 用户定：修掉"sway 一直顶在 ±0.55"。
+
+    实测病根（log/rungate_20261006_postsway，有测量 236 帧）：`kp=8` 时比例区只有
+    `out_max/kp = 0.069` 宽（占满幅 1.9%），而误差 `|dx|` 中位 0.090 ⇒ **63% 的帧必然饱和**、
+    只有 10% 落在比例区（实测符号每 7.6 帧翻一次 = 极限环，不是比例控制）。
+    现在：出死区即给**执行器死区之上**的推力，随误差线性升到 out_max。
+    """
+    task = _task(lambda: [])
+    kw = task._pid_sway_kw
+    om, kp = float(kw["out_max"]), float(kw["kp"])
+    bias = float(kw.get("bias", 0.0) or 0.0)
+    DEAD_ACT = 0.138                       # cfg 自注：低于它推进器无推力
+    assert bias >= DEAD_ACT - 1e-9, (
+        "必须配了死区补偿（bias=%.3f）——只降 kp 会把『一直顶满』换成『一直没推力』" % bias)
+    errs = (0.03, 0.06, 0.09, 0.15, 0.30, 0.42, 0.60)
+    outs = []
+    for i, e in enumerate(errs):
+        task._pid_sway_px.reset()
+        task._pid_sway_px.update(e, now_ms=0)          # 预热（消掉 D 项的启动跳变）
+        outs.append(abs(task._lateral_out(e, 1000 + 100 * i)))
+    assert outs[0] == 0.0, "死区内必须为 0：%s" % outs
+    thr = (om - bias) / kp if kp > 0 else float("inf")   # 理论饱和起点
+    for e, o in zip(errs, outs):
+        if e < thr - 1e-9:
+            assert o < om - 1e-9, "|e|=%.2f 未到饱和起点(%.3f)却顶满：%s" % (e, thr, outs)
+        else:
+            assert o == pytest.approx(om), "|e|=%.2f 过了饱和起点该顶满：%s" % (e, outs)
+    prop = [o for o in outs if 1e-9 < o < om - 1e-9]
+    assert len(prop) >= 4, "比例区应覆盖大部分档位，实际只有 %d 档：%s" % (len(prop), outs)
+    nz = [o for o in outs if o > 1e-9]
+    assert all(o >= DEAD_ACT - 1e-9 for o in nz), (
+        "有低于执行器死区的『白发』指令：%s" % nz)
+
+
+
 def test_gate_gains_follow_motion_changes(monkeypatch):
     """**共用的证据**：改 `comm.motion` 的增益，gate 构造出来立刻跟着变（没有第二份数字）。
 

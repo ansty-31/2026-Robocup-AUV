@@ -44,6 +44,31 @@ def test_pid_deadzone_clamp_and_derivative():
     assert p4._integral == 0.0
 
 
+def test_pid_bias_lifts_output_above_actuator_deadzone():
+    """★ 2026-10-07：`bias` = **执行器死区补偿**。
+
+    推进器 `|DOF| < 0.138` 时一点推力都没有（cfg 自注）⇒ 只降 kp 会把"一直顶满"
+    换成"一直没推力"。`bias` 让输出一出生就在死区之上，之后随 kp 线性升到 out_max。
+    `bias=0` 时与加这个参数之前完全一致（下面是回归断言）。
+    """
+    DEAD_ACT = 0.138
+    p = PID(kp=1.0, ki=0.0, kd=0.0, out_min=-0.55, out_max=0.55, deadzone=0.05,
+            bias=DEAD_ACT)
+    assert p.update(0.04) == 0.0, "死区内不补偿，必须是 0"
+    assert p.update(0.051) == pytest.approx(DEAD_ACT + 0.051, abs=1e-9),         "刚出死区就该是『有推力的最小指令』"
+    a = abs(p.update(0.10, now_ms=0))
+    b = abs(p.update(0.20, now_ms=100))
+    assert b > a > DEAD_ACT, (a, b)
+    p.reset()
+    assert p.update(-0.20) == pytest.approx(-(DEAD_ACT + 0.20), abs=1e-9), "负误差要对称"
+    p.reset()
+    assert p.update(0.90) == pytest.approx(0.55), "上限仍是 out_max"
+    # bias=0 ⇒ 旧行为（回归）
+    q = PID(kp=1.0, ki=0.0, kd=0.0, out_min=-0.55, out_max=0.55, deadzone=0.05)
+    assert q.update(0.20) == pytest.approx(0.20)
+    assert q.update(0.9) == pytest.approx(0.55)
+
+
 def test_preprocess_enhance_shape_dtype_and_gamma():
     """预处理：形状/dtype 保持、gamma<1 提亮、任意尺寸 → 模型方形输入。"""
     rng = np.random.default_rng(20260917)
