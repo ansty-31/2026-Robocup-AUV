@@ -502,6 +502,44 @@ def test_through_duration_is_time_based(monkeypatch):
 
 
 
+def test_through_is_two_stage_fast_then_slow(monkeypatch):
+    """★ 2026-10-07 用户定：**两段式冲刺**。
+
+    `cross` 1.2→1.5 之后起冲点更远（要走完 ~2.5m），单段满速要么冲不够、要么过冲撞对面 ⇒
+    段① `fast_ms` 用 `surge.through` 快冲、段② 到 `confirm_ms` 降到 `surge.creep` 保持。
+    `fast_ms=0` ⇒ 整段满速（旧行为，一行回退）。
+    """
+    from gate.gate_task import PH_THROUGH
+    import base.cfg.settings as _S
+
+    def _surges(confirm_ms, fast_ms):
+        monkeypatch.setitem(_S.comm.gate, "through",
+                            _S.Y(dict(_S.comm.gate.get("through", {}),
+                                      confirm_ms=confirm_ms, fast_ms=fast_ms)))
+        monkeypatch.setitem(_S.comm.gate, "pass_target", 1)
+        task = _task(lambda: _det(0.6))
+        _st, hist = _run(task, 40, dt=100)
+        return [h["surge"] for h in hist if h["phase"] == PH_THROUGH],                [h.get("through_stage") for h in hist if h["phase"] == PH_THROUGH]
+
+    fast = float(_S.comm.gate.surge.through)
+    slow = float(_S.comm.gate.surge.creep)
+    assert slow < fast, "用例前提：降速段必须比快冲段慢（creep < through）"
+
+    # 段①（0~200ms 快）→ 段②（200~500ms 慢）：2 帧快 + 3 帧慢
+    su, stg = _surges(500, 200)
+    assert su, "应进过 THROUGH"
+    assert su[0] == pytest.approx(fast), "第 1 帧应是快冲段：%s" % su
+    assert su[-1] == pytest.approx(slow), "末帧应是降速段：%s" % su
+    assert "fast" in stg and "slow" in stg, "两段都要出现：%s" % stg
+    assert stg[0] == "fast" and stg[-1] == "slow"
+    assert all(s <= fast + 1e-9 for s in su), "任何一帧都不该超过快冲档：%s" % su
+
+    # 单段（fast_ms=0）：全程满速 —— 旧行为，可一行回退
+    su0, stg0 = _surges(500, 0)
+    assert su0 and all(s == pytest.approx(fast) for s in su0),         "fast_ms=0 时应整段满速：%s" % su0
+    assert set(stg0) == {"fast"}, stg0
+
+
 def test_stale_z_does_not_fake_a_pass():
     """**回归**：宽度档留下的小 z（0.95 ≤ near_lost_m）在 coarse 阶段**不得**再用来判过门。
 

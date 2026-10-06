@@ -40,21 +40,40 @@ class GateExits(object):
         self._lost_cnt = 0
         self._z_guard = False
         self._through_start_ms = None     # 第一帧 tick 时打时间戳（见 _tick_through）
+        #   进入冲刺那一帧由 `_on_pose` 记日志（不走 `_tick_through`），这里先把段名写上，
+        #   否则"进入帧"的 through_stage 是 None（复盘时看不出它属于哪一段）。
+        self.last_info["through_stage"] = "fast"
         self._loiter_start_ms = None      # 已进入冲刺 → 门口的计时作废
         self._reset_lateral_pids()
         return True
     def _tick_through(self, now_ms):
         """穿门：只前进、不微调（横向修正全部留在冲刺前完成）。
-        ⚠️ confirm_ms 要按实测航速标定：需要冲的距离 ≈ 触发距离(2026-09-23 后的 z.cross=1.10 m"""
+
+        ★★ 2026-10-07 用户定：**两段式冲刺**（`cross` 从 1.2 提到 1.5 ⇒ 起冲点更远，
+        必须走完的距离从 ~1.2m 涨到 ~2.5m；单段满速要么冲不够、要么过冲撞对面）：
+
+          段① `fast_ms`：用 `surge.through`（0.60）快冲 —— 把门甩到身后；
+          段② 剩下的到 `confirm_ms`：**降到 `surge.creep`（0.20）保持**，把艇体尾段平推过去，
+               同时把"过冲撞池壁/撞门"的能量降下来。
+
+        ⚠️ **两个时长都还没标定**（这趟日志里 THROUGH 一次都没触发 ⇒ 没有任何冲刺实测）。
+           理论估算：需要走完 `cross(1.5) + 艇长(0.6~0.8) + 余量(0.3) ≈ 2.4~2.6 m`；
+           `surge=0.30` 实测稳态 17.3 cm/s，按有效推力外推到 0.60 ⇒ **0.29~0.49 m/s**（按阻力
+           平方根则偏 0.29，线性则偏 0.49）⇒ 走完要 **4.9~8.9 s**。
+           速度本身有 1.7× 不确定度，所以"确保穿过"和"不过冲"这两件事**开环时间法不可能同时保证**
+           —— 现取值**优先保证穿过**（错过一次过门 = 0 分），下水实测后再按实际走过的距离收。
+        `fast_ms = 0` ⇒ 整段都用 `surge.through`（= 旧行为，一行回退）。
+        """
         G = self._G
         T = req_node(G, "through")
         self._through_frames += 1
         self._lost_cnt += 1               # confirm_ms<=0 时按帧数兜底
         if self._through_start_ms is None:
             self._through_start_ms = now_ms
+        elapsed = now_ms - self._through_start_ms
         ms = req(T, "confirm_ms")
         if ms > 0:
-            done = (now_ms - self._through_start_ms) >= ms
+            done = elapsed >= ms
         else:
             done = self._lost_cnt >= max(1, int(req(T, "confirm_frames")))
         # 直行穿越；满足结束条件 → 判机身过门
@@ -69,7 +88,13 @@ class GateExits(object):
                 self._start_search(new_round=True)
                 self._set_info("hold")
             return
-        self._set_info("through", surge=self._through_speed())
+        _fast_ms = float(num(T, "fast_ms", 0.0) or 0.0)
+        if _fast_ms > 0 and elapsed >= _fast_ms:
+            stage, surge = "slow", self._speed("creep")     # 段②：降速保持
+        else:
+            stage, surge = "fast", self._through_speed()    # 段①：快冲
+        self.last_info["through_stage"] = stage
+        self._set_info("through", surge=surge)
     def _start_creep_through(self):
         """进入 CREEP_THROUGH：**慢速** creep 冲门（= 门口过门出口）。"""
         self.phase = PH_CREEP_THROUGH

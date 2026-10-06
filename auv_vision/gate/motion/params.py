@@ -85,6 +85,7 @@ _K_REACQ = (
 )
 _K_THROUGH = (
     "center_frames",
+    "fast_ms",        # ★ 2026-10-07：两段式冲刺的"快冲段"时长（0=整段满速）
     "loose",          # ★ 2026-10-07：过门居中闸 = 本档对中带 × 它（默认 1.0 = 等同该档要求）
     "center_x",
     "center_y",

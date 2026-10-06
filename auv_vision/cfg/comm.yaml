@@ -323,7 +323,12 @@ gate:  # 任务二 过门
   #   `loose` = 本档对中带 × 它（**1.0 = 完全等同该档的居中要求**；>1 才允许比对准更松）。
   #   它与下面的 `center_x/center_y`（2026-10-05 定的"抗抖动上限"）取 **AND**
   #   ⇒ 两道都过才许冲，所以这条只会更严，不会把旧闸放松。
-  through: {confirm_ms: 2000, confirm_frames: 8, require_align_deg: 8.0, loose: 1.0,
+  # ★★ 2026-10-07 用户定：**两段式冲刺**（见 exits._tick_through 的注释）。
+  #   段① `fast_ms` 用 `surge.through` 快冲；段② 到 `confirm_ms` 降到 `surge.creep` 保持。
+  #   `cross` 1.2→1.5 之后要走完 ~2.5m，而 confirm_ms 原 2000ms 只够走 0.6~1.0m。
+  #   ⚠️ **两个数都未标定**（本趟日志 THROUGH 从未触发）：现取值按"确保穿过"偏保守，
+  #      下水实测实际走过的距离后再收。`fast_ms: 0` = 整段满速（旧行为）。
+  through: {confirm_ms: 10000, fast_ms: 8000, confirm_frames: 8, require_align_deg: 8.0, loose: 1.0,
             # ★ center_frames（2026-10-05 用户定）：**够近那条主出口**要求"居中成功"
 #   （细节与实测见 doc/注释历史.md）
             center_frames: 4, center_x: 0.20, center_y: 0.25}
