@@ -49,7 +49,7 @@
 | 2 | `PITCH_UP` | 先下潜**到位**，再 `pitch +30°`（byte[7]=2） | 判据**严格** `深度 ≥ 下限`（不许拿容差啃硬边界）；到不了就放弃 |
 | 3 | `SEARCH` | **纯左右平移扫视**（`common/motion/search_sweep.py`：右→停→左→停、每轮时长翻倍、
 **占空比脉冲**「推一小段停一下」；幅值 0.20 < 门那套的 0.6）+ **定深**管 heave | 检到球 |
-| 4 | `CENTER` | **只 sway（平移）**、**不发 yaw**（2026-10-06 用户定：本任务不需要旋转） | `\|dx\| ≤ eps` 连续 N 帧 |
+| 4 | `CENTER` | **dx→sway + dy→surge**（平移），**不发 yaw**（2026-10-06：不需要旋转；2026-10-07：sway 与 gate/ball **同一套**共用 `comm.motion.pid_sway`、surge 取其**一半**「小一点」） | `\|dx\|≤eps` 且 `\|dy\|≤eps_y` 连续 N 帧 |
 | 5 | `APPROACH` | surge 分级 + sway 修 dx（**同撞球**） | 圆面积占比 ≥ `dip_ratio` |
 | 6 | `LEVEL` | `pitch` 回水平：相对角 = `wrap180(抬头前遥测 − 当前遥测)` | 完成标志；**算不出就停手** |
 | 7 | `ALIGN` | dx→sway、dy→surge，**两通道都轻微**（抗水波）、**不用 yaw** | `\|dx\|`、`\|dy\|` 各自容差 |
@@ -60,6 +60,7 @@
 
 **两条纪律（2026-10-06 用户定）**：
 * **本任务不需要旋转 ⇒ 全流程一帧 yaw 都不发**：SEARCH/CENTER/APPROACH/ALIGN 全用平移（sway/surge）；
+  其中居中两路的增益：**sway = 共用 `comm.motion.pid_sway`（与 gate/ball 同源）**，**surge = 它的一半**（`_D_CENTER_SURGE_SCALE`，死区不缩）；
   抬头/回水平走「指定角度轴任务」（byte[7]=2，pitch），**不是** yaw DOF。用例全程钉死。
   ⚠️ 因此**没有任何航向保持**：`tyaw`（下位机回传的实际航向）若漂，是推力偏心/水流造成的**被动偏航**，
   当前流程不会纠正它。判读工具：`python3 tools/analyze/log/analyze_grab_yaw.py log/xxx.jsonl`

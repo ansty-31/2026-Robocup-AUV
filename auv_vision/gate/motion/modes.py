@@ -78,7 +78,7 @@ class GateModes(object):
             align_deg = req(sub(G, "through"), "require_align_deg")
             self._hdg_ok_tick(align_deg)          # 航向"已 OK"锁存（连续 ok_frames 帧判据）
         sway, yaw = self._lateral_out(dxn, now_ms), 0.0
-        heave = -_dof_clip(self._pid_heave_px.update(dyn, now_ms))
+        heave = self._heave_out(-_dof_clip(self._pid_heave_px.update(dyn, now_ms)))
         aligned = self._aligned(dxn, dyn, al)          # ★ 分档 + 纵向零点（见 channels._aligned）
         #   不是 align 的 px_x/px_y（用户："最后进冲刺的居中闸不要像 align 那样严"）。
         # ★ 2026-10-07 用户定：过门居中闸 = **本档位（位姿档）自己的居中范围**；
@@ -223,7 +223,7 @@ class GateModes(object):
         # 水平修正：**一律 sway**（居中不用 yaw；见 `_lateral_out`）
         yaw = 0.0
         sway = self._lateral_out(dxn, now_ms)
-        heave = -_dof_clip(self._pid_heave_px.update(dyn, now_ms))
+        heave = self._heave_out(-_dof_clip(self._pid_heave_px.update(dyn, now_ms)))
 
         if self.phase == PH_ALIGN:
             if self._loiter_commit(dxn, dyn, float(det.w) / float(self.w), now_ms):
@@ -295,7 +295,7 @@ class GateModes(object):
         # 水平修正：**一律 sway**（coarse 也用平移；居中不用 yaw，见 `_lateral_out`）
         yaw = 0.0
         sway = self._lateral_out(dxn, now_ms)
-        heave = -_dof_clip(self._pid_heave_px.update(dyn, now_ms))
+        heave = self._heave_out(-_dof_clip(self._pid_heave_px.update(dyn, now_ms)))
 
         if self.phase != PH_ALIGN:
             self._set_info("hold", z=self._z_last, dx=dxn, dy=dyn,
@@ -425,7 +425,7 @@ class GateModes(object):
             return
         surge = -req(sg, "reacquire")
         self._set_info("reacquire", substate=SUB_REACQUIRE, surge=surge,
-                       heave=_dof_clip(heave), kpt=self._dbg_kpt)
+                       heave=self._heave_out(heave), kpt=self._dbg_kpt)
     def _relock_guard(self, z):
         """**z 跳变保护**（2026-10-02 用户定）：命中 ⇒ 这一帧的位姿**不采纳**，当作"门丢了"处理"""
         jump = req(sub(self._G, "z"), "relock_z_jump_m")

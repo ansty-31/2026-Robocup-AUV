@@ -74,7 +74,7 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
                 if not isinstance(node, dict) or node.get(k) is None:
                     miss.append("%s.%s" % (name, k))
         # 顶层标量 + 字符串档位
-        for k in ("timeout_ms", "pass_target", "pose_hold_frames"):
+        for k in ("timeout_ms", "pass_target", "pose_hold_frames", "heave_max"):
             if G.get(k) is None:
                 miss.append("comm.gate.%s" % k)
         if (G.get("approach") or {}).get("tier") in (None, ""):

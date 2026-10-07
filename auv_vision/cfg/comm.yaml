@@ -71,7 +71,7 @@ motion:  # **ball / gate 共用的底层运动参数**
   #   ⚠️ 这个节点是 **ball 与 gate 共用**（"一处调、两个任务同时生效"，见 tests 的单一来源用例）
   #      ⇒ 撞球的横向居中回路一并受益/一并改变；回退只需把 kp 改回 8.0、删掉 bias。
   pid_sway:  {kp: 10.0, ki: 0.0, kd: 0.05, out_max: 0.55, deadzone: 0.05, bias: 0.138}
-  pid_heave: {kp: 1.0, ki: 0.0,  kd: 0.15, out_max: 1.0,  deadzone: 0.04}
+  pid_heave: {kp: 1.0, ki: 0.0,  kd: 0.0, out_max: 1.0,  deadzone: 0.04}
   surge_fast: 0.30  # 快档：ball 分级最高速/冲刺、gate 远距进近
   surge_slow: 0.15  # 慢档：ball 接近段减速、gate 近距进近
   loss_inertia_surge: 0.25  # 目标短时丢失时的低速惯性
@@ -120,7 +120,7 @@ motion:  # **ball / gate 共用的底层运动参数**
     sweep_s: 2.0        # 首轮单程时长(s)；每轮翻倍
     sweep_max_s: 32.0   # 单程时长上限(s)
     pause_s: 1.0        # 段间停顿(s)（停着检测更稳）
-    sway: 0.20          # 平移幅值（占位·未标定；**下限**：执行器死区 0.138，别低于 ~0.15）
+    sway: 0.35          # 平移幅值（用户 2026-10-07：0.20「几乎没什么动力」⇒ 0.35；死区 0.138）
     duty: 0.5           # ★ 占空比(<1)：本方向**推一小段、停一下**，不一次到位（幅值不动⇒不掉死区）
     duty_window_ms: 400 # 占空比窗口(ms)
     max_ms: 0.0         # 扫视总时长上限(ms)；0 = 不限（交给任务总时限兜）
@@ -144,7 +144,29 @@ grab:  # 任务三 夹取小球（决策层 2026-10-06 起建；**感知全程�
 # ⚠️ 标「占位·未标定」的值上水前必须现场实测（标定顺序与判据见 doc/注释历史.md）。
 # ⚠️ 未标定前**不要**把 grab 放进 tasks.enabled：calibrated 是安全闸，false ⇒ 本任务不 ready ⇒ 装配层跳过它。
   calibrated: true      # ★ 安全闸：false ⇒ 跳过本任务（不占状态机、不发任何指令）
-  timeout_ms: 60000      # 总时限（用户 2026-10-06 定，**板端手动值**）；撞球 30s、过门 50s
+  timeout_ms: 180000      # 总时限（用户 2026-10-06 定）；撞球 30s、过门 50s
+  # ★ **夹取任务自己的一套 sway**（用户 2026-10-07：「夹取的 sway 单独设置一个，小一点的」）：
+  #   CENTER / APPROACH / ALIGN 三个平移相位的横向都用它，不和 gate/ball 那套共用。
+  #   ⚠️ 幅值别低于 ~0.25：执行器死区 0.138（用户实测 sweep 0.20「几乎没什么动力」）；
+  #      `bias` = 死区补偿（把输出抬到死区之上），别删。
+  pid_sway: {kp: 3.0, ki: 0.0, kd: 0.05, out_max: 0.24, deadzone: 0.05, bias: 0.138}
+  #   ★ 2026-10-07 再降一档（用户「速度还是太快了」）：kp 6→3（近距离更柔和）、out_max 0.30→0.24。
+  #   ⚠️ out_max **别低于 ~0.20**：执行器死区 0.138，再低就推不动 ⇒ 想更慢请用下面的 duty 脉冲。
+  # ★ **平移脉冲闸门**（同 sweep 那招「推一小段停一下」；幅值不动 ⇒ 不掉死区）：
+  #   作用域 = CENTER/APPROACH/ALIGN 的 sway+surge（heave 归定深、不受影响）。
+  # ★ **平移脉冲闸门**（幅值不动、用占空比降平均速度；幅值低于执行器死区 0.138 就完全不动）：
+  #   `duty` = 横向(sway)；前进(surge) 按相位另给（用户 2026-10-07：「前进的动力再小还是太大」
+  #   「小球很小，**居中时前进速度要很小**（该机前进动力较大）」）：
+  #   center 最稀 / align 次之 / approach **不额外削**（否则永远接近不了）
+  # ★ **平移脉冲闸门**：幅值不动，用**占空比 + 窗口**降平均速度（用户 2026-10-07：「越慢越好」）。
+  #   横向(sway) 用 `duty`/`duty_window_ms`；前进(surge) 另有 `duty_surge*` 与 `duty_window_ms_surge`。
+  #   ⚠️ **别拿执行器死区 0.138 给前进当"够慢"的下限**（0.138 出自 gate 那条线：
+  #      common/motion/PID.py / search_scan.py / doc/记录/2026-10-07-gate-阈值与运动重设.md）：
+  #      刚出死区的幅值对**前进**已经太猛（该机前进推力大）⇒ 前进靠**短脉冲**慢下来。
+  #   ⚠️ 别把 duty 压到 ~0.1 以下 / 窗口缩到几十 ms：推进器来不及起转 ⇒ 变成"完全不走"。
+  #   center 最稀、align 次之、approach 减半（还要能接近；不行就往上调它）。
+  duty: {enable: true, duty: 0.35, duty_window_ms: 250, duty_window_ms_surge: 300,
+         duty_surge: 0.2, duty_surge_center: 0.15, duty_surge_align: 0.2, duty_surge_approach: 0.5}
   depth_floor_m: 0.50    # ★ 翘头时的**安全下限**（工作区间 0.5~0.6，见 depth_hold）
   #   全局限深 2026-10-06 已由用户下调为 **0.50** ⇒ 本值与它同值，浅端不再被卡在 0.55，
   #   0.5~0.6 的整段都可用了（真正的工作点由 `depth_hold.target_m`=0.55 决定）。
@@ -164,15 +186,16 @@ grab:  # 任务三 夹取小球（决策层 2026-10-06 起建；**感知全程�
   #   DepthHold 会在启动时把这件事打印一次（不静默）。
   depth_hold:
     enable: true
-    target_m: 0.55       # 目标（区间中点）
-    band_lo_m: 0.50      # 期望区间下沿（**实际生效 = max(它, 全局 min_depth_m)**）
-    band_hi_m: 0.60      # 区间上沿：超过就算「太深」→ 上浮
+    target_m: 1.3      # 目标（区间中点）
+    band_lo_m: 1.20      # 期望区间下沿（**实际生效 = max(它, 全局 min_depth_m)**）
+    band_hi_m: 1.40      # 区间上沿：超过就算「太深」→ 上浮
     kp: 1.0              # 比例（深度误差 m → heave）；无积分 ⇒ 不与定深 PID 打架
     out_max: 0.35        # 上浮/下潜幅值上限（占位·未标定）
     deadzone_m: 0.02     # 死区滞环：贴边不来回抖
   # ---- 指定角度轴动作（协议 byte[7]：2=pitch / 3=roll）----
-  pitch: {up_deg: 30.0, up_sign: -1.0, timeout_s: 8.0, settle_ms: 300.0}
-  #   up_sign = **-1.0 是现场单轴实测值**（负相对角 = 抬头；2026-10-06 用户上板实测后定）。
+  pitch: {up_deg: 0.0, up_sign: 1.0, timeout_s: 8.0, settle_ms: 300.0}
+  #   up_sign = **-1.0 是现场单轴实测值**（负相对角 = 抬头；2026-10-06 用户上板实测后定，
+  #   2026-10-07 复确认）。
   #   ⚠️ 改它 / 换下位机固件 / 换 IMU 安装，都要重新单轴实测：
   #   `python3 common/motion/turn_deg.py --axis pitch --deg 5`（小幅、看机头往哪边走）
   level: {timeout_s: 8.0, settle_ms: 300.0}
@@ -187,19 +210,21 @@ grab:  # 任务三 夹取小球（决策层 2026-10-06 起建；**感知全程�
   #   用户定：比赛只有两个球 ⇒ 第 2 次尝试默认是对的、直接过；max_dumps = 倒球重来次数上限
   # ---- 丢目标 / 对准 / 接近（判据量 = 圆面积占比 πr²/(W·H)，不是 bbox）----
   lost: {grace_frames: 15, hold_s: 0.8, ema_alpha: 0.3}
-  center: {eps: 0.20, confirm_frames: 5,
-           pid: {kp: 6.0, ki: 0.0, kd: 0.0, out_max: 0.25, deadzone: 0.03}}
+  center: {eps: 0.20, confirm_frames: 5, surge_ratio: 0.65}
+  #   ⚠️ surge_ratio 让前进幅值 = pid_sway.out_max × 该值：0.24×0.65 = **0.156**
+  #      —— 刚好在执行器死区 0.138 之上（0.5 会算成 0.12，**完全推不动**，那就不是"很慢"而是"不走"）。
+  #      居中要更慢请拧 `duty.duty_surge_center`（幅值别再降）。
   #   ★ **通道 = sway（平移）**：2026-10-06 用户定「夹取任务不需要旋转」⇒ 居中不再用 yaw。
   #     （原名 `center_yaw`：最早的口令是「先调 yaw 居中」，现已改；要回退就把 phases.py 的
   #      `_step_center` 改回 yaw 送出，并把这里换成 yaw 量级的增益 kp≈0.25/out_max≈0.15）
   #   ⚠️ kd 必须 0（`search_scan` 同坑：下视 ~20fps 下 D 项易自激）；kp/eps 占位·未标定
-  approach: {surge_fast: 0.25, surge_slow: 0.12, slow_ratio: 0.12, growth_eps: 0.002,
-             dip_ratio: 0.15, confirm_frames: 2,
-             sway: {kp: 8.0, ki: 0.0, kd: 0.0, out_max: 0.45, deadzone: 0.05}}
+  approach: {surge_fast: 0.15, surge_slow: 0.08, slow_ratio: 0.12, growth_eps: 0.002,
+             dip_ratio: 0.15, confirm_frames: 2}
+  #   surge 两档 2026-10-07 由 0.25/0.12 减半（用户「太快」）；sway 由 `grab.pid_sway` 统一给
   #   占位·未标定；dip_ratio = "够近了（该回水平了）"的圆面积占比阈值
   align_level: {eps_x: 0.15, eps_y: 0.20, confirm_frames: 4,
-                sway:  {kp: 6.0, ki: 0.0, kd: 0.0, out_max: 0.20, deadzone: 0.03},
                 surge: {kp: 4.0, ki: 0.0, kd: 0.0, out_max: 0.12, deadzone: 0.03}}
+  #   sway 由 `grab.pid_sway` 统一给（三个平移相位同一套）
   #   ★ 回水平后的对准（用户 2026-10-06 定）：dx→sway、dy→surge，**两个通道都轻微**（抗水波），
   #     不用 yaw。out_max 故意小 = "轻微调整"；占位·未标定
   verify: {enable: true, roi: [0.25, 0.35, 0.5, 0.5], red_percent_min: 0.30, confirm_frames: 3}
@@ -261,7 +286,7 @@ gate:  # 任务二 过门
   #   注意纵向**零点不在 0**：{dyn} 的中位是 −0.30（相机比门中心高 + 抬头），
   #   所以 `dy_target=-0.30` 把纵向量心搬到 0 附近；不做这一步，任何纵向阈值都在偏置上打滑。
   #   `confirm_frames` 4→5：用户定"align 成功 5 帧"(与机身静取交，见 hdg.body_delta_max_deg)。
-  align: {confirm_frames: 4, px_x: 0.15, px_y: 0.20, dy_target: -0.30}
+  align: {confirm_frames: 4, px_x: 0.15, px_y: 0.20, dy_target: -0.10}
   # ★ width 档自己的对中带（2026-10-07 用户定）：数据说 width 档横向误差是纵向的 2.3 倍，
   #   用 full 那套带会把 width 帧全部判成"未对准"。缺键时回退到 align.px_x/px_y（不崩）。
   hdg: {enable: true, tol_deg: 8.0, max_step_deg: 15.0, turn_scale: 0.8, timeout_ms: 30000,
@@ -375,6 +400,12 @@ gate:  # 任务二 过门
   #   同门正常波动（width 0.693–1.008 ÷ 参照 0.78）只有 ×0.89~×1.29 ⇒ 落在带内；
   #   而 f65→f66 那次"单帧塌陷"把 k 打到 0.150（÷参照 = ×0.19）⇒ 新下限 0.30 能拦住它。
   select: {k_check: true, k_lo_ratio: 0.30, k_hi_ratio: 1.45, k_max_ratio: 0.90}   # 选门 = z 优先 + 面积最大 + k 一致性保护
+  # ★★ 2026-10-07 用户定：**竖直通道限幅** —— 不管 PID 算出多少，heave 都不超过它。
+  #   为什么：竖直 PID 的 D 项在"门刚进画面"那一帧会有 0.45 的尖峰（实测 0.15×0.30/0.1s），
+  #   heave 一帧打到 −0.75 ⇒ 船"猛下沉"；而**限深保护只管防上浮**（≤min_depth 禁止上浮），
+  #   下潜方向原本没有任何闸。这条就是那道闸。
+  #   0.35 ≈ 竖直 PID 满幅的 1/3，够压住下沉/上浮，又不至于让对中动不了。0=不限。
+  heave_max: 0.35
   pose_hold_frames: 10  # 帧间防抖：丢姿态时的保持帧数
 
 debug:  # 通信调试

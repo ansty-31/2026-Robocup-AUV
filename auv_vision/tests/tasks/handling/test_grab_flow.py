@@ -17,7 +17,10 @@ import base.cfg.settings as S
 from handling.handling_task import (PH_GRAB_ALIGN, PH_GRAB_APPROACH, PH_GRAB_CENTER, PH_GRAB_DIP, PH_GRAB_DONE, PH_GRAB_LEVEL,
                             PH_GRAB_PITCH_UP, PH_GRAB_RISE, PH_GRAB_SEARCH, PH_GRAB_VERIFY, GrabTask,
                             _ratio_radius)
-from common.motion.axis import pitch_up_deg          # 抬头角 = up_sign × up_deg（极性是实测值）
+#: 定深区间内的一个深度 —— **从 cfg 取**（板端把区间改成别的值也不该让用例假红）
+from common.motion.depth_hold import hold_cfg as _hold_cfg
+_IN_BAND = float(_hold_cfg("grab")["target_m"])
+from common.motion.axis import pitch_up_deg, roll_dump_deg          # 抬头角 = up_sign × up_deg（极性是实测值）
 from handling.percept.cv_ball import Detection
 from handling.percept.grab_detector import circle_to_ratio
 from handling.percept.cage_color import red_percent
@@ -285,13 +288,16 @@ def test_happy_path_phase_order(monkeypatch):
     assert uart.turns[1] == (2, pytest.approx(-up)), "第二次 = 回水平（反向），实际 %s" % uart.turns[:2]
 
 
-def test_center_uses_sway_only_never_yaw(monkeypatch):
-    """居中段：**dx → sway（平移）**，**永远不发 yaw**（用户 2026-10-06：夹取任务不需要旋转）。
+def test_center_uses_translation_only_never_yaw(monkeypatch):
+    """居中段：**只平移、永远不发 yaw**（用户 2026-10-06：夹取任务不需要旋转）。
+
+    dx→sway / dy→surge 两个通道的完整判据在 `tests/tasks/handling/test_center_channels.py`
+    （那里还钉了「sway 与 gate/ball 同源」「surge 比 sway 小一点」）。
 
     ⚠️ `heave` 在抬头工作段（SEARCH/CENTER/APPROACH）归**定深**管 ⇒ 这里把深度放进区间内，
     验证「定深不动手」时 heave 就是 0。
     """
-    uart = FakeUart(depth=0.58)          # 区间内 ⇒ 定深不动作
+    uart = FakeUart(depth=_IN_BAND)      # 区间内 ⇒ 定深不动作
     task, be = _task(monkeypatch, uart)
     task._phase = PH_GRAB_CENTER
     task._ensure_pids()
@@ -334,10 +340,11 @@ def test_align_level_uses_sway_and_surge_but_never_yaw(monkeypatch):
     assert yaw == 0.0, "这一段明确不用 yaw"
     assert heave == 0.0
     assert sway > 0.0 and surge > 0.0
-    lim = S.comm.grab.align_level
-    assert abs(sway) <= float(lim["sway"]["out_max"]) + 1e-9, "sway 必须是轻微档"
-    assert abs(surge) <= float(lim["surge"]["out_max"]) + 1e-9, "surge 必须是轻微档"
-    assert abs(sway) <= 0.30 and abs(surge) <= 0.30
+    # ⚠️ 幅值上限**只认 cfg**：sway 走本任务那套 `grab.pid_sway`（三个平移相位共用），
+    #    surge 走这段自己的 `align_level.surge`。别在这里写死数字。
+    assert abs(sway) <= float(S.comm.grab.pid_sway["out_max"]) + 1e-9, "sway 超了 grab.pid_sway"
+    assert abs(surge) <= float(S.comm.grab.align_level["surge"]["out_max"]) + 1e-9, \
+        "surge 超了 align_level.surge 的 out_max"
 
 
 def test_level_angle_follows_the_measured_pitch(monkeypatch):
@@ -388,12 +395,18 @@ def test_wrong_ball_is_dumped_then_the_second_attempt_is_assumed_ok(monkeypatch)
     assert task._dumps == 1, "应该倒过一次球"
     assert task.last_info["reason"] == "assumed_ok", task.last_info
     assert task.holds_ball is True
-    assert (3, 30.0) in uart.turns and (3, -30.0) in uart.turns, \
+    rl = roll_dump_deg()                     # cfg 派生（别假设 30°）
+    assert (3, pytest.approx(rl)) in uart.turns and (3, pytest.approx(-rl)) in uart.turns, \
         "横倾倒出后必须回正，实际 %s" % (uart.turns,)
     # 倒球序列：先右移(sway>0)、再左移(sway<0)、再后退(surge<0)
     assert any(d[1] > 0 for d in uart.dofs) and any(d[1] < 0 for d in uart.dofs)
     assert any(d[0] < 0 for d in uart.dofs)
-    assert uart.turns.count((2, 30.0)) == 2, "倒球后必须重新抬头再夹一次"
+    # 两次尝试 ⇒ 每次「抬头 + 回水平」= 4 个 pitch 轴任务。
+    # ⚠️ 别按"角度值"计数：cfg 把 up_deg 设成 0.0（试"不抬头"）时抬头与回水平是同一个元组。
+    pitch_turns = [t for t in uart.turns if t[0] == 2]
+    assert len(pitch_turns) == 4, "倒球后必须重新抬头再夹一次，实际 %s" % (uart.turns,)
+    assert pitch_turns[0] == (2, pytest.approx(pitch_up_deg()))
+    assert pitch_turns[1] == (2, pytest.approx(-pitch_up_deg()))
     assert PH_GRAB_DIP in phases
 
 

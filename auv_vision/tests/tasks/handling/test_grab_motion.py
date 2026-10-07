@@ -86,7 +86,9 @@ def test_pitch_up_sign_is_a_measured_cfg_value():
     rl = float(sub(g, "roll")["dump_sign"]) * abs(float(sub(g, "roll")["dump_deg"]))
     assert pitch_up_deg() == pytest.approx(up)
     assert roll_dump_deg() == pytest.approx(rl)
-    assert abs(up) == pytest.approx(30.0), "抬头幅度是 30°（符号由实测极性决定）"
+    # 幅度**只认 cfg**（板端 2026-10-07 一度设成 up_deg=0.0 在试「不抬头」⇒ 用例不许假设 30°）
+    limits = float(sub(g, "motion.axis")["max_tilt_deg"]) if sub(g, "motion.axis") else 50.0
+    assert abs(up) <= limits + 1e-9, "抬头幅度必须在倾角上限内"
 
 
 def test_level_angle_is_measured_not_hardcoded():

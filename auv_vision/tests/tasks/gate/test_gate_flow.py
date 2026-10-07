@@ -2180,3 +2180,41 @@ def test_coarse_retreat_stops_once_two_corners_are_back():
     task._on_coarse(_coarse_det((0.0, 0.0, 0.95, 0.95)), 1500)
     assert task.substate == "HOLD", "够 2 角就该停退（实际 %s）" % task.substate
     assert float(task.last_info.get("surge") or 0.0) == 0.0, "停退时 surge 必须是 0"
+
+
+def test_no_hard_dive_when_the_first_gate_appears():
+    """★★ 2026-10-07 用户报"一开始猛下沉"，三个成因一起钉死。
+
+    机理（实测）：门刚进画面那一帧，竖直误差从 0 跳到 `dyn = −dy_target`
+    ⇒ P 项 `kp×0.30 = 0.30`，**D 项 `kd×Δerr/dt = 0.15×0.30/0.1 = 0.45`** ⇒ 合计 0.75
+    ⇒ `heave = −0.75`（负 = 下潜，`out_max=1.0` 还没截住）⇒ 船猛往下扎。
+    而**限深保护只管防上浮**（≤min_depth 禁止上浮），**下潜方向原本没闸**。
+
+    三处修：
+      ① `align.dy_target` −0.30 → −0.10（目标点抬高一档 ⇒ 基础下沉量降到 1/3）
+      ② `motion.pid_heave.kd` 0.15 → **0**（干掉首帧微分尖峰；10Hz 下 D 项本来就该是 0）
+      ③ `gate.heave_max = 0.35`（所有 heave 出口统一限幅 —— 下潜方向唯一的一道闸）
+    """
+    # ① 配置层
+    assert float(S.comm.gate.align.dy_target) == pytest.approx(-0.10), \
+        "dy_target 应为 −0.10（原 −0.30 会把基础下沉量放大 3 倍）"
+    assert float(S.get("comm.motion.pid_heave.kd")) == pytest.approx(0.0), \
+        "竖直 PID 的 kd 必须为 0（否则首帧微分尖峰就是'猛下沉'）"
+    hm = float(S.comm.gate.heave_max)
+    assert 0 < hm <= 0.5, "heave_max 应在 (0, 0.5]，现 %.2f" % hm
+
+    # ② 限幅器本身
+    task = _task(lambda: [])
+    for v, want in ((0.30, 0.30), (0.75, hm), (-0.75, -hm), (1.0, hm), (-1.0, -hm)):
+        assert task._heave_out(v) == pytest.approx(want), (v, task._heave_out(v))
+
+    # ③ 端到端：门刚出现那一帧，下发的 heave 不许超过限幅
+    import numpy as np
+    task2 = _task(lambda: _det(1.5))
+    frame = np.zeros((CAM.height, CAM.width, 3), np.uint8)
+    worst = 0.0
+    for i in range(6):
+        task2.process(frame, 1000 + 100 * i)
+        worst = max(worst, abs(float(task2.last_info.get("heave") or 0.0)))
+    assert worst <= hm + 1e-9, \
+        "首帧竖直通道打到了 %.2f（限幅 %.2f）⇒ 仍会猛下沉" % (worst, hm)

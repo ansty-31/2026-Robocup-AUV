@@ -90,6 +90,19 @@ class GateChannels(object):
             "hdg_tgt": round(float(self._hdg.last_target_deg or 0.0), 1)})
         self.uart.send_dof(_dof_clip(surge), _dof_clip(sway),
                            _dof_clip(heave), _dof_clip(yaw))
+    def _heave_out(self, v):
+        """**竖直通道限幅**（`comm.gate.heave_max`，0=不限）。
+
+        ★ 2026-10-07 用户定：竖直 PID 的 D 项在"门刚进画面"那一帧会有 0.45 的尖峰
+        （实测 0.15×0.30/0.1s）⇒ heave 一帧打到 −0.75 ⇒ **猛下沉**；而限深保护只管防上浮
+        （≤min_depth 禁止上浮），**下潜方向原本没有任何闸**。所有 heave 出口都过这里。
+        """
+        hm = float(req(self._G, "heave_max"))
+        v = float(v or 0.0)
+        if hm <= 0:
+            return v
+        return max(-hm, min(hm, v))
+
     def _center_ref(self):
         """**居中判据的基准 = 相机主点（光轴）**，不是画面几何中心。
 

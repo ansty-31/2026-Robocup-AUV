@@ -6,6 +6,7 @@ import base.cfg.settings as S
 from common.cfg.cfgnode import flag, merge, pid_kw, sub
 from common.motion.search_sweep import Sweep
 from common.motion.depth_hold import DepthHold
+from handling.percept.track_memory import TrackMemory
 from common.motion.axis import AxisMove, EnsureDepth, TimedDof, _K_DIP, _K_RISE, action_cfg, axis_deg, grab_cfg, grab_node, level_relative_deg, pitch_up_deg
 from handling.percept.cage_color import red_percent
 from common.motion.axis import AxisMove, TimedDof, ZERO_DOF, axis_deg, level_relative_deg, task_node
@@ -88,13 +89,16 @@ class HandlingTask(HandlingActions, GrabPhases, PlacePhases):
         # ★ 定深（用户 2026-10-06：翘头后深度管在 0.5~0.6，不准太深也不准太浅）
         self._depth_hold = DepthHold(prefix=("place" if mode == "place" else "grab"),
                                      log=self.log)
+        # ★ 历史位置推演（用户 2026-10-07：对比前几帧位置，防止球丢失找不到）
+        self._mem = TrackMemory(prefix=("place" if mode == "place" else "grab"), log=self.log)
         self._ema = None
         self._lost_cnt = 0
         self._hold_until_ms = None
         self._hit_cnt = 0
         self._align_cnt = 0
         self._verify_cnt = 0
-        self._pid_yaw = None                   # 判据 PID（进相位时 reset，不重建）
+        self._pid_yaw = None                   # 居中 sway 通道的 PID（进相位时 reset，不重建）
+        self._pid_csu = None                   # 居中 surge 通道的 PID（用户：小一点）
         self._pid_sway = None
         self._pid_asw = None
         self._pid_asu = None
@@ -289,6 +293,7 @@ class HandlingTask(HandlingActions, GrabPhases, PlacePhases):
                 self._hold_until_ms = None
                 dx = _dx_norm(ball.cx, self.w)
                 dy = _dy_norm(ball.cy, self.h)
+                self._mem.add(now_ms, dx, dy, r)       # ★ 历史轨迹（丢目标时的推演依据）
             else:
                 self._lost_cnt += 1
             growth = self._ema_update(r, alpha)
@@ -326,24 +331,32 @@ class HandlingTask(HandlingActions, GrabPhases, PlacePhases):
             surge, sway, heave, yaw = self._step_verify(now_ms, percent)
             action = "verify"
         elif self._phase in (PH_GRAB_CENTER, PH_GRAB_APPROACH, PH_GRAB_ALIGN) and ball is None:
-            # 丢目标阶梯：宽限期内保持（**居中/对准段绝不前进**）→ 之后回搜索
-            if self._lost_cnt <= int(lost["grace_frames"]):
+            # 丢目标阶梯：宽限/保持期内 → **按历史轨迹推演**（用户 2026-10-07）；过期 → 回搜索
+            #   ⚠️ 预测只驱动 sway/surge 的**小幅修正**，且**绝不**走 `_step_center/_approach`
+            #      （那里面带相位推进判据，喂合成值会误判"已居中"→ 盲冲）。超期就交给搜索。
+            pred = self._mem.predict(now_ms)          # ★ 有可用轨迹就按它修（宽限期里也修）
+            if pred is not None:
+                action = "lost_predict"
+                # heave 仍归定深（下面那段会补），这里只出 sway/surge
+                surge, sway, heave, yaw = self._lost_predict_dof(*pred)
+            elif self._lost_cnt <= int(lost["grace_frames"]):
                 action = "hold"
             else:
                 if self._hold_until_ms is None:
                     self._hold_until_ms = now_ms + float(lost["hold_s"]) * 1000.0
                 if now_ms < self._hold_until_ms:
-                    action = "hold"
+                    action = "hold"                       # 没轨迹/超有效期 ⇒ 保持不动（原行为）
                 else:
                     self._hold_until_ms = None
                     self._phase = PH_GRAB_SEARCH
                     self._ema = None
+                    self._sweep.reset(now_ms, first_dir=self._mem.side_hint())   # ★ 先去那侧找
                     action = "search"
         elif self._phase == PH_GRAB_SEARCH:
             surge, sway, heave, yaw = self._step_search(now_ms, ball)
             action = "search" if ball is None else "search_hit"
         elif self._phase == PH_GRAB_CENTER:
-            surge, sway, heave, yaw = self._step_center(now_ms, dx)
+            surge, sway, heave, yaw = self._step_center(now_ms, dx, dy)
             action = "center"
         elif self._phase == PH_GRAB_APPROACH:
             surge, sway, heave, yaw = self._step_approach(now_ms, dx, ratio, growth)
@@ -361,6 +374,9 @@ class HandlingTask(HandlingActions, GrabPhases, PlacePhases):
             hv = self._depth_hold.step(now_ms, self.uart)
             if hv:
                 heave = hv
+        # ★ 平移脉冲闸门（用户「速度还是太快」）：幅值不动、用占空比降平均速度
+        if self._phase in (PH_GRAB_CENTER, PH_GRAB_APPROACH, PH_GRAB_ALIGN):
+            surge, sway = self._grab_duty(surge, sway, now_ms, self._phase)
         if not self._finished:
             self.uart.send_dof(surge, sway, heave, yaw)
         self.last_dets = self.hub.detect_list(self.name, f) if f is not None else []

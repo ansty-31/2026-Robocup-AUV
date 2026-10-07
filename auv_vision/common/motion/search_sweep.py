@@ -55,10 +55,13 @@ class Sweep(object):
         self.max_ms = max(0.0, req(c, "max_ms"))
         self.reset()
 
-    def reset(self, now_ms=None):
+    def reset(self, now_ms=None, first_dir=None):
+        """`first_dir`：`"left"` / `"right"` ⇒ **先往那一侧扫**（用户 2026-10-07：
+        「对比前几帧位置…防止球丢失找不到」⇒ 真丢了就先去上次看到球的那一侧找）。"""
         self._t0 = now_ms
         self._logged = False
         self.rounds = 0
+        self.first = -1.0 if str(first_dir) == "left" else 1.0
 
     @property
     def done(self):
@@ -96,12 +99,13 @@ class Sweep(object):
             self.rounds = k
             self.log("[SWEEP] 第 %d 轮：单程 %.1fs" % (k + 1, sweep / 1000.0))
         ph = t - t0
-        if ph < sweep:                       # 段0：向右
-            return self._duty(self.sway, now_ms)
+        f = getattr(self, "first", 1.0)      # `+1` 先右（默认）/ `-1` 先左
+        if ph < sweep:                       # 段0：先往 `first` 那侧
+            return self._duty(self.sway * f, now_ms)
         if ph < sweep + self.pause_ms:       # 段1：停
             return 0.0
-        if ph < 2.0 * sweep + self.pause_ms:  # 段2：向左
-            return self._duty(-self.sway, now_ms)
+        if ph < 2.0 * sweep + self.pause_ms:  # 段2：反方向
+            return self._duty(-self.sway * f, now_ms)
         return 0.0                           # 段3：停
 
     def _duty(self, v, now_ms):
@@ -112,3 +116,19 @@ class Sweep(object):
             return 0.0
         ph = (now_ms % self.duty_window_ms) / self.duty_window_ms
         return v if ph < self.duty else 0.0
+
+
+def duty_gate(v, now_ms, duty=1.0, window_ms=250.0):
+    """占空比闸门：窗口内前 `duty` 比例通过、其余发 0（**幅值不变 ⇒ 不掉执行器死区**）。
+
+    为什么需要它：执行器死区 ~0.138，命令幅值压到那以下就**推不动**（实测 sweep 0.20 已很弱）。
+    所以"再慢一点"不能靠继续减幅值，只能靠**脉冲**把平均速度降下来 —— 就是 sweep 用的那招
+    （用户 2026-10-07：「速度还是太快了」）。`duty=1.0` ⇒ 原样通过（等价于关掉）。
+    """
+    d = float(duty)
+    if d >= 1.0:
+        return v
+    if d <= 0.0:
+        return 0.0
+    w = max(1.0, float(window_ms))
+    return v if ((float(now_ms) % w) / w) < d else 0.0
