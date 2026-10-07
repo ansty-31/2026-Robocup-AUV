@@ -13,7 +13,8 @@
 **限深下限的生命周期归任务独占**（`GrabTask` 开头 `set_extra_min_depth`、结束撤回）：
 原语只读 `uart.effective_min_depth_m`，不各自改它 —— 避免"谁最后动谁说了算"。
 
-⚠️ **极性未验证**：`pitch.up_sign` / `roll.dump_sign` 只是"相对角的正负"。协议 §2.2 明说正值
+极性：`pitch.up_sign` 已**现场实测 = -1.0**（负相对角 = 抬头）；`roll.dump_sign` **仍未验证**。
+两者都只是"相对角的正负"（协议 §2.2 明说正值
 不保证等于物理抬头/左倾 ⇒ 上板第一件事是单轴小幅实测：
 `python3 common/motion/turn_deg.py --axis pitch --deg 5`，看清机头往哪边动再填 cfg。
 **本模块未上板、未下水。**
@@ -307,7 +308,7 @@ class TimedDof(object):
 
 
 def pitch_up_deg(cfg=None, prefix="grab"):
-    """抬头的相对角（含**未验证**的 `up_sign`）：`up_sign × up_deg`。"""
+    """抬头的相对角：`up_sign × up_deg`（`up_sign` = 现场实测 -1.0；缺键时兜底同值）。"""
     p = sub(task_node(prefix), "pitch")
     return req(p, "up_sign") * abs(req(p, "up_deg"))
 

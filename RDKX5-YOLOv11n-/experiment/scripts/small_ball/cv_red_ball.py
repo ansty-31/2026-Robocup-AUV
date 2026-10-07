@@ -54,6 +54,18 @@ class Params:
     r_min: float = 25.0        # 半径下限（px）。实测 <30px 的检出是池底图案红点/瓦缝红光，见 sheet
     r_max: float = 900.0
     score_min: float = 0.25    # 分数下限。实测那批假小球的 score ≤0.31 且 r<30，双管齐下
+    # —— 形状判据（2026-10-07 加；0=关）针对"颜色对但形状不对"：红色矩形/色斑/槽内红光带 ——
+    rms_rel_max: float = 0.0   # 圆拟合残差/半径 上限。真球(含月牙) 0.017~0.120，矩形色斑 0.13~0.37
+    aspect_max: float = 0.0    # 最小外接矩形伸长比 上限。球 1.08~1.37，矩形色斑 1.66~3.20
+    # —— 候选级"验色 + 验实心度"（2026-10-07；新素材 small_ball_07 实测有效的机制）——
+    #   为什么在**候选级**做而不是收紧全局掩膜：掩膜里几个橙色像素不该毁掉整个球，
+    #   而"这一坨的色相中位 / 强红占比"才是"球 vs 橙色反光·浅色斑"的真判据。
+    #   实测：新素材 471 候选里 272 个 h_med<20（橙色反光 H≈6~11），球恒 H≈173~178；
+    #        老素材 555 候选里 h_med<20 的有 **0** 个 ⇒ 这一刀在老素材上零代价。
+    h_med_min: float = 0.0     # 圆内色相中位数下限（0=关）。红球用 20 即砍掉橙色反光
+    h_med_max: float = 0.0     # 上限（0=不限）。留给未来黄球（黄 H≈20~35）
+    core_frac_min: float = 0.0  # 圆内"强红像素"(dom>=core_dom)占比下限。实心深红球 0.3~0.8，浅色斑 0.0
+    core_dom: int = 80         # "强红"的 dom 门限
     # —— 鲁棒圆拟合 ——
     fit_iters: int = 6
     fit_sigma: float = 1.8
@@ -76,6 +88,11 @@ class Detection:
     cov: float
     arc_deg: float = 0.0
     border_frac: float = 0.0     # 拟合圆落在画面外的面积比例（>0 说明被边缘截断）
+    rms_rel: float = 0.0         # 圆拟合残差/半径（QA 判读/调参看它）
+    aspect: float = 1.0          # 最小外接矩形伸长比
+    core_frac: float = -1.0      # 圆内强红像素占比（-1 = 未计算）
+    h_med: float = -1.0          # 圆内色相中位数（-1 = 未计算）
+    rim_cov: float = -1.0        # 环带(0.72r~1.0r)红占比（实心圆≈1）
     bbox: tuple = field(default_factory=tuple)   # x1,y1,x2,y2（原图坐标）
 
     def as_dict(self):
@@ -87,17 +104,24 @@ class Detection:
 # --------------------------------------------------------------------------- #
 # 步骤 1：红色掩膜
 # --------------------------------------------------------------------------- #
+def red_mask_ex(img: np.ndarray, p: Params):
+    """(mask, redness, hsv)。`hsv` 与 mask 同源、**不额外 cvtColor**（红掩膜本来就要算 HSV）；
+    门限全关（use_hue=False 且 s_min=v_min=0）时为 None ⇒ 依赖它的候选级验色会自动跳过。"""
+    if p.fast_mask:
+        return red_mask_fast_ex(img, p)
+    return red_mask_ref_ex(img, p)
+
+
 def red_mask(img: np.ndarray, p: Params) -> tuple[np.ndarray, np.ndarray]:
-    """返回 (mask, redness)。redness = R - max(G,B) 的 uint8 可视化，便于精修/调试。
+    """兼容旧调用：(mask, redness)。redness = R - max(G,B) 的 uint8 可视化。
 
     `p.fast_mask=True` 走 `red_mask_fast()`（板端用，等价判据、cv2 SIMD）；
-    False 走下面这段 numpy 参考实现（PC 上调参时的原始版本，留着做 A/B 对照）。"""
-    if p.fast_mask:
-        return red_mask_fast(img, p)
-    return red_mask_ref(img, p)
+    False 走 numpy 参考实现（PC 上调参时的原始版本，留着做 A/B 对照）。"""
+    m, r, _ = red_mask_ex(img, p)
+    return m, r
 
 
-def red_mask_ref(img: np.ndarray, p: Params) -> tuple[np.ndarray, np.ndarray]:
+def red_mask_ref_ex(img: np.ndarray, p: Params):
     """numpy 参考实现（原版）。在 A55 上 68.6 ms/帧，**不要拿去板端跑**。
 
     红色判据 = 绝对红占优(dom ≥ dom_min) **或** 相对红占优(rel ≥ rel_min)，
@@ -130,7 +154,7 @@ def red_mask_ref(img: np.ndarray, p: Params) -> tuple[np.ndarray, np.ndarray]:
     if p.close_k > 0:
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
                                 cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (p.close_k,) * 2))
-    return mask, redness
+    return mask, redness, (hsv if (p.use_hue or p.s_min > 0 or p.v_min > 0) else None)
 
 
 _REL_LUT_CACHE: dict = {}
@@ -198,7 +222,7 @@ def _morph_roi(mask: np.ndarray, open_k: int, close_k: int) -> np.ndarray:
     return out
 
 
-def red_mask_fast(img: np.ndarray, p: Params) -> tuple[np.ndarray, np.ndarray]:
+def red_mask_fast_ex(img: np.ndarray, p: Params):
     """**板端快路径**：判据与 `red_mask_ref()` 逐位等价，但全部走 uint8 SIMD。
 
     板端实测（A55，1280x720）：
@@ -235,7 +259,14 @@ def red_mask_fast(img: np.ndarray, p: Params) -> tuple[np.ndarray, np.ndarray]:
         if p.v_min > 0:
             m = cv2.bitwise_and(m, cv2.inRange(hsv[:, :, 2], p.v_min, 255))
 
-    return _morph_roi(m, p.open_k, p.close_k), redness
+    return _morph_roi(m, p.open_k, p.close_k), redness, (
+        hsv if (p.use_hue or p.s_min > 0 or p.v_min > 0) else None)
+
+
+def red_mask_fast(img: np.ndarray, p: Params) -> tuple[np.ndarray, np.ndarray]:
+    """兼容旧调用：(mask, redness)。实现见 `red_mask_fast_ex()`（多返回一个 hsv 复用）。"""
+    m, r, _ = red_mask_fast_ex(img, p)
+    return m, r
 
 
 _KERN_CACHE: dict = {}
@@ -343,11 +374,51 @@ def circle_coverage(mask: np.ndarray, cx: float, cy: float, r: float) -> float:
     return float((sub[disc] > 0).sum()) / n
 
 
+def circle_stats(mask, hsv, dom, cx, cy, r, core_dom=80, med_stride=4):
+    """一次 ROI 提取算出**候选级**的全部验证量（比多次调用 circle_coverage 便宜）：
+
+        cov        圆内红掩膜占比（原有判据）
+        rim_cov    环带 0.72r~1.0r 内的红占比（实心球≈1；拟合圆罩住矩形/长条时环带先掉）
+        core_frac  圆内"强红"像素(dom >= core_dom)占比（实心深红球 0.3~0.8，水面反光/浅色斑 0.0）
+        h_med      圆内色相中位数（球 H≈173~178；橙色反光 H≈6~11）
+        s_med/v_med 圆内饱和度/亮度中位数
+
+    `hsv` 为 None（门限全关时）⇒ 三个 -1，依赖它们的判据请跳过。
+    中位数按 `med_stride` 抽稀后算（中位数对抽稀稳健，抽稀到 1/16 省掉大球的排序开销）。"""
+    h, w = mask.shape
+    x1, y1 = max(0, int(cx - r) - 1), max(0, int(cy - r) - 1)
+    x2, y2 = min(w, int(cx + r) + 2), min(h, int(cy + r) + 2)
+    if x2 <= x1 or y2 <= y1:
+        return dict(cov=0.0, rim_cov=0.0, core_frac=0.0, h_med=-1.0, s_med=-1.0, v_med=-1.0)
+    yy, xx = np.ogrid[y1:y2, x1:x2]
+    dd2 = (xx - cx) ** 2 + (yy - cy) ** 2
+    disc = dd2 <= r * r
+    n = int(disc.sum())
+    if n == 0:
+        return dict(cov=0.0, rim_cov=0.0, core_frac=0.0, h_med=-1.0, s_med=-1.0, v_med=-1.0)
+    sub = mask[y1:y2, x1:x2]
+    cov = float((sub[disc] > 0).sum()) / n
+    ring = disc & (dd2 >= (0.72 * r) ** 2)
+    nr = int(ring.sum())
+    rim_cov = float((sub[ring] > 0).sum()) / nr if nr else 0.0
+    core_frac = float((dom[y1:y2, x1:x2][disc] >= core_dom).sum()) / n
+    h_med = s_med = v_med = -1.0
+    if hsv is not None:
+        hs = hsv[y1:y2:med_stride, x1:x2:med_stride]          # 抽稀采样（中位数稳健）
+        ds = disc[::med_stride, ::med_stride]
+        if hs.size and int(ds.sum()) > 0:
+            h_med = float(np.median(hs[..., 0][ds]))
+            s_med = float(np.median(hs[..., 1][ds]))
+            v_med = float(np.median(hs[..., 2][ds]))
+    return dict(cov=cov, rim_cov=rim_cov, core_frac=core_frac,
+                h_med=h_med, s_med=s_med, v_med=v_med)
+
+
 # --------------------------------------------------------------------------- #
 # 步骤 3：检测
 # --------------------------------------------------------------------------- #
 def detect(img: np.ndarray, p: Params) -> list[Detection]:
-    mask, redness = red_mask(img, p)
+    mask, redness, hsv = red_mask_ex(img, p)
     filled = fill_highlights(mask, p.fill_hole_frac)
     H, W = img.shape[:2]
     n, lab, stats, cent = cv2.connectedComponentsWithStats(filled, 8)
@@ -385,8 +456,28 @@ def detect(img: np.ndarray, p: Params) -> list[Detection]:
         arc = arc_span_deg(in_pts, cx, cy)
         if arc < p.min_arc_deg:
             continue
-        cov = circle_coverage(mask, cx, cy, r)
+        # —— 形状判据（可选，0=关）：球是圆的，红色矩形/色斑/槽内红光带不是 ——
+        rms_rel = (rms / r) if r > 0 else 0.0
+        if p.rms_rel_max > 0 and rms_rel > p.rms_rel_max:
+            continue
+        aspect = 1.0
+        if p.aspect_max > 0:
+            (_, _), (rw_, rh_), _ = cv2.minAreaRect(c)
+            aspect = max(rw_, rh_) / max(min(rw_, rh_), 1e-6)
+            if aspect > p.aspect_max:
+                continue
+        # 候选级验证：一次 ROI 提取算出 cov / rim_cov / core_frac / h_med（见 circle_stats）
+        st = circle_stats(mask, hsv, redness, cx, cy, r, p.core_dom)
+        cov = st["cov"]
         if cov < p.cov_min:
+            continue
+        if p.h_med_min > 0 or p.h_med_max > 0:
+            if st["h_med"] >= 0:            # hsv 不可用（掩膜门限全关）时跳过，不误杀
+                if p.h_med_min > 0 and st["h_med"] < p.h_med_min:
+                    continue
+                if p.h_med_max > 0 and st["h_med"] > p.h_med_max:
+                    continue
+        if p.core_frac_min > 0 and st["core_frac"] < p.core_frac_min:
             continue
         bfrac = border_frac(cx, cy, r, W, H)
 
@@ -414,7 +505,8 @@ def detect(img: np.ndarray, p: Params) -> list[Detection]:
             continue
         out.append(Detection(cx=cx, cy=cy, r=r, score=score, area=area,
                              circ=float(circ), cov=float(cov), arc_deg=arc,
-                             border_frac=bfrac,
+                             border_frac=bfrac, rms_rel=float(rms_rel), aspect=float(aspect),
+                             core_frac=st["core_frac"], h_med=st["h_med"], rim_cov=st["rim_cov"],
                              bbox=(float(x0), float(y0), float(x0 + bw), float(y0 + bh))))
 
     return merge_overlaps(out, p.merge_iou)

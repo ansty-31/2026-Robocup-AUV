@@ -106,6 +106,7 @@ def _resolve_path_keys(node, keys):
 
 _resolve_path_keys(vision, _PATH_KEYS)
 
+
 def get(path, default=None):
     """按 'vision.a.b' 路径读取，缺任意一级返回 default（兼容旧 YAML）。"""
     parts = path.split(".")
@@ -126,3 +127,6 @@ def reload():
     global vision, comm
     vision = _load(_resolve(os.environ.get("AUV_VISION_CFG"), _DEFAULT_VISION))
     comm = _load(_resolve(os.environ.get("AUV_COMM_CFG"), _DEFAULT_COMM))
+    # ★ 路径类键必须与 import 时走同一步：原来 `reload()` **漏了**这一步 ⇒ reload 之后
+    #   `camera.*.calibration` / `model.path` 会退回相对路径（`test_paths` 抓到的真 bug）。
+    _resolve_path_keys(vision, _PATH_KEYS)

@@ -32,6 +32,7 @@ _K_LOITER = (
     "timeout_ms"
 )
 _K_Z = (
+    "relock_ratio_model",
     "align_max",
     "cross",
     "cross_confirm_frames",
@@ -56,6 +57,8 @@ _K_CREEP_THROUGH = (
     "creep_ms",
 )   # creep_through：门口过门，慢速 creep 冲门时长(ms)
 _K_COARSE = (
+    "back_heave",
+    "hold_timeout_ms",
     "align_x",
     "align_y",
     "far_ratio",

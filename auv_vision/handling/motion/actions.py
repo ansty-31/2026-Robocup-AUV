@@ -88,7 +88,9 @@ class HandlingActions(object):
 
     def _ensure_pids(self):
         if self._pid_yaw is None:
-            c = _cvnode("center_yaw")
+            # ★ 名字仍叫 `_pid_yaw`（历史），但**通道是 sway**：用户 2026-10-06 定
+            #   「夹取任务不需要旋转」⇒ 居中用平移，不再发 yaw。
+            c = _cvnode("center")
             self._pid_yaw = self._new_pid(req_node(c, "pid"), "handling.center.pid")
             a = _cvnode("approach")
             self._pid_sway = self._new_pid(req_node(a, "sway"), "handling.approach.sway")

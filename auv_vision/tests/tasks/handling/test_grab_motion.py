@@ -73,10 +73,20 @@ class _Uart(object):
         pass
 
 
-def test_pitch_up_sign_is_configurable_and_unverified_by_default():
-    """抬头角 = `up_sign × up_deg`；up_sign 是**未验证**项，现场实测后改 cfg（不改代码）。"""
-    assert pitch_up_deg() == pytest.approx(30.0)
-    assert roll_dump_deg() == pytest.approx(30.0)
+def test_pitch_up_sign_is_a_measured_cfg_value():
+    """抬头角 = `up_sign × up_deg`；`up_sign` 是**现场单轴实测值**（2026-10-07 板端 = -1.0）。
+
+    ⚠️ 别把 30 写死：极性/角度改 cfg 就变（换固件或换 IMU 安装要重测）。缺键会抛 `MissingCfg`
+    —— 极性**故意没有代码兜底**（猜错方向 = 机头往反方向压，比报错危险）。
+    """
+    from common.motion.axis import grab_node
+    from common.cfg.cfgnode import sub
+    g = grab_node()
+    up = float(sub(g, "pitch")["up_sign"]) * abs(float(sub(g, "pitch")["up_deg"]))
+    rl = float(sub(g, "roll")["dump_sign"]) * abs(float(sub(g, "roll")["dump_deg"]))
+    assert pitch_up_deg() == pytest.approx(up)
+    assert roll_dump_deg() == pytest.approx(rl)
+    assert abs(up) == pytest.approx(30.0), "抬头幅度是 30°（符号由实测极性决定）"
 
 
 def test_level_angle_is_measured_not_hardcoded():

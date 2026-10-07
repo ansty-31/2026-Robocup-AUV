@@ -86,8 +86,13 @@ class GrabPhases(object):
         return 0.0, sway, 0.0, 0.0
 
     def _step_center(self, now_ms, dx):
-        c = _cvnode("center_yaw")
-        yaw = _clip(self._pid_yaw.update(dx, now_ms))
+        """居中段：**dx → sway（平移）**。
+
+        ★ 用户 2026-10-06 定「夹取任务不需要旋转」⇒ 全流程**不再发 yaw**（原先按最早的口令
+        「先调 yaw 居中」用的是 yaw）。抬头时转 yaw 会让目标在画面里绕圈，平移只让它横移。
+        """
+        c = _cvnode("center")
+        sway = _clip(self._pid_yaw.update(dx, now_ms))
         if abs(dx) <= float(c["eps"]):
             self._hit_cnt += 1
             if self._hit_cnt >= int(c["confirm_frames"]):
@@ -96,7 +101,7 @@ class GrabPhases(object):
                 self._pid_sway.reset()
         else:
             self._hit_cnt = 0
-        return 0.0, 0.0, 0.0, yaw
+        return 0.0, sway, 0.0, 0.0
 
     def _step_approach(self, now_ms, dx, ratio, growth):
         a = _cvnode("approach")

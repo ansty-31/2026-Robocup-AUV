@@ -70,7 +70,7 @@ motion:  # **ball / gate 共用的底层运动参数**
   #   离线复算同一批误差：饱和 64%→**1%**、落在比例区 10%→**72%**、输出中位 0.55→**0.24**。
   #   ⚠️ 这个节点是 **ball 与 gate 共用**（"一处调、两个任务同时生效"，见 tests 的单一来源用例）
   #      ⇒ 撞球的横向居中回路一并受益/一并改变；回退只需把 kp 改回 8.0、删掉 bias。
-  pid_sway:  {kp: 1.0, ki: 0.01, kd: 0.02, out_max: 0.55, deadzone: 0.05, bias: 0.138}
+  pid_sway:  {kp: 10.0, ki: 0.0, kd: 0.05, out_max: 0.55, deadzone: 0.05, bias: 0.138}
   pid_heave: {kp: 1.0, ki: 0.0,  kd: 0.15, out_max: 1.0,  deadzone: 0.04}
   surge_fast: 0.30  # 快档：ball 分级最高速/冲刺、gate 远距进近
   surge_slow: 0.15  # 慢档：ball 接近段减速、gate 近距进近
@@ -144,7 +144,7 @@ grab:  # 任务三 夹取小球（决策层 2026-10-06 起建；**感知全程�
 # ⚠️ 标「占位·未标定」的值上水前必须现场实测（标定顺序与判据见 doc/注释历史.md）。
 # ⚠️ 未标定前**不要**把 grab 放进 tasks.enabled：calibrated 是安全闸，false ⇒ 本任务不 ready ⇒ 装配层跳过它。
   calibrated: true      # ★ 安全闸：false ⇒ 跳过本任务（不占状态机、不发任何指令）
-  timeout_ms: 45000      # 总时限（用户 2026-10-06 定）；撞球 30s、过门 50s
+  timeout_ms: 60000      # 总时限（用户 2026-10-06 定，**板端手动值**）；撞球 30s、过门 50s
   depth_floor_m: 0.50    # ★ 翘头时的**安全下限**（工作区间 0.5~0.6，见 depth_hold）
   #   全局限深 2026-10-06 已由用户下调为 **0.50** ⇒ 本值与它同值，浅端不再被卡在 0.55，
   #   0.5~0.6 的整段都可用了（真正的工作点由 `depth_hold.target_m`=0.55 决定）。
@@ -171,8 +171,10 @@ grab:  # 任务三 夹取小球（决策层 2026-10-06 起建；**感知全程�
     out_max: 0.35        # 上浮/下潜幅值上限（占位·未标定）
     deadzone_m: 0.02     # 死区滞环：贴边不来回抖
   # ---- 指定角度轴动作（协议 byte[7]：2=pitch / 3=roll）----
-  pitch: {up_deg: 30.0, up_sign: 1.0, timeout_s: 8.0, settle_ms: 300.0}
-  #   up_sign ⚠️**未验证**：相对角正负 vs 物理抬头（上板单轴实测后再定）
+  pitch: {up_deg: 30.0, up_sign: -1.0, timeout_s: 8.0, settle_ms: 300.0}
+  #   up_sign = **-1.0 是现场单轴实测值**（负相对角 = 抬头；2026-10-06 用户上板实测后定）。
+  #   ⚠️ 改它 / 换下位机固件 / 换 IMU 安装，都要重新单轴实测：
+  #   `python3 common/motion/turn_deg.py --axis pitch --deg 5`（小幅、看机头往哪边走）
   level: {timeout_s: 8.0, settle_ms: 300.0}
   #   回水平：相对角按遥测算 = wrap180(抬头前测到的 pitch − 当前 pitch)，**不写死 −30°**
   roll:  {dump_deg: 30.0, dump_sign: 1.0, timeout_s: 8.0, settle_ms: 300.0}
@@ -185,8 +187,11 @@ grab:  # 任务三 夹取小球（决策层 2026-10-06 起建；**感知全程�
   #   用户定：比赛只有两个球 ⇒ 第 2 次尝试默认是对的、直接过；max_dumps = 倒球重来次数上限
   # ---- 丢目标 / 对准 / 接近（判据量 = 圆面积占比 πr²/(W·H)，不是 bbox）----
   lost: {grace_frames: 15, hold_s: 0.8, ema_alpha: 0.3}
-  center_yaw: {eps: 0.20, confirm_frames: 5,
-               pid: {kp: 0.25, ki: 0.0, kd: 0.0, out_max: 0.15, deadzone: 0.0}}
+  center: {eps: 0.20, confirm_frames: 5,
+           pid: {kp: 6.0, ki: 0.0, kd: 0.0, out_max: 0.25, deadzone: 0.03}}
+  #   ★ **通道 = sway（平移）**：2026-10-06 用户定「夹取任务不需要旋转」⇒ 居中不再用 yaw。
+  #     （原名 `center_yaw`：最早的口令是「先调 yaw 居中」，现已改；要回退就把 phases.py 的
+  #      `_step_center` 改回 yaw 送出，并把这里换成 yaw 量级的增益 kp≈0.25/out_max≈0.15）
   #   ⚠️ kd 必须 0（`search_scan` 同坑：下视 ~20fps 下 D 项易自激）；kp/eps 占位·未标定
   approach: {surge_fast: 0.25, surge_slow: 0.12, slow_ratio: 0.12, growth_eps: 0.002,
              dip_ratio: 0.15, confirm_frames: 2,
@@ -245,8 +250,8 @@ ball:  # 任务一 撞球：运动链 SEARCH→CENTER→APPROACH→DASH→STOP
   engage_hold_s: 0.8
 
 gate:  # 任务二 过门
-  timeout_ms: 50000  # 任务级兜底
-  pass_target: 1  # 完成计数目标：单门 1
+  timeout_ms: 180000  # 任务级兜底
+  pass_target: 2  # 完成计数目标：单门 1
   # ★★ 2026-10-07 用户定（依据 log/rungate_20261006_postsway 的 385 帧实测）：
   #   **对中带按档位分开、并且 px_x > px_y**（原来只有一套 0.15/0.10，与几何和数据都不符）。
   #   数据（主点基准 + 去纵向偏置后，有测量帧各档的目标通过率 60% 分位）：
@@ -256,10 +261,10 @@ gate:  # 任务二 过门
   #   注意纵向**零点不在 0**：{dyn} 的中位是 −0.30（相机比门中心高 + 抬头），
   #   所以 `dy_target=-0.30` 把纵向量心搬到 0 附近；不做这一步，任何纵向阈值都在偏置上打滑。
   #   `confirm_frames` 4→5：用户定"align 成功 5 帧"(与机身静取交，见 hdg.body_delta_max_deg)。
-  align: {confirm_frames: 5, px_x: 0.10, px_y: 0.15, dy_target: -0.30}
+  align: {confirm_frames: 4, px_x: 0.15, px_y: 0.20, dy_target: -0.30}
   # ★ width 档自己的对中带（2026-10-07 用户定）：数据说 width 档横向误差是纵向的 2.3 倍，
   #   用 full 那套带会把 width 帧全部判成"未对准"。缺键时回退到 align.px_x/px_y（不崩）。
-  hdg: {enable: true, tol_deg: 8.0, max_step_deg: 0.0, turn_scale: 1.0, timeout_ms: 30000,
+  hdg: {enable: true, tol_deg: 8.0, max_step_deg: 15.0, turn_scale: 0.8, timeout_ms: 30000,
         # ★★ 2026-10-07 用户定：**ψ 先平滑再比 tol**（不要放宽 tol）。
         #   实测：ψ(EMA0.4) 的帧间跳 7.8°，而真实航向(tyaw)帧间跳只 0.33° ⇒ **24 倍**，
         #   ψ 在该频段是噪声主导 ⇒ 用它的分布定 tol 是循环论证（原 8° 曾因此一次都起不来）。
@@ -278,7 +283,7 @@ gate:  # 任务二 过门
         turn_timeout_s: 8.0,         post_sway_ms: 600.0, post_sway: 0.20,
         post_sway_back: 0.15, post_sway_kpt_min: 2,
           turn_period: 0.05, stop_hard: true,
-        max_turns: 5,
+        max_turns: 3,
         # ★ post_sway_settle_frames（2026-10-06 用户定）：转向后**先连停这么多帧再看画面**
         #   —— 转向后前几帧还是转向前的旧画面，拿它判"门回来了"没意义（实测帧18仍报 kpt=4）。
         post_sway_settle_frames: 8}
@@ -305,6 +310,13 @@ gate:  # 任务二 过门
       cross_confirm_frames: 4,  # 连续 z≤cross 帧数才判过门(防单帧 PnP 错解冲出去)
       # ★ 与 cross 同值：近了就进 THROUGH，不会因为太近而长时间 search/back_slow
 #   （细节与实测见 doc/注释历史.md）
+      # ★★ 2026-10-07 用户定：**面积参照模型可切换**（丢门重锁那套 `_relock_ratio_ref`）。
+      #   · interframe = **帧间占比突变**：参照=上一帧被采纳的占比 ⇒ 只挡单帧骤降（>30%），
+      #                  船正常往回退不会被误判；真实的渐变萎缩也拦不住。
+      #   · preloss    = **丢门前占比突变**：参照在丢门那一刻固定、跨丢门比较 ⇒ 能挡住
+      #                  "丢门→远处门出现"这一类，但丢门后若正常位姿变化会偏严。
+      #   · ema        = **平滑跟踪**：参照 = 0.7×旧 + 0.3×本帧（抗单帧抖动，又跟得上真实变化）。
+      relock_ratio_model: ema,
       relock_far_ratio: 0.7,  # 重锁保护的**占比退路**（门回来但占比小于它 × 参照 ⇒ 继续重锁）：
       relock_z_jump_m: 0.5,  # ★ z 跳变保护：**只挡向上跳**（同一扇门不可能突然远 0.5m；向下/更近正常）。
       relock_away_m: 1.8,  # ★ 丢门重锁时 z 超过它 ⇒ 判为「下一个门」
@@ -319,11 +331,17 @@ gate:  # 任务二 过门
     # ★ 2026-10-07 用户定：width 档**自己的**对中带（各 mode 的居中依赖不同，不共用一套）。
     #   数据（主点基准 + 去纵向偏置，width 有测量 68 帧）：|dx| 中位 0.130 / |dy| 中位 0.055
     #   ⇒ 60% 分位给 (0.14, 0.06)。缺键时回退到 align.px_x/px_y。
-    align_x: 0.14
-    align_y: 0.06
+    align_x: 0.15
+    align_y: 0.10
   # ★ 2026-10-07 用户定：coarse 档对中带 0.33/0.29 → **0.18/0.10**（原值过松：
   #   实测只有 50% 的 coarse 帧落进去，且落在阈值附近的帧最多——收紧后仍覆盖 60% 分位）。
-  coarse: {far_ratio: 0.18, near_ratio: 0.55, align_x: 0.18, align_y: 0.10}
+  # ★ 2026-10-07 用户定：coarse 档 HOLD **超时 5s 就触发后退**（原来按帧数 20 帧≈2s，偏紧）。
+  #   后退时**按可见角点引导**（见 modes.py::_tick_reacquire）：
+  #     · 只见下边角(BL/BR) ⇒ 门在视野上方 ⇒ **上浮**一点（用户原话：只看到 BR 就边退边浮）
+  #     · 只见上边角(TL/TR) ⇒ 门在下方 ⇒ 下潜一点
+  #     · 够 **2 个角点（进 width）就收手**，不追求 full ✓
+  #   `back_heave` 必须**高于执行器死区 0.138** 才有推力（0.20 留了余量）。
+  coarse: {far_ratio: 0.18, near_ratio: 0.55, align_x: 0.18, align_y: 0.10, hold_timeout_ms: 5000, back_heave: 0.20}
   hold: {max_frames: 20}  # HOLD 无进展帧数 → REACQUIRE(只在"未对准"时累加)
   reacquire: {max_ms: 800,  # 单次后退上限(ms)
               max_times: 2,  # 连续这么多次仍拿不到角点 → 放弃后退, 改原地 HOLD
@@ -341,7 +359,7 @@ gate:  # 任务二 过门
   #     段① 2s ≈ 0.58~0.98 m ；段② 4s ≈ 0.26~0.43 m ；合计 ≈ **0.84~1.41 m**。
   #   ⚠️ 这个覆盖面小于"cross(1.5)+艇长+余量 ≈ 2.4~2.6 m"的几何估算 ⇒ 若实测冲不过去，
   #      优先加段①（快冲段是唯一能大幅加距离的一段）。`fast_ms: 0` = 整段满速（旧行为）。
-  through: {confirm_ms: 6000, fast_ms: 2000, confirm_frames: 8, require_align_deg: 8.0, loose: 1.0,
+  through: {confirm_ms: 4500, fast_ms: 3000, confirm_frames: 8, require_align_deg: 8.0, loose: 1.0,
             # ★ center_frames（2026-10-05 用户定）：**够近那条主出口**要求"居中成功"
 #   （细节与实测见 doc/注释历史.md）
             center_frames: 4, center_x: 0.20, center_y: 0.25}

@@ -247,12 +247,34 @@ class _TaskRecorder(object):
                 self._fh = None
 
 
+# 显式"关"的写法（大小写不敏感）：让外层脚本/wrapper 设了也能这一趟不录
+_OFF_WORDS = ("0", "off", "no", "false", "none", "-")
+
+
+def _is_off(v):
+    return str(v or "").strip().lower() in _OFF_WORDS
+
+
 def _make_recorder(task_name="task"):
-    """按环境变量建录像器；都没设 ⇒ 返回一个什么都不做的实例。"""
+    """按环境变量建录像器。
+
+    **默认不启动**（三个变量都不设 ⇒ 空壳，一帧都不写、不建文件）。
+    开关（优先级从高到低）：
+      · `AUV_RECORD=0|off|no|false|none|-` ⇒ **显式关闭**（即使 `AUV_RECORD_DIR` 也设了）
+      · `AUV_RECORD=<路径>.mjpeg`         ⇒ 录到该文件
+      · `AUV_RECORD_DIR=<目录>`           ⇒ 录到 `<目录>/auv_<任务>_<时间戳>.mjpeg`
+    画质 `AUV_RECORD_Q`（默认 85）。
+    """
     q = int(os.environ.get("AUV_RECORD_Q", "85") or 85)
-    path = (os.environ.get("AUV_RECORD") or "").strip() or None
+    raw = os.environ.get("AUV_RECORD")
+    if _is_off(raw):
+        return _TaskRecorder(None, q)          # ★ 显式关闭：不再看 AUV_RECORD_DIR
+    path = (raw or "").strip() or None
     if path is None:
-        d = (os.environ.get("AUV_RECORD_DIR") or "").strip()
+        d = os.environ.get("AUV_RECORD_DIR")
+        if _is_off(d):
+            return _TaskRecorder(None, q)
+        d = (d or "").strip()
         if d:
             path = os.path.join(d, "auv_%s_%s.mjpeg"
                                 % (task_name, time.strftime("%Y%m%d_%H%M%S")))
@@ -319,7 +341,10 @@ class AppController(object):
         self._task_log_fh = None
         # ★ through 专表：显式给了用它，否则跟着任务日志自动派生（记任务日志就顺带记冲刺）
         _tp = os.environ.get("AUV_THROUGH_LOG")
-        if not _tp and self._task_log_path:
+        if _is_off(_tp):                     # ★ AUV_THROUGH_LOG=0/off ⇒ 不记冲刺专表
+            _tp = None
+            self._task_log_path = self._task_log_path   # 任务日志照旧
+        elif not _tp and self._task_log_path:
             _tp = (self._task_log_path[:-6] + "_through.jsonl"
                    if self._task_log_path.endswith(".jsonl")
                    else self._task_log_path + "_through.jsonl")

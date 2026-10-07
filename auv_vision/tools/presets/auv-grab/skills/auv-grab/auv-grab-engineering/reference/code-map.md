@@ -95,7 +95,8 @@ camera (front, 前视)  →  frame(np.ndarray, BGR)
 | `grab.cv` | `dom_min / rel_min / s_min / v_min` | 30 / 0.30 / 40 / 60 |
 | `grab.cv` | `close_k / open_k` | 9 / 5 |
 | `grab.cv` | `min_area / circ_min / cov_min` | 30 / 0.30 / 0.35 |
-| `grab.cv` | `min_arc_deg / r_min` | 150.0 / 25.0 |
+| `grab.cv` | `min_arc_deg / r_min` | 150.0 / **32.0** |
+| `grab.cv` | `h_med_min / core_frac_min / rms_rel_max` | **20 / 0.25 / 0.15**（2026-10-07 候选级验证，见 `perf-and-params.md`） |
 | `grab.track` | `enable / margin / proc_side / max_lost` | true / 64 / 256 / 3 |
 
 `Params` 里**cfg 没暴露但代码存在**的字段（要调就加进 cfg，`from_cfg` 会自动取）：`use_rel, use_hue, h_lo, h_hi, h_hi2, fill_hole_frac(0.65), max_area_frac(0.75), hull_fill_min(0.55), r_max(900), score_min(0), fit_iters(6), fit_sigma(1.8), merge_iou(0.6), refine(False), hough_param2(28), hough_r_tol(1.45), fast_mask(True)`。`BallTracker` 的 `edge_margin(6.0)` / `min_roi(128)` 目前**只能**从代码传参，cfg 里没有对应键。

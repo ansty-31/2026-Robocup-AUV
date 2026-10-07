@@ -178,6 +178,13 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         self._lock_cnt = 0                # ★ 连续跟住同一扇的帧数（≥lock.stable_frames ⇒ 稳定后不再参与选门）
         self._lock_stable = False         # ★ 锁定是否已稳定（稳定后才不许别的门抢）
         self._lock_k_ref = None           # ★ 锁定门的 k 参照（k=z×框占比）——"保护锁定"①用
+        # ★ 2026-10-07：把"丢门重锁"那套参照**显式初始化**（原来全靠 `getattr(...,None)` 兜着，
+        #   属性不存在 ⇒ 外部/用例直接读会 AttributeError，也看不出它是不是该有值）
+        self._hold_start_ms = None        # ★ coarse 的 HOLD 起始时刻（超时 5s ⇒ 触发反向慢移）
+        self._ids_now = []                # ★ 本帧有效角点 id（coarse 反向慢移按它判上浮/下潜）
+        self._relock_z_ref = None         # 丢门前的 z（`_relock_guard()` 判"比丢门前远 ≥0.5m"用）
+        self._relock_ratio_ref = None     # 丢门前的框占比（`_relock_guard_ratio()` 用）
+        self._relock_logged = False
         self._lock_ratio_ref = None       # ★ 锁定门的**面积**参照（框占比）——"保护锁定"②用
         self._lock_k_bad = 0
         self._scan = Scan()
@@ -412,7 +419,17 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         return False
 
     def _lock_note_accepted(self, det):
-        """只对**最终采纳（=锁定）的那一扇**更新两者参照（k 用 EMA，面积取见过的最大）。"""
+        """只对**最终采纳（=锁定）的那一扇**更新两者参照。
+
+        ★★ 2026-10-07 用户定：**锁门的面积参照 = 上一帧被采纳的占比（帧间比较）**，
+        判据即「本帧占比 ≥ `relock_far_ratio`(0.7) × 上一帧占比 ⇒ 还是这扇门、可信、
+        **不着急换门**」。
+
+        ⚠️ 与 `_relock_ratio_ref`（`_step` 里那套）**不是同一个东西**，别互相套：
+          · 这里是**锁门层**的参照 —— 帧间；
+          · `_relock_ratio_ref` 是丢门重锁那套，**保持用户原来的写法不动**。
+        k 参照仍用 EMA（它是"k 一致性"的锚，语义不同）。
+        """
         if det is None:
             return
         kz = self._k_of(det)
@@ -421,8 +438,7 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
                                 else 0.7 * self._lock_k_ref + 0.3 * kz)
         ratio = (float(det.w) / float(self.w)) if (self.w and getattr(det, "w", 0)) else None
         if ratio is not None:
-            self._lock_ratio_ref = (ratio if self._lock_ratio_ref is None
-                                    else max(float(self._lock_ratio_ref), ratio))
+            self._lock_ratio_ref = ratio        # ← 帧间：下一帧与**上一帧**比
 
     def _k_of(self, det):
         """这扇门的 k = z × 框占比。拿不到 z（没角点/coarse）或占比 ⇒ None ="本帧这项检验用不了"。"""
@@ -460,7 +476,13 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         if det is None:
             self._tick_lost(now_ms)
             return
-        # ★ 2026-10-05 用户定：**选门优先 z，锁门用面积**。面积参照必须**持续跟踪** ——
+        # ★ 2026-10-05 用户定：**选门优先 z，锁门用面积**。
+        #   ★★ 2026-10-07 用户定：面积参照（丢门重锁那套）做成**可切换的三个模型** ——
+        #     `comm.gate.z.relock_ratio_model` = interframe(帧间) / preloss(丢门前) / ema(平滑)；
+        #     具体更新在 `_relock_ratio_note_accepted()`（**只对被采纳的帧**更新），
+        #     判据 `_relock_guard_ratio()` 是**纯函数**（不改任何参照）。
+        #   这里只保留一个兜底：参照还空着而已经有被采纳帧 ⇒ 用它的占比起个头
+        #   （`preloss` 模型下如果没丢过门，也用它当起点，避免"永远没有参照"）。
         if getattr(self, "_relock_ratio_ref", None) is None and \
                 getattr(self, "_ratio_last", None) is not None:
             self._relock_ratio_ref = float(self._ratio_last)
@@ -470,6 +492,7 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
             return
         self._lost_cnt = 0
         self._ratio_last = float(det.w) / float(self.w)   # ★ 本帧通过保护 ⇒ 记"最近被采纳的占比"
+        self._relock_ratio_note_accepted(self._ratio_last)   # ★ 按模型更新面积参照
         V = self._V
         conf_thr = req(sub(V, "keypoint"), "conf_thr")
         # 诊断量：本帧框占比 + 有效角点数（进叠加与 REACQUIRE 日志）
@@ -491,9 +514,12 @@ class GateTask(GateChannels, GateHdg, GateModes, GateExits):
         # 前端 → mode（用记忆后的角点）
         if kpts is not None and kpts.shape[0] >= 4 and kconf is not None:
             mode, ids = parse_kpt_mode(kpts, kconf, conf_thr)
+
+            self._ids_now = list(ids)     # ★ 本帧有效角点 id（coarse 反向慢移按它判方向）
             n = len(ids)
         else:
             mode, ids, n = MODE_COARSE, [], 0
+            self._ids_now = []           # ★ 本帧没有可信角点 ⇒ 清空（别留上一帧的）
 
 
         if mode in (MODE_FULL, MODE_P3P) and n >= 3:

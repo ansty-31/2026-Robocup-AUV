@@ -343,37 +343,46 @@ class GateChannels(object):
         #   就把它排除掉、在剩下的里重新选**，直到选中的那扇 k 达标（或没得选 ⇒ None）。
         #   k 小 = z 报得比实际近（测距崩了）—— 实船同一扇门框占比稳定而 z 抖 ±35%，
         #   k 在 0.48~0.87 跳，纯按 near 会把这扇"看着更近的崩解"选走（一开始就锁到了**后边那扇**）。
-        k_max_ratio = float(req(sub(self._G, "select"), "k_max_ratio"))
 
         def _k_of_sel(d):
             r = (float(d.w) / float(self.w)) if (self.w and getattr(d, "w", 0)) else 0.0
             zz = self._z_est(d, conf_thr)
             return (float(zz) * r) if (zz is not None and r > 1e-6) else None
 
-        cand = list(gates)
-        while cand:
-            best, best_z = None, None
-            for d in cand:
-                z = self._z_est(d, conf_thr)
-                ratio = (float(d.w) / float(self.w)) if (self.w and getattr(d, "w", 0)) else 0.0
-                if ratio > 1e-6 and k_true > 0:
-                    z_area = k_true / ratio          # 面积（框占比）反推的 z
-                    z_eff = float(z) if (z is not None and float(z) >= z_area) else z_area
-                else:
-                    z_eff = z
-                if best is None or (z_eff is not None and (best_z is None or z_eff < best_z)):
-                    best, best_z = d, z_eff
-            if best is None:
-                return None
-            if k_max_ratio <= 0:
-                return best
-            ks = [_k_of_sel(d) for d in cand]
-            have = [k for k in ks if k is not None]
-            kbest = _k_of_sel(best)
-            if not have or kbest is None or kbest >= k_max_ratio * max(have):
-                return best
-            if S.DEBUG:
-                print("[GATE] 选门 k 检验不通过：选中的 k=%.3f < %.2f×最大 %.3f ⇒ 排除它重新选"
-                      % (kbest, k_max_ratio, max(have)))
-            cand = [d for d in cand if d is not best]      # ★ 排除他，重新选
-        return None
+        # ★★ 2026-10-07 用户定：**一帧内一次把"实际远的那扇"全排除掉，再搬出结果**。
+        #   为什么改掉原来的"选中→排除→重选"迭代：那个循环里的 `k_max` 是**逐帧重算**的，
+        #   同一个门在这一帧是"最大 k"、下一帧就不是 ⇒ 反复进出候选 ⇒ **反复选错、反复解锁、
+        #   耗时**（用户实测就是这个）。而且迭代版"全被排除"时会返回 None ⇒ 走丢帧计数 ⇒ 解锁，
+        #   于是同一位置的门在相邻帧里被选进/排除反复横跳。
+        #   现在：① 先算本帧所有候选的 k，一次定出 k_max；② **一次排除**所有 k < 阈值 的；
+        #        ③ 在幸存者里按 near(z_eff 最小) 选；④ 若幸存者为空 ⇒ **退回 k 最大那扇**
+        #        （它是本帧最可信的），**绝不返回 None** —— 有门就不制造"丢门→解锁"的空转。
+        ks = [(d, _k_of_sel(d), self._z_est(d, conf_thr)) for d in gates]
+        have = [k for (_d, k, _z) in ks if k is not None]
+        if k_max_ratio > 0 and have:
+            kthr = k_max_ratio * max(have)
+            keep = [(d, z) for (d, k, z) in ks if (k is None or k >= kthr)]
+            if not keep:
+                # 全被排除 ⇒ 用 k 最大那扇（最可信），而不是丢门
+                dmax = max((d for (d, k, _z) in ks if k is not None),
+                           key=lambda d_: _k_of_sel(d_))
+                keep = [(dmax, self._z_est(dmax, conf_thr))]
+                if S.DEBUG:
+                    print("[GATE] 选门：全部候选的 k 都低于 %.2f×最大 ⇒ 退回 k 最大那扇 k=%.3f"
+                          % (k_max_ratio, _k_of_sel(dmax)))
+            elif len(keep) < len(gates) and S.DEBUG:
+                print("[GATE] 选门：一次排除 %d/%d 扇（k < %.2f×最大 %.3f）"
+                      % (len(gates) - len(keep), len(gates), k_max_ratio, max(have)))
+        else:
+            keep = [(d, self._z_est(d, conf_thr)) for d in gates]
+        best, best_z = None, None
+        for d, z in keep:
+            ratio = (float(d.w) / float(self.w)) if (self.w and getattr(d, "w", 0)) else 0.0
+            if ratio > 1e-6 and k_true > 0:
+                z_area = k_true / ratio               # 面积（框占比）反推的 z
+                z_eff = float(z) if (z is not None and float(z) >= z_area) else z_area
+            else:
+                z_eff = z
+            if best is None or (z_eff is not None and (best_z is None or z_eff < best_z)):
+                best, best_z = d, z_eff
+        return best

@@ -71,6 +71,17 @@ def test_axis_move_aborts_when_the_measured_tilt_exceeds_the_limit():
 
 
 def test_pitch_up_and_roll_dump_requests_stay_within_the_limit():
-    """任务侧真正会下发的两个角（抬头 30°/横倾 30°）本来就在限内；cfg 被改大也夹得住。"""
-    assert pitch_up_deg() == pytest.approx(30.0) and roll_dump_deg() == pytest.approx(30.0)
+    """任务侧真正会下发的两个角（抬头/横倾各 30°）本来就在限内；cfg 被改大也夹得住。
+
+    ⚠️ 别把角度写死：`pitch.up_sign` 是**现场实测的极性**（2026-10-07 板端 = -1.0 ⇒ 实际送 -30°），
+    所以这里按 `sign × deg` 校验，而不是 `== 30`。
+    """
+    from common.motion.axis import grab_node
+    from common.cfg.cfgnode import sub
+    g = grab_node()
+    up = float(sub(g, "pitch")["up_sign"]) * abs(float(sub(g, "pitch")["up_deg"]))
+    roll = float(sub(g, "roll")["dump_sign"]) * abs(float(sub(g, "roll")["dump_deg"]))
+    assert pitch_up_deg() == pytest.approx(up)
+    assert roll_dump_deg() == pytest.approx(roll)
+    assert abs(pitch_up_deg()) <= max_tilt_deg() and abs(roll_dump_deg()) <= max_tilt_deg()
     assert AxisMove("pitch", pitch_up_deg(), log=lambda *a: None).clamped is False

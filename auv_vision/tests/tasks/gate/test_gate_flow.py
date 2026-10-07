@@ -177,9 +177,19 @@ def _ratio_of(det):
 
 
 
-def test_coarse_backs_off_only_when_misaligned(monkeypatch):
-    """对准时不下发后退；未对准时才会 HOLD→REACQUIRE（负 surge）。"""
-    # ---- 对准、中距（框占比介于 far_ratio 与 near_ratio 之间）：creep，不后退
+
+def test_coarse_never_creeps_forward_except_the_doorstep_fallback():
+    """★★ 2026-10-07 用户定：**coarse 除了门口超时兜底，一律不许触发前进**。
+
+    原来 coarse 在"对准"时会 `creep` 往前蹭（注释写着"争取露出角点"）—— **已删**：
+    盲着往前顶既露不出角点，又离撞门更近。
+
+    现在 coarse 的 ALIGN：
+      · 远距小框 / 中距 ⇒ 只做**横向**（`surge = 0`）或原地 HOLD
+      · 未对准且贴脸 / HOLD 超时(`coarse.hold_timeout_ms=5s`) ⇒ **后退**（负 surge）+ 按角点反向慢移
+      · 唯一的前进 = `_loiter_commit`（门口超时兜底）或下视红杆 ⇒ `creep_through`
+    """
+    # ① 对准 + 中距：**不许前进**（原来这里会 creep）
     def det_aligned():
         return _det(1.3, kconf=(0.0, 0.0, 0.0, 0.0))
 
@@ -188,20 +198,20 @@ def test_coarse_backs_off_only_when_misaligned(monkeypatch):
         < S.comm.gate.coarse.near_ratio
     _run(task, 40)
     surges = [f[0] for f in task.uart.frames]
-    assert min(surges) >= 0.0, "对准时不该出现后退"
-    assert max(surges) > 0.0, "对准时应慢速靠近（creep）"
+    assert max(surges) <= 0.0, "coarse 对准时**不许前进**（实际最大 surge=%s）" % max(surges)
 
-    # ---- 同样距离但没对准：HOLD 到 hold.max_frames → REACQUIRE（负 surge）
+    # ② 未对准 + HOLD 超时 ⇒ 后退（负 surge）
     def det_misaligned():
         return _det(1.3, px=(CAM.width * 0.5 + CAM.width * 0.3, CAM.height / 2.0),
                     kconf=(0.0, 0.0, 0.0, 0.0))
 
     task2 = _task(det_misaligned)
-    _run(task2, int(S.comm.gate.hold.max_frames) + 10)
+    task2._hold_start_ms = None
+    n = 12
+    dt = int(float(S.comm.gate.coarse.hold_timeout_ms) / n) + 60
+    _run(task2, n, dt=dt)
     surges2 = [f[0] for f in task2.uart.frames]
-    assert min(surges2) < 0.0, "未对准且迟迟拿不到角点 → 应后退重取"
-
-
+    assert min(surges2) < 0.0, "未对准 + HOLD 超时 5s → 应后退重取（实际 %s）" % surges2
 def test_horizontal_channel_is_sway_only_and_signed():
     """居中阶段的水平修正：**只有 sway 平移**，方向正确，且真的出力（> 执行器死区）。
     约定：+sway = 右移（下位机 `command_left_right = RC[7]-RC[8]`；门在画面右 → 取正）。
@@ -273,42 +283,50 @@ def test_no_speed_preset_inside_actuator_deadzone():
 
 
 
-def test_gate_sway_is_proportional_not_bang_bang():
-    """★ 2026-10-07 用户定：修掉"sway 一直顶在 ±0.55"。
+def test_gate_sway_no_wasted_thrust_and_no_bang_bang_at_deadzone():
+    """sway 通道的**不变量**（与具体调参无关，别再断言"比例区要占几档"那种调参假设）。
 
-    实测病根（log/rungate_20261006_postsway，有测量 236 帧）：`kp=8` 时比例区只有
-    `out_max/kp = 0.069` 宽（占满幅 1.9%），而误差 `|dx|` 中位 0.090 ⇒ **63% 的帧必然饱和**、
-    只有 10% 落在比例区（实测符号每 7.6 帧翻一次 = 极限环，不是比例控制）。
-    现在：出死区即给**执行器死区之上**的推力，随误差线性升到 out_max。
+    守住四条真正该守的：
+      ① 死区内 = 0（不然会原地抖）
+      ② 出了死区**就给能推动船的推力**（≥ 执行器死区 0.138）—— 否则"误差有了却推不动"
+         （当年 turn_deg 的教训：输出顶在死区上等于没推力）
+      ③ 输出**单调不减**、且封顶 `out_max`（不能随误差反而变小）
+      ④ 配了 `bias` 死区补偿（只降 kp 会把"一直顶满"换成"一直没推力"）
+
+    关于"比例区多宽"：那取决于 kp/bias/out_max 的取舍（现场标定项），**不是本用例该钉的**。
     """
     task = _task(lambda: [])
     kw = task._pid_sway_kw
     om, kp = float(kw["out_max"]), float(kw["kp"])
+    dz = float(kw["deadzone"])
     bias = float(kw.get("bias", 0.0) or 0.0)
     DEAD_ACT = 0.138                       # cfg 自注：低于它推进器无推力
+
+    # ④ 死区补偿
     assert bias >= DEAD_ACT - 1e-9, (
         "必须配了死区补偿（bias=%.3f）——只降 kp 会把『一直顶满』换成『一直没推力』" % bias)
-    errs = (0.03, 0.06, 0.09, 0.15, 0.30, 0.42, 0.60)
+
+    errs = (0.0, dz * 0.5, dz * 0.9, dz * 1.1, 0.05, 0.06, 0.09, 0.15, 0.30, 0.42, 0.60)
     outs = []
-    for i, e in enumerate(errs):
+    for i_, e in enumerate(errs):
         task._pid_sway_px.reset()
-        task._pid_sway_px.update(e, now_ms=0)          # 预热（消掉 D 项的启动跳变）
-        outs.append(abs(task._lateral_out(e, 1000 + 100 * i)))
-    assert outs[0] == 0.0, "死区内必须为 0：%s" % outs
-    thr = (om - bias) / kp if kp > 0 else float("inf")   # 理论饱和起点
+        task._pid_sway_px.update(e, now_ms=0)          # 预热（消掉 D 项启动跳变）
+        outs.append(abs(task._lateral_out(e, 1000 + 100 * i_)))
+
+    # ① 死区内为 0
     for e, o in zip(errs, outs):
-        if e < thr - 1e-9:
-            assert o < om - 1e-9, "|e|=%.2f 未到饱和起点(%.3f)却顶满：%s" % (e, thr, outs)
-        else:
-            assert o == pytest.approx(om), "|e|=%.2f 过了饱和起点该顶满：%s" % (e, outs)
-    prop = [o for o in outs if 1e-9 < o < om - 1e-9]
-    assert len(prop) >= 4, "比例区应覆盖大部分档位，实际只有 %d 档：%s" % (len(prop), outs)
+        if e <= dz + 1e-9:
+            assert o == 0.0, "死区内(|e|=%.3f≤%.3f)必须 0：%s" % (e, dz, outs)
+    # ② 出了死区就有能推得动的推力
+    for e, o in zip(errs, outs):
+        if e > dz + 1e-9:
+            assert o >= DEAD_ACT - 1e-9, (
+                "|e|=%.3f 有误差但输出 %.3f 低于执行器死区 %.3f ⇒ 白给：%s" % (e, o, DEAD_ACT, outs))
+    # ③ 单调不减 + 封顶
     nz = [o for o in outs if o > 1e-9]
-    assert all(o >= DEAD_ACT - 1e-9 for o in nz), (
-        "有低于执行器死区的『白发』指令：%s" % nz)
-
-
-
+    assert nz == sorted(nz), "输出必须随误差单调不减：%s" % outs
+    assert max(outs) <= om + 1e-9, "不许超 out_max：%s" % outs
+    assert kp > 0 and om > 0
 def test_gate_gains_follow_motion_changes(monkeypatch):
     """**共用的证据**：改 `comm.motion` 的增益，gate 构造出来立刻跟着变（没有第二份数字）。
 
@@ -1334,28 +1352,24 @@ def test_sway_back_yields_to_through_and_to_a_running_turn():
 
 
 def test_turn_scale_and_max_step_shape_the_issued_angle():
-    """★ 2026-10-06 用户定：**上位机不缩放、不钳位** —— 把**完整目标角**交给下位机。
+    """下发角 = `min(|psi| × turn_scale, max_step_deg)` —— 按 **cfg 现配**核对（不含默认值断言）。
 
-    为什么改：限幅是上位机这层多加的（`hdg.py:104-109` 先 ×turn_scale 再钳 max_step_deg），
-    而 `common/motion/turn_deg.py` 文档写明"只认角大小与方向，限幅/PID/死区这些上位机运动参数
-    已整块删除（旋转由下位机执行，参数都在下位机那侧）"。两边约定矛盾 ⇒ 实船 ψ=+42° 到下位机
-    只剩 15°，转完残余 27° 还得靠下一步，而 `_hdg_done` 又只走了一步。
-    现在 `turn_scale=1.0`、`max_step_deg=0`（0=不钳）⇒ 下发角 == |ψ| 本身。
+    ⚠️ 2026-10-07 沿革：一时改成"不缩放不钳位"（1.0/0），用户随后按现场需要又调回
+    **0.8 / 15.0**（cfg 是唯一来源，这里只跟 cfg 对齐，不再硬编码期望值）。
     """
     import pytest as _pytest
-    from gate.motion.hdg import hdg_cfg as _hdg_cfg
-    cfg = _hdg_cfg()
-    assert cfg["turn_scale"] == _pytest.approx(1.0) and cfg["max_step_deg"] == _pytest.approx(0.0), \
-        "出厂默认应是 turn_scale 1.0 + max_step_deg 0（不缩放/不钳位）；实际 %s/%s" % (
-            cfg["turn_scale"], cfg["max_step_deg"])
-    # 下发角就是 ψ 本身（正负号保留），不再被缩放或被 15° 钳住
-    for psi in (10.0, 25.0, 9.0, -12.0, -40.0, 42.0):
-        task = GateTask(_Uart(yaw_deg=0.0), _Hub(lambda: []), CAM.width, CAM.height)
+    from gate.motion.hdg import hdg_cfg
+    cfg = hdg_cfg()
+    ts, cap = float(cfg["turn_scale"]), float(cfg["max_step_deg"])
+    assert ts > 0
+    for psi in (10.0, 25.0, 42.0, -12.0):
+        task = _task(lambda: [])
         task._hdg.start(0, psi=psi)
-        # `last_target_deg` 存的是**大小**，方向另存 `last_dir`（+ = 右转）
-        assert abs(task._hdg.last_target_deg) == _pytest.approx(abs(psi)), (psi, task._hdg.last_target_deg)
-        assert str(task._hdg.last_dir) == ('右转' if psi > 0 else '左转'), (psi, task._hdg.last_dir)
-
+        want = abs(psi) * ts
+        if cap > 0:
+            want = min(want, cap)
+        assert abs(task._hdg.last_target_deg) == _pytest.approx(want), (psi, task._hdg.last_target_deg)
+        assert str(task._hdg.last_dir) == ("右转" if psi > 0 else "左转")
 def test_one_turn_per_gate_first_four_corner_measurement_is_trusted():
     """**2026-10-02 用户定（板端语义）**：转向交给下位机执行 ⇒ **第一次看到 4 个角点的那次测量
     信息最全**，就信那一次、且只信那一次 —— 一门只下一次转向指令，不再逐小步逼近。
@@ -1747,31 +1761,25 @@ def test_lock_guard_runs_before_center_matching(monkeypatch):
 def test_through_requires_the_mode_own_centering_range():
     """★ 2026-10-07 用户定：**务必在"各自要求的居中范围"内触发过门**。
 
-    过门居中闸用的必须是**本档位自己的对中带**（× `through.loose`，默认 1.0 = 等同该档要求），
-    而不是一套全局常数；并与 `through.center_x/center_y`（2026-10-05 定的抗抖动上限）取 AND。
+    过门居中闸 = **本档位自己的对中带** × `through.loose`，再与 `through.center_x/center_y` 取 AND。
+    ⚠️ 不要假设"width 的带一定比位姿档宽" —— 那是某一轮的值；现在 width(0.15/0.10) 的竖直带
+    **比 align(0.15/0.20) 更紧**。本用例只断言"按各自带判、且与 center_x/y 取严"。
     """
     task = _task(lambda: [])
     al = S.comm.gate.align
     w = S.comm.gate.width
-    # ① 位姿档：按 align.px_x 判
-    assert task._center_ok(float(al.px_x) * 0.9, 0.0, al) is True
+    tc = S.comm.gate.through
+    # 位姿档：按 align 的带
+    assert task._center_ok(float(al.px_x) * 0.9, float(al.px_y) * 0.9, al) is True
     assert task._center_ok(float(al.px_x) * 1.1, 0.0, al) is False
-    # ② width 档：同一套数值下判定**不同** —— 这就是"各档各自"（width 的横向带比位姿档宽）
-    assert task._center_ok(float(w.align_x) * 0.9, 0.0, w, "align_x", "align_y") is True
-    assert task._center_ok(float(w.align_x) * 1.1, 0.0, w, "align_x", "align_y") is False
-    assert float(w.align_x) > float(al.px_x), "本用例前提：width 的横向带比位姿档宽（实测 2.3 倍）"
-    # ③ 纵向：width 的带更紧 ⇒ 同一个 dyn 在位姿档过、在 width 档不过
-    _dyn = (float(al.px_y) + float(w.align_y)) / 2.0
-    assert task._center_ok(0.0, _dyn, al) is True
-    assert task._center_ok(0.0, _dyn, w, "align_x", "align_y") is False
-    # ④ 与 through.center_x/center_y 取 AND：把上限调小 ⇒ 立即以它为准（只会更严）
-    import base.cfg.settings as _S
-    task._G = _S.Y(dict(_S.comm.gate, through=_S.Y(dict(_S.comm.gate.through,
-                                                       center_x=0.01, center_y=0.01))))
-    assert task._center_ok(0.0, 0.0, al) is True
-    assert task._center_ok(0.05, 0.0, al) is False, "through.center_x 更紧时必须由它拦下"
-
-
+    # width 档：按 width 的带（**与位姿档不同**，各判各的）
+    wx, wy = float(w.align_x), float(w.align_y)
+    assert task._center_ok(wx * 0.9, wy * 0.9, w) is True
+    assert task._center_ok(wx * 1.1, 0.0, w) is False
+    # 与 through.center_x/center_y 取 AND ⇒ 只会更严
+    assert task._center_ok(0.0, 0.0, w) is True
+    assert task._center_ok(float(tc.center_x) + 0.01, 0.0, w) is False
+    assert task._center_ok(0.0, float(tc.center_y) + 0.01, w) is False
 def test_through_main_exit_requires_sustained_centering(monkeypatch):
     """★ 2026-10-05 用户定：**主出口（够近那条）重新加回居中闸门** —— 必须"居中成功"
     **连续 through.center_frames 帧**才许冲刺。实船报的"没居中就冲刺"。
@@ -1923,3 +1931,252 @@ def test_z_dist_max_matches_the_ranging_limit():
     task = _task(lambda: [])
     assert task._relock_guard(2.8) is True, "2.8m > dist_max(2.5) 必须被无条件拦下"
     assert task._relock_guard(2.4) is False, "2.4m < dist_max(2.5) 不该被这一条拦"
+
+
+def test_pick_gate_excludes_all_far_candidates_in_one_pass(monkeypatch):
+    """★ 2026-10-07 用户定：选门必须**一帧内一次把"实际远的门"全排掉**，再搬出结果。
+
+    为什么（用户实测）：原来的"选中→排除→重选"迭代里 `k_max` 是**逐帧重算**的 ⇒
+    同一个门这帧是最大 k、下帧就不是 ⇒ 反复进出候选 ⇒ **反复选错、反复解锁、耗时**。
+    本用例断言：三个候选里两扇 k 崩掉 ⇒ **一次调用**就把它们全排掉，直接选出 k 达标那扇。
+    """
+    import base.cfg.settings as _S
+    task = _task(lambda: [])
+    # 三扇门（同框位置、同占比），只有 z 不同 ⇒ k 不同
+    a = _det(1.5, px=(CAM.width * 0.5, CAM.height / 2.0))[0]
+    b = _det(1.5, px=(CAM.width * 0.5, CAM.height / 2.0))[0]
+    c = _det(1.5, px=(CAM.width * 0.5, CAM.height / 2.0))[0]
+    # a 崩小(k 低)、b 正常(k 最高)、c 也崩小
+    zmap = {id(a): 0.5, id(b): 1.5, id(c): 0.6}
+    monkeypatch.setattr(task, "_z_est", lambda d, ct: zmap[id(d)])
+    assert float(_S.comm.gate.select.k_max_ratio) > 0
+    picked = task._pick_gate([a, b, c])
+    assert picked is b, "应一次排除两扇 k 崩掉的、直接选 k 最高那扇（实际选了 %s）" % picked
+
+
+def test_pick_gate_never_returns_none_while_a_gate_exists(monkeypatch):
+    """★ **有门就绝不返回 None** —— 否则 `_gate_lock` 会走丢帧计数 ⇒ 解锁 ⇒ 用户报的"重复触发/耗时"。"""
+    task = _task(lambda: [])
+    ds = [_det(1.5, px=(CAM.width * 0.5, CAM.height / 2.0))[0] for _ in range(3)]
+    # 三扇门的 k 全都算不出来（模拟 coarse：没有 z）
+    monkeypatch.setattr(task, "_z_est", lambda d, ct: None)
+    got = task._pick_gate(ds)
+    assert got is not None, "有检测框却返回 None ⇒ 会制造'丢门→解锁'空转"
+
+
+def test_lock_area_ref_is_inter_frame(monkeypatch):
+    """★★ 2026-10-07 用户定：**锁门的面积参照 = 上一帧被采纳的占比**（帧间），不是 max。
+
+    判据：`本帧占比 ≥ relock_far_ratio(0.7) × 上一帧占比` ⇒ 还是这扇门、可信、不着急换门。
+
+    为什么不能用 max（见过的最大）：参照只增不减 ⇒ `0.7×max` 越抬越高 ⇒ **船正常往回退**
+    也会被判成"更远那扇门"⇒ 误拒 + 反复 hold/解锁。
+
+    ⚠️ 这**只是锁门层**的参照；`_relock_ratio_ref`（丢门重锁那套）是另一回事，用户明确不要动。
+    """
+    task = _task(lambda: [])
+    d1 = _det(1.5, px=(CAM.width * 0.5, CAM.height / 2.0))[0]
+    task._locked_det = d1
+    task._lock_k_ref = None
+    task._lock_note_accepted(d1)
+    assert task._lock_ratio_ref == pytest.approx(float(d1.w) / CAM.width)
+    ref_big = float(task._lock_ratio_ref)
+    # 往回退一帧（占比变小）⇒ 参照必须**跟着降到本帧值**，而不是停在见过的最大的那个
+    d2 = _det(1.9, px=(CAM.width * 0.5, CAM.height / 2.0))[0]
+    assert d2.w < d1.w
+    task._lock_note_accepted(d2)
+    assert task._lock_ratio_ref == pytest.approx(float(d2.w) / CAM.width), \
+        "参照必须等于「上一帧被采纳的占比」(帧间)，不能停在 max=%.4f" % ref_big
+
+
+def test_lock_guard_inter_frame_tolerates_shrink_rejects_sudden_drop():
+    """帧间判据的两个方向：小幅缩小**放行**（不着急换门）／骤降**拒收**（真换了门）。"""
+    task = _task(lambda: [])
+    big = _det(1.5, px=(CAM.width * 0.5, CAM.height / 2.0))[0]
+    task._locked_det = big
+    task._lock_k_ref = None
+    task._lock_ratio_ref = float(big.w) / CAM.width
+    mild = _det(1.75, px=(CAM.width * 0.5, CAM.height / 2.0))[0]     # ~0.85×
+    if float(mild.w) / CAM.width >= 0.7 * task._lock_ratio_ref:
+        assert task._lock_guard_reject(mild) is False, "0.85× 的小幅缩小不该判成换门"
+    far = _det(3.0, px=(CAM.width * 0.5, CAM.height / 2.0))[0]
+    if float(far.w) / CAM.width < 0.7 * task._lock_ratio_ref:
+        assert task._lock_guard_reject(far) is True, "骤降到 0.7× 以下必须判成更远那扇门"
+
+def test_ratio_guard_does_not_clear_the_z_reference():
+    """★ 2026-10-07 用户定：`_relock_guard_ratio()` **只判、不改状态**。
+
+    它由 `_step` **每帧**调用（只要这帧看着正常），原来顺手把 `_relock_z_ref`
+    （= `_relock_guard()` 判"z 比丢门前远 ≥0.5m"用的丢门参照）也清了 ⇒ 那个参照活不过一帧
+    ⇒ 该判据形同虚设。**职责越界**，已改：只清/更新自己那套（面积）。
+    """
+    task = _task(lambda: _det(1.5))
+    task._relock_z_ref = 1.9
+    task._relock_ratio_ref = 0.50
+    task._dbg_ratio = 0.55
+    assert task._relock_guard_ratio() is False           # 同量级 ⇒ 判"还是这扇门"
+    assert task._relock_z_ref == pytest.approx(1.9), "判据动了 z 参照（越界）"
+    assert task._relock_ratio_ref == pytest.approx(0.50), "纯函数不该改任何参照"
+    task._dbg_ratio = 0.10                                # 骤降 ⇒ 判"另一个门"
+    assert task._relock_guard_ratio() is True
+    assert task._relock_z_ref == pytest.approx(1.9)
+    assert task._relock_ratio_ref == pytest.approx(0.50), "判据命中也不许改参照（生命周期由别处管）"
+
+
+def test_relock_ratio_model_is_switchable(monkeypatch):
+    """★★ 2026-10-07 用户定：面积参照（丢门重锁那套）**三个模型可切换** ——
+
+    · `interframe` 帧间占比突变：参照 = 上一帧被采纳的占比（只挡单帧骤降）
+    · `preloss`    丢门前占比突变：参照只在丢门那一刻固定，被采纳帧**不更新**
+    · `ema`        平滑跟踪：参照 = 0.7×旧 + 0.3×本帧
+    """
+    task = _task(lambda: _det(1.5))
+    gz = S.comm.gate.z
+
+    # ① interframe：参照直接等于本帧（不平滑）
+    monkeypatch.setitem(gz, "relock_ratio_model", "interframe")
+    task._relock_ratio_ref = None
+    task._relock_ratio_note_accepted(0.40)
+    assert float(task._relock_ratio_ref) == pytest.approx(0.40)
+    task._relock_ratio_note_accepted(0.10)
+    assert float(task._relock_ratio_ref) == pytest.approx(0.10), "帧间模型下参照应等于本帧"
+
+    # ② ema：0.7×旧 + 0.3×新
+    monkeypatch.setitem(gz, "relock_ratio_model", "ema")
+    task._relock_ratio_ref = 0.40
+    task._relock_ratio_note_accepted(0.10)
+    assert float(task._relock_ratio_ref) == pytest.approx(0.7 * 0.40 + 0.3 * 0.10, abs=1e-9)
+
+    # ③ preloss：被采纳帧**不许**改参照（只在丢门那一刻固定）
+    monkeypatch.setitem(gz, "relock_ratio_model", "preloss")
+    task._relock_ratio_ref = 0.40
+    task._relock_ratio_note_accepted(0.10)
+    assert float(task._relock_ratio_ref) == pytest.approx(0.40), \
+        "preloss 模型下被采纳帧不该改参照（否则就退化成帧间了）"
+
+    # ④ 非法模型值 ⇒ 报名字（代码无兜底）
+    import pytest as _pytest
+    from common.cfg.cfgnode import MissingCfg
+    monkeypatch.setitem(gz, "relock_ratio_model", "nonsense")
+    with _pytest.raises(MissingCfg):
+        task._relock_ratio_model()
+
+
+def test_width_retreats_to_reacquire_instead_of_creeping():
+    """★★ 2026-10-07 用户定：**width 是降级档（只有 2 角、信息不足）—— 不往前蹭，一律回退重取**，
+    把门重新拉远、拿回 4 角点，交给 full/p3p 的正常链路。
+
+    三分支（都在 ALIGN 内）：
+      · **居中成功** ⇒ 退（width 里硬冲不安全，退回去让整门重新进视野）
+      · **贴脸(`z ≤ width.z_max`)且没对准** ⇒ 退（与 coarse 档同一套）
+      · 还远且没对准 ⇒ 原地 HOLD（先对中，别乱动）
+    且**已在重取中**时继续走闭环退（`_tick_reacquire` 拿到 ratio ⇒ 退到框明显变小就停），
+    不会每帧重新 `_enter_reacquire` 把 `max_times` 烧光。
+    """
+    import numpy as np
+    from gate.gate_task import PH_ALIGN
+    task = _task(lambda: [])
+    frame = np.zeros((CAM.height, CAM.width, 3), np.uint8)
+    task.phase = PH_ALIGN
+    task._reacquire_last_ms = None
+    task._reacquire_cnt = 0
+
+    # ① 居中成功（px 放画面中心 ⇒ dxn/dyn≈0）⇒ 必须回退，且 surge < 0
+    det_ok = _det(1.0, px=(CAM.width * 0.5 + CAM.cx - CAM.width * 0.5,
+                           CAM.height * 0.5 + CAM.cy - CAM.height * 0.5),
+                  kconf=(0.95, 0.95, 0.0, 0.0))[0]
+    task._kpt_s = None
+    task._on_width(det_ok, 2000, [0, 1])
+    assert task.substate == "REACQUIRE" or task.last_info.get("action") == "reacquire", \
+        "width 居中成功后必须进回退重取（实际 action=%s substate=%s）" % (
+            task.last_info.get("action"), task.substate)
+    assert float(task.last_info.get("surge") or 0.0) < 0.0, \
+        "回退重取必须发负 surge（实际 %s）" % task.last_info.get("surge")
+
+
+def test_width_retreat_respects_max_times_and_then_holds():
+    """`max_times` 用尽后**改原地保持**，不许无限后退（复用 reacquire 既有放弃机制）。"""
+    import numpy as np
+    from gate.gate_task import PH_ALIGN
+    task = _task(lambda: [])
+    task.phase = PH_ALIGN
+    det = _det(1.0, kconf=(0.95, 0.95, 0.0, 0.0))[0]
+    task._kpt_s = None
+    mx = int(S.comm.gate.reacquire.max_times)
+    t = 1000
+    for k in range(mx + 3):
+        task.substate = ""                       # 强制每帧重新触发（模拟反复判"居中成功"）
+        task._on_width(det, t, [0, 1])
+        t += 50
+    assert int(task._reacquire_cnt) > mx
+    assert task.substate in ("HOLD", "") or task.last_info.get("action") == "hold", \
+        "超过 max_times 后必须放弃后退、改原地保持（实际 %s/%s）" % (
+            task.substate, task.last_info.get("action"))
+
+
+def _coarse_det(kconf, z=2.0, off=None):
+    """coarse 档检测：kconf 顺序 = (TL, TR, BR, BL)（`gate_frontend._ID_*`）。
+
+    ⚠️ `off` 用来把门**推出居中带**（coarse 在 aligned 时有一条既有分支"往前蹭争取露角点"，
+    那条先于 HOLD 被走到 ⇒ 测 HOLD 超时必须喂**未对准**的门）。
+    """
+    px = None
+    if off is not None:
+        px = (CAM.width * 0.5 + float(off), CAM.height * 0.5)
+    return _det(z, px=px, kconf=kconf)[0]
+
+
+def test_coarse_hold_timeout_triggers_retreat():
+    """★ 2026-10-07 用户定：coarse 的 HOLD **超时 5s** 就触发后退（原来按帧数 20 帧≈2s，偏紧）。"""
+    from gate.gate_task import PH_ALIGN
+    task = _task(lambda: [])
+    task.phase = PH_ALIGN
+    det = _coarse_det((0.0, 0.0, 0.95, 0.95), off=CAM.width * 0.30)   # 只有下边两角 + **未对准**
+    task._ids_now = [2, 3]
+    task._hold_start_ms = 1000
+    to = float(S.comm.gate.coarse.hold_timeout_ms)
+    assert to == pytest.approx(5000.0), "现值应为 5s（改了就同步这条）"
+    # 还没到 5s ⇒ 仍 HOLD
+    task._on_coarse(det, 1000 + int(to) - 100)
+    assert task.substate == "HOLD", "没到超时不该退（实际 %s）" % task.substate
+    # 过了 5s ⇒ 进后退重取
+    task._hold_start_ms = 1000
+    task._on_coarse(det, 1000 + int(to) + 100)
+    assert task.substate == "REACQUIRE" or task.last_info.get("action") == "reacquire", \
+        "超时后必须触发后退重取（实际 %s/%s）" % (task.substate, task.last_info.get("action"))
+    assert float(task.last_info.get("surge") or 0.0) < 0.0, "必须是负 surge（后退）"
+
+
+def test_coarse_retreat_heaves_toward_the_missing_corners():
+    """按可见角点决定上浮/下潜：只见下边角(BR/BL) ⇒ 门在上方 ⇒ **上浮**；只见上边角 ⇒ 下潜。
+
+    用户原话："只看到一个角点（BR），后退同时上浮一点，直到看到两个角点进入 width 为止"。
+    """
+    from gate.gate_task import PH_ALIGN
+    amp = float(S.comm.gate.coarse.back_heave)
+    assert amp >= 0.138, "back_heave 必须高于执行器死区 0.138 才有推力（现 %.3f）" % amp
+
+    for ids, want_sign, why in (([2], +1, "只见 BR ⇒ 上浮"), ([3], +1, "只见 BL ⇒ 上浮"),
+                                ([0], -1, "只见 TL ⇒ 下潜"), ([1], -1, "只见 TR ⇒ 下潜")):
+        task = _task(lambda: [])
+        task.phase = PH_ALIGN
+        task.substate = "REACQUIRE"
+        task._reacquire_start = 1000
+        task._reacquire_ratio0 = 0.30
+        task._ids_now = ids
+        task._on_coarse(_coarse_det((0.95, 0.0, 0.0, 0.0) if ids == [0] else (0.0,) * 4), 1500)
+        hv = float(task.last_info.get("heave") or 0.0)
+        assert hv * want_sign > 0, "%s：heave 应为 %s 号（实际 %.3f）" % (why, "+" if want_sign > 0 else "−", hv)
+
+
+def test_coarse_retreat_stops_once_two_corners_are_back():
+    """**够 2 个角点（升到 width）就收手** —— 不追求 full（width 已能测距/居中）。"""
+    from gate.gate_task import PH_ALIGN
+    task = _task(lambda: [])
+    task.phase = PH_ALIGN
+    task.substate = "REACQUIRE"
+    task._reacquire_start = 1000
+    task._ids_now = [2, 3]                      # 两角 ⇒ 已达 width
+    task._on_coarse(_coarse_det((0.0, 0.0, 0.95, 0.95)), 1500)
+    assert task.substate == "HOLD", "够 2 角就该停退（实际 %s）" % task.substate
+    assert float(task.last_info.get("surge") or 0.0) == 0.0, "停退时 surge 必须是 0"

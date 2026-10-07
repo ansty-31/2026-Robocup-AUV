@@ -127,18 +127,19 @@ class GateExits(object):
         G = self._G
         zc = req_node(G, "z")
         sg = req_node(G, "surge")
-        # ⚠️ 有「转完反向平移」窗口时必须**让位**：那个状态是靠 `_set_info` 推进的（唯一派发口），
-        if (self._post_sway_until_ms is None) and not getattr(self, "_lock_stable", False):
-            self._lost_cnt += 1
-            yaw = self._scan.step(now_ms, telemetry_yaw(self.uart))
-            self._set_info("search", substate=self.substate, yaw=yaw)
-            return
         self._lost_cnt += 1
         self._z_guard = False             # 丢目标→解除 z 跳变基准
+        # ★ 2026-10-07：**参照捕获必须在任何早退之前** —— 下面"去扫描"那条路以前直接 return，
+        #   于是丢门参照从来没被记下来过（`preloss` 模型会因此完全失效）。
         if getattr(self, "_relock_z_ref", None) is None and self._z_last is not None:
             self._relock_z_ref = float(self._z_last)   # 记住丢门前的 z（重锁时判是不是同一个门）
         if getattr(self, "_relock_ratio_ref", None) is None and self._dbg_ratio > 1e-6:
             self._relock_ratio_ref = float(self._dbg_ratio)   # z 拿不到时的退路：丢门前的框占比
+        # ⚠️ 有「转完反向平移」窗口时必须**让位**：那个状态是靠 `_set_info` 推进的（唯一派发口），
+        if (self._post_sway_until_ms is None) and not getattr(self, "_lock_stable", False):
+            yaw = self._scan.step(now_ms, telemetry_yaw(self.uart))
+            self._set_info("search", substate=self.substate, yaw=yaw)
+            return
         self._cross_cnt = 0
         pose_hold = int(req(G, "pose_hold_frames"))
         if self.phase in (PH_ALIGN,) and self.substate == SUB_REACQUIRE:

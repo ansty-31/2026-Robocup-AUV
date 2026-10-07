@@ -17,6 +17,7 @@ import base.cfg.settings as S
 from handling.handling_task import (PH_GRAB_ALIGN, PH_GRAB_APPROACH, PH_GRAB_CENTER, PH_GRAB_DIP, PH_GRAB_DONE, PH_GRAB_LEVEL,
                             PH_GRAB_PITCH_UP, PH_GRAB_RISE, PH_GRAB_SEARCH, PH_GRAB_VERIFY, GrabTask,
                             _ratio_radius)
+from common.motion.axis import pitch_up_deg          # 抬头角 = up_sign × up_deg（极性是实测值）
 from handling.percept.cv_ball import Detection
 from handling.percept.grab_detector import circle_to_ratio
 from handling.percept.cage_color import red_percent
@@ -278,15 +279,17 @@ def test_happy_path_phase_order(monkeypatch):
                PH_GRAB_DIP, PH_GRAB_RISE, PH_GRAB_VERIFY, PH_GRAB_DONE):
         assert ph in phases, "相位 %s 没走到：%s" % (ph, phases)
     assert phases.index(PH_GRAB_APPROACH) < phases.index(PH_GRAB_LEVEL) < phases.index(PH_GRAB_ALIGN)
-    assert uart.turns[0] == (2, 30.0), "第一次轴动作 = pitch +30°，实际 %s" % uart.turns[:2]
-    assert uart.turns[1] == (2, -30.0), "第二次 = 回水平，实际 %s" % uart.turns[:2]
+    # 抬头角 = up_sign × up_deg（极性是**现场实测值**，别写死 ±30）
+    up = pitch_up_deg()
+    assert uart.turns[0] == (2, pytest.approx(up)), "第一次轴动作 = 抬头，实际 %s" % uart.turns[:2]
+    assert uart.turns[1] == (2, pytest.approx(-up)), "第二次 = 回水平（反向），实际 %s" % uart.turns[:2]
 
 
-def test_center_uses_yaw_only(monkeypatch):
-    """居中段：只转 yaw，**不前进/不横移**（否则会撞目标）。
+def test_center_uses_sway_only_never_yaw(monkeypatch):
+    """居中段：**dx → sway（平移）**，**永远不发 yaw**（用户 2026-10-06：夹取任务不需要旋转）。
 
-    ⚠️ `heave` 这一路在抬头工作段（SEARCH/CENTER/APPROACH）已归**定深**管（用户 2026-10-06：
-    深度控制在 0.5~0.6）⇒ 这里把深度放进区间内，验证"定深不动手"时 heave 就是 0。
+    ⚠️ `heave` 在抬头工作段（SEARCH/CENTER/APPROACH）归**定深**管 ⇒ 这里把深度放进区间内，
+    验证「定深不动手」时 heave 就是 0。
     """
     uart = FakeUart(depth=0.58)          # 区间内 ⇒ 定深不动作
     task, be = _task(monkeypatch, uart)
@@ -295,8 +298,27 @@ def test_center_uses_yaw_only(monkeypatch):
     be.cx = W / 2.0 + 0.5 * W / 2.0            # dx = +0.5
     task.process(_red_frame(), 0)
     surge, sway, heave, yaw = uart.dofs[-1]
-    assert abs(yaw) > 0.0, "没居中就该转"
-    assert (surge, sway, heave) == (0.0, 0.0, 0.0)
+    assert abs(sway) > 0.0, "没居中就该平移（sway）"
+    assert yaw == 0.0, "夹取任务不需要旋转：不许发 yaw"
+    assert (surge, heave) == (0.0, 0.0)
+
+
+def test_the_whole_grab_run_never_commands_yaw(monkeypatch):
+    """★ 全程硬断言：整个夹取流程（抬头→扫描→居中→对准→回水平→轻微对准→下压→上升→验色）
+    **一帧 yaw 都不发**（用户 2026-10-06：这个任务不需要旋转）。
+
+    抬头/回水平走的是「指定角度轴任务」（`request_turn`，byte[7]=2 那条），**不是** yaw DOF ⇒
+    `uart.dofs` 里 yaw 恒 0、`uart.turns` 里只许出现 pitch，才算数。
+    """
+    uart = FakeUart()
+    task, be = _task(monkeypatch, uart)
+    _drive(task, uart, be, radius=_grow, frame=_red_frame())
+    assert task.last_info["reason"] == "grab_ok"
+    assert uart.dofs, "得有帧才说明跑过"
+    bad = [d for d in uart.dofs if abs(d[3]) > 1e-9]
+    assert not bad, "这些帧发了 yaw：%s" % bad[:5]
+    assert [t for t in uart.turns if t[0] != 2] == [], \
+        "只许动 pitch（byte[7]=2）；yaw/roll 都不该被夹取流程用到：%s" % (uart.turns,)
 
 
 def test_align_level_uses_sway_and_surge_but_never_yaw(monkeypatch):
@@ -319,12 +341,14 @@ def test_align_level_uses_sway_and_surge_but_never_yaw(monkeypatch):
 
 
 def test_level_angle_follows_the_measured_pitch(monkeypatch):
-    """回水平用**实测**：抬头只到 +25° 时，回位必须是 −25°，不是写死的 −30°。"""
+    """回水平用**实测**：抬头只到 25/30 时，回位角 = 它自己那条的反量（不写死角度）。"""
     uart = FakeUart(pitch_gain=25.0 / 30.0)
     task, be = _task(monkeypatch, uart)
     _drive(task, uart, be, radius=_grow, frame=_red_frame())
-    assert uart.turns[0] == (2, 30.0)
-    assert uart.turns[1] == (2, -25.0), "回位角应是实测的反解，实际 %s" % (uart.turns[:2],)
+    up = pitch_up_deg()
+    assert uart.turns[0] == (2, pytest.approx(up))
+    assert uart.turns[1] == (2, pytest.approx(-up * 25.0 / 30.0)), \
+        "回位角应是实测的反解，实际 %s" % (uart.turns[:2],)
 
 
 def test_no_pitch_telemetry_stops_instead_of_dipping(monkeypatch):

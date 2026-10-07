@@ -188,6 +188,14 @@ AUV_TASK_LOG=log/grab.jsonl python3 main.py --task grab      # 任务三 夹取�
 AUV_TASK_LOG=log/place.jsonl python3 main.py --task place     # 任务四 放置（运输 → 横倾放球 → 停动力 3s）
 AUV_TASK_LOG=log/full.jsonl python3 main.py --task handling   # 先夹取，成功后同一实例交接给放置
 #   ^ AUV_TASK_LOG 是**逐帧 JSON 日志**（相位/判据/通道/遥测），判读见下面的 analyze_task_log.py
+#   ★ 顺带自动生成"**冲刺专表**"：<同名>_through.jsonl —— 只记 THROUGH 段（enter→逐帧→exit，
+#     带 dur_ms/pass），复盘时 `grep '"evt":"enter"'` 就能把每次穿门拎出来。
+#     也可单独指定：AUV_THROUGH_LOG=log/dash.jsonl（此时不必再设 AUV_TASK_LOG）
+AUV_RECORD=log/run.mjpeg python3 main.py --task gate         # ★ 任务过程录像（带 HUD，零转码 mjpeg）
+#   ^ ★ **默认不录**（三个变量都不设 ⇒ 不建文件、一帧都不写）。要关也可以显式写：
+#     AUV_RECORD=0|off|no|false|none|-  ⇒ 即使 AUV_RECORD_DIR 也设了也不录。
+#     AUV_RECORD=<路径> / AUV_RECORD_DIR=<目录>（自动命名）；AUV_RECORD_Q 画质(默认85)
+#     ⚠️ 逐帧同步写盘：720p/Q85 约 60~90 KB/帧 ⇒ 20 分钟 ≈ 800MB，先 df -h 看余量
 python3 preview_detect.py --gate-kpt     # 下水前：门框 + 4 角点 + 置信度（船不动）
 python3 tools/analyze/log/analyze_task_log.py log/*.jsonl   # 下水后：逐帧日志判读（相位/出口/通道能动力）
 python3 tools/analyze/log/feature_coverage.py log/*.jsonl   # 下水后：这轮**哪些功能没被用到**
@@ -197,6 +205,13 @@ python3 tools/analyze/calib/pnp_calib.py --report r.md log/pnp_*/pnp_z*.jsonl  #
 > 训练工程下的**其他文件只读**，不要在本工程的任务里顺手改它们。
 
 ### 真机编排（.sh，见 task/）
+
+> ★ 2026-10-07：三个 `task/run_*.sh` 改成 **一趟一个目录** —— 本次所有日志都落在
+> `log/<TAG>_<月日_时分>/` 下（同分钟重复跑自动加 `_1` 后缀，不覆盖上一趟）：
+> `gate_1.jsonl … gate_N.jsonl`（**每个门一份**）、每份对应的 `gate_N_through.jsonl`、
+> `ball.jsonl`、`path.csv`、`grab.jsonl`。
+> 可覆盖：`AUV_LOG_DIR`（本趟目录）/ `AUV_LOG_TAG`（目录前缀）；
+> 老的 `AUV_GATE_LOG_PREFIX` / `AUV_BALL_LOG` / `AUV_GRAB_LOG` 显式指定时仍走老路径（向后兼容）。
 ```bash
 cd task && ./run_ball_reverse.sh      # 待机→(可选)下潜→(可选)前进→撞球→倒车→前进2s→左转90°→过门
 AUV_GATE_AFTER=0 ./run_ball_reverse.sh   # 只做前 7 步（分段试，不接过门）
@@ -263,6 +278,20 @@ python3 preview_detect.py --gate-kpt         # 下水前：门框 + 4 角点 + �
   `handling/motion/{phases,actions,params}.py`（与 `gate/` 同规）。细节见 `handling/README.md`。
 
 ## 参数（cfg/*.yaml）
+
+> ★★ **2026-10-07：代码里的"兜底默认值"已全部删除** —— 参数**只有一处来源：`cfg/*.yaml`**。
+>
+> - 读参数一律走 `common/cfg/cfgnode.py` 的**必填**访问器：`req` / `req_flag` / `req_node`
+>   （缺键 ⇒ `MissingCfg` 并**报出键名**；不再静默用代码里的同值默认）。
+>   `pid_kw(node, where)` 也是五键必填。
+> - 每个模块保留一份**键名清单**（`_K_ALIGN` / `_K_Z` / `_K_HDG` …）：它不是默认值表，
+>   只用来做"cfg 里出现的键必须真被读到"的守卫（拼错键名会静默失效，这条能当场抓到）。
+> - **启动自检**：`GateTask.validate_cfg()` 在构造时把全部清单逐项核对，一次报全缺口。
+>   为什么要它：`req()` 是"用到才报"的惰性检查，而 `z.cross` 只在**门口的位姿帧**才被读
+>   ⇒ 只靠它的话，缺键会一路跑到门口才炸。
+> - 改参数**只需动 `cfg/comm.yaml` 或 `cfg/vision.yaml` 一处**，不必再同步任何代码。
+> - 三键同值用 **YAML 锚点**写在 cfg 里（例：`slow_max: &door_m 1.5`，`cross: *door_m`，
+>   `width.z_max: *door_m`）—— 改锚点一处，三处同时变。
 `vision.yaml`：camera(front/down)、`image.*`（**ball/gate 共用图像链路，勿改**）、`model.*`
 （含 `task_models.gate`）、`gate.*`（几何/keypoint/PnP/kpt_mem 开关）、`stream.*`；
 `comm.yaml`：serial/dof_map/心跳/急停/ramp/**depth_guard(限深保护)**/**motion（ball/gate 共用的

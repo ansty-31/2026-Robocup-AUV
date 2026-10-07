@@ -153,6 +153,12 @@ class GateModes(object):
         """width 档：只有对向 2 角（上边或下边），信息只够"水平中点 + 框心竖直"，不解 PnP。"""
         if self._tick_hdg_degraded(now_ms):
             return
+        # ★ 2026-10-07 用户定：**已在"后退重取"中就继续退**，别在这里重新触发。
+        #   （`_tick_reacquire` 原来只在"门丢了"那条路上被调；width 有框，能拿到 ratio，
+        #     所以这里传 ratio 进去 ⇒ 闭环"退到框明显变小就停"能正常工作。）
+        if self.substate == SUB_REACQUIRE:
+            self._tick_reacquire(now_ms, float(det.w) / float(self.w))
+            return
         if self._down_sees_red_bar():
             # ★ 下视看到门框底部红色横杆 ⇒ 机身已到门口/进门 ⇒ creep_through 慢速冲门
             self._start_creep_through()
@@ -222,20 +228,31 @@ class GateModes(object):
         if self.phase == PH_ALIGN:
             if self._loiter_commit(dxn, dyn, float(det.w) / float(self.w), now_ms):
                 return
-            # 出口①：距门仍远且对中 → 慢 creep（有限信息下安全推进）
-            if aligned and z > req(W, "z_max"):
-                self.substate = SUB_CREEP
-                self._center_cnt += 1
-                surge = req(sg, "creep")
-                if self._center_cnt >= int(req(al, "confirm_frames")):
-                    self.phase = PH_APPROACH
-                    self.substate = ""
-            else:
-                self.substate = SUB_HOLD
-                surge = 0.0
-            self._set_info("creep" if surge > 0 else "hold", mode=MODE_WIDTH,
-                           z=z, dx=dxn, dy=dyn, sway=sway, heave=heave,
-                           surge=surge, yaw=yaw)
+            # ★★ 2026-10-07 用户定：**width 是降级档（只有 2 个角点、信息不足）——
+            #   不在这里"往前蹭"，一律回退重取**，把门重新拉远、拿回 4 角点，
+            #   交给 full/p3p 的正常链路去对准与冲刺。
+            #   · 居中成功 ⇒ **也退**（width 里硬冲不安全；退回去让整门重新进视野）
+            #   · 贴脸(z ≤ width.z_max)且没对准 ⇒ 退（与 coarse 档同一套逻辑）
+            #   · 还远且没对准 ⇒ 原地 HOLD（先对中，别乱动）
+            _why = None
+            if aligned:
+                _why = "居中成功(width)"
+            elif z <= req(W, "z_max"):
+                _why = "贴脸未对准(width)"
+            if _why is not None:
+                if S.DEBUG:
+                    print("[GATE] width 档(%s, ratio=%.2f z=%.2f kpt=%d) → 回退重取"
+                          % (_why, float(det.w) / float(self.w), z, self._dbg_kpt))
+                self._enter_reacquire(now_ms, float(det.w) / float(self.w))
+                if self.substate == SUB_REACQUIRE:      # 没被 max_times 拦下 ⇒ 真在退
+                    self._set_info("reacquire", mode=MODE_WIDTH, z=z, dx=dxn, dy=dyn,
+                                   sway=sway, heave=heave,
+                                   surge=-req(sg, "reacquire"), yaw=yaw,
+                                   kpt=self._dbg_kpt)
+                return
+            self.substate = SUB_HOLD
+            self._set_info("hold", mode=MODE_WIDTH, z=z, dx=dxn, dy=dyn,
+                           sway=sway, heave=heave, surge=0.0, yaw=yaw)
             return
         # ⚠️ 上面的 creep 与 `_loiter_commit` 两个出口都在 `if self.phase == PH_ALIGN:`
         self._set_info("center", mode=MODE_WIDTH, z=z, dx=dxn, dy=dyn,
@@ -257,7 +274,8 @@ class GateModes(object):
         ratio = float(det.w) / float(self.w)
         # 已在 REACQUIRE：闭环后退（退到框够小即停）或超时回 search
         if self.phase == PH_ALIGN and self.substate == SUB_REACQUIRE:
-            self._tick_reacquire(now_ms, ratio)
+            # ★ 传本帧有效角点 id ⇒ 走"按角点反向慢移 + 够 2 角收手"那条
+            self._tick_reacquire(now_ms, ratio, ids=list(getattr(self, "_ids_now", None) or []))
             return
         cx, cy = bbox_center(det)
         _cx0, _cy0 = self._center_ref()          # ★ 基准=主点
@@ -286,24 +304,36 @@ class GateModes(object):
 
         if self._loiter_commit(dxn, dyn, ratio, now_ms):
             return
-        if aligned:
-            # 对准：能靠近就靠近（争取露出角点），不再中距干等
-            self.substate = SUB_CREEP
-            self._hold_cnt = 0
-            self._set_info("creep", z=self._z_last, dx=dxn, dy=dyn,
-                           sway=sway, heave=heave, yaw=yaw,
-                           surge=req(sg, "creep"), kpt=self._dbg_kpt)
-            return
+        # ★★ 2026-10-07 用户定：**删掉原"对准就往前蹭（争取露出角点）"那条** ——
+        #   coarse 是降级档，**除了门口超时兜底（`_loiter_commit` / 下视红杆）之外，
+        #   一律不许触发前进**：盲着往前顶，既露不出角点，又离撞门更近。
+        #   对不准就往后退（下面前三条），对准了也只是"原地等"（HOLD，计时照走），
+        #   等到 HOLD 超时 ⇒ 按可见角点反向慢移 ⇒ 够 2 角进 width。
 
         if ratio < req(C, "far_ratio"):       # 远距小框：没对准就别冲
             self.substate = SUB_CREEP
+            self._hold_start_ms = None            # 往前蹭 ⇒ HOLD 计时作废
             self._set_info("center", z=self._z_last, dx=dxn, dy=dyn,
                            sway=sway, heave=heave, yaw=yaw, kpt=self._dbg_kpt)
         elif ratio <= req(C, "near_ratio"):   # 中距 → HOLD（无位姿即无进展）
             self.substate = SUB_HOLD
             self._hold_cnt += 1
-            if self._hold_cnt >= int(req(H, "max_frames")):
+            # ★★ 2026-10-07 用户定：HOLD **超时 5s** 就触发后退（原来按帧数 `hold.max_frames`
+            #   20 帧≈2s，偏紧且与主循环频率耦合）。超时后按"可见角点"反向慢移，
+            #   够 2 角（→ width）就收手 —— 见 `_tick_reacquire`。
+            if self._hold_start_ms is None:
+                self._hold_start_ms = now_ms
+            _hold_to = req(C, "hold_timeout_ms")
+            if (_hold_to > 0 and now_ms - self._hold_start_ms >= _hold_to) or \
+                    self._hold_cnt >= int(req(H, "max_frames")):
+                self._hold_start_ms = None
                 self._enter_reacquire(now_ms, ratio)
+                if self.substate == SUB_REACQUIRE:
+                    # ★ 真进了后退 ⇒ **本帧就要把动作/通道写出来**（原来不写 ⇒ 日志里那一帧
+                    #   还留着上一帧的 hold，看不出"开始退了没有"）
+                    self._set_info("reacquire", mode=MODE_COARSE, z=self._z_last,
+                                   dx=dxn, dy=dyn, sway=sway, heave=heave, yaw=yaw,
+                                   surge=-req(sg, "reacquire"), kpt=self._dbg_kpt)
             else:
                 self._set_info("hold", z=self._z_last, dx=dxn, dy=dyn,
                                sway=sway, heave=heave, yaw=yaw, kpt=self._dbg_kpt)
@@ -348,11 +378,36 @@ class GateModes(object):
             print("[GATE] REACQUIRE #%d: 角不足/过近 (ratio=%.2f kpt=%d hold=%d)"
                   " → 后退重取" % (self._reacquire_cnt, self._dbg_ratio,
                                   self._dbg_kpt, self._hold_cnt))
-    def _tick_reacquire(self, now_ms, ratio=None):
-        """后退重取：**闭环** —— 退到框够小就停，不再固定退满 max_ms。"""
+    def _tick_reacquire(self, now_ms, ratio=None, ids=None):
+        """后退重取：**闭环** —— 退到框够小就停，不再固定退满 max_ms。
+
+        ★★ 2026-10-07 用户定：**coarse 档按"已知角点"反向慢移**（`ids` 非空时生效）：
+          · 只见**下边角**(BL/BR) ⇒ 门在视野**上方** ⇒ 后退时**上浮**一点
+            （用户原话："只看到一个角点（BR），后退同时上浮一点"）
+          · 只见**上边角**(TL/TR) ⇒ 门在下方 ⇒ 下潜一点
+          · **够 2 个角点（升到 width）就收手** —— 不追求 full（width 已经能测距/居中）
+        `ids is None`（= 门丢了那条路）时退化为纯后退（原行为）。
+        """
         G = self._G
         R = req_node(G, "reacquire")
         sg = req_node(G, "surge")
+        # ---- coarse：按可见角点引导 ----
+        heave = 0.0
+        if ids is not None:
+            if len(ids) >= 2:
+                # 够 width 了 ⇒ 停退，交回对准（下一帧自然走 width 档）
+                self.substate = SUB_HOLD
+                self._hold_cnt = 0
+                if S.DEBUG:
+                    print("[GATE] REACQUIRE 已够 %d 角（进 width）⇒ 停退，交回对准" % len(ids))
+                self._set_info("hold", z=self._z_last, kpt=self._dbg_kpt)
+                return
+            C = req_node(G, "coarse")
+            amp = req(C, "back_heave")
+            if any(i in ids for i in (2, 3)):        # BL / BR 可见 ⇒ 门在上方 ⇒ 上浮
+                heave = +amp
+            elif any(i in ids for i in (0, 1)):      # TL / TR 可见 ⇒ 门在下方 ⇒ 下潜
+                heave = -amp
         r0 = self._reacquire_ratio0
         stop_ratio = req(R, "stop_ratio")
         if ratio is not None and r0 and ratio <= r0 * stop_ratio:
@@ -370,7 +425,7 @@ class GateModes(object):
             return
         surge = -req(sg, "reacquire")
         self._set_info("reacquire", substate=SUB_REACQUIRE, surge=surge,
-                       kpt=self._dbg_kpt)
+                       heave=_dof_clip(heave), kpt=self._dbg_kpt)
     def _relock_guard(self, z):
         """**z 跳变保护**（2026-10-02 用户定）：命中 ⇒ 这一帧的位姿**不采纳**，当作"门丢了"处理"""
         jump = req(sub(self._G, "z"), "relock_z_jump_m")
@@ -399,8 +454,40 @@ class GateModes(object):
             self._relock_z_ref = None          # 同一个门 → 保护解除
         return False
 
+    def _relock_ratio_model(self):
+        """面积参照模型（`comm.gate.z.relock_ratio_model`，**必填**）：
+
+        · `interframe`：帧间占比突变 —— 参照 = **上一帧被采纳的占比**
+        · `preloss`   ：丢门前占比突变 —— 参照在**丢门那一刻固定**，跨丢门比较
+        · `ema`       ：平滑跟踪 —— 参照 = 0.7×旧 + 0.3×本帧
+        """
+        m = (req_node(self._G, "z") or {}).get("relock_ratio_model")
+        if m not in ("interframe", "preloss", "ema"):
+            raise MissingCfg(
+                "cfg 的 comm.gate.z.relock_ratio_model 必须是 interframe/preloss/ema 之一"
+                "（现在是 %r）" % (m,))
+        return str(m)
+
+    def _relock_ratio_note_accepted(self, ratio):
+        """**被采纳帧**上更新面积参照 —— 按模型决定怎么更新（`preloss` 不在这里更新）。"""
+        if ratio is None or ratio <= 1e-6:
+            return
+        m = self._relock_ratio_model()
+        ref = getattr(self, "_relock_ratio_ref", None)
+        if m == "interframe":
+            self._relock_ratio_ref = float(ratio)                 # 只跟上一帧
+        elif m == "ema":
+            self._relock_ratio_ref = (float(ratio) if ref is None
+                                      else 0.7 * float(ref) + 0.3 * float(ratio))
+        # preloss：**故意什么都不做** —— 参照只在丢门那一刻由 `_tick_lost()` 固定
+
     def _relock_guard_ratio(self):
-        """**无位姿时的重锁保护（纯框占比）**：与 postsway 早期"占比退路"同思路。"""
+        """**丢门重锁的面积保护**（纯函数：只判、不改任何状态）。
+
+        ⚠️ 2026-10-07 用户定：这里**不许清任何参照**（原来顺手清了 `_relock_z_ref`，
+        那是 `_relock_guard()` 的，职责越界；本函数每帧都被调用 ⇒ 那个参照活不过一帧）。
+        参照的生命周期由 `_relock_ratio_note_accepted()`（被采纳帧）与丢门/新一轮负责。
+        """
         ref = getattr(self, "_relock_ratio_ref", None)
         ratio = float(getattr(self, "_dbg_ratio", 0.0) or 0.0)
         far = req(sub(self._G, "z"), "relock_far_ratio") or 0.0
@@ -410,9 +497,7 @@ class GateModes(object):
             if not getattr(self, "_relock_logged", False):
                 self._relock_logged = True
                 if S.DEBUG:
-                    print("[GATE] 丢门重锁(占比)：本帧 %.3f < %.2f×丢门前 %.3f → 判为另一个门，拒收该帧"
-                          % (ratio, float(far), float(ref)))
+                    print("[GATE] 丢门重锁(占比/%s)：本帧 %.3f < %.2f×参照 %.3f → 判为另一个门，拒收该帧"
+                          % (self._relock_ratio_model(), ratio, float(far), float(ref)))
             return True
-        self._relock_z_ref = None          # 同一个门 → 保护解除
-        self._relock_ratio_ref = None
         return False
