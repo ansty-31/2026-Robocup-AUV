@@ -243,11 +243,10 @@ def test_uart_real_serial_pty_telemetry_and_guard(monkeypatch):
 
 
 # 限深保护：深度不足时禁止上浮（机身不得冒出水面）
-def _guard_uart(monkeypatch, sent, dof_comp=False):
+def _guard_uart(monkeypatch, sent):
     """SIM 控制器 + 关 ramp（轴直通目标）+ 截获实际发出的帧。"""
     monkeypatch.setitem(S.comm.ramp, "speed_per_s", 0.0)
     monkeypatch.setitem(S.comm.depth_guard, "enable", True)
-    monkeypatch.setitem(S.comm.dof_comp, "enable", bool(dof_comp))
     u = U.UartController(sim=True)
     monkeypatch.setattr(u, "_write", lambda frame, force=False:
                         (sent.append(bytes(frame)), True)[1])
@@ -295,24 +294,22 @@ def test_depth_guard_blocks_surfacing_only(monkeypatch):
     u.close()
 
 
-def test_dive_boost_scales_downward_only(monkeypatch):
-    """**下潜动力单独放大**（底层共用，撞球/过门都吃）：只乘 heave<0，其余通道原样。"""
+def test_dive_uses_normal_thrust(monkeypatch):
+    """下潜与上浮使用相同的原始动力幅值，不再额外放大。"""
     sent = []
-    u = _guard_uart(monkeypatch, sent, dof_comp=True)
+    u = _guard_uart(monkeypatch, sent)
     mid = S.comm.frame.axis_mid
-    k = float(S.comm.dof_comp.dive_scale)
-    assert k > 1.0, "dive_scale 应大于 1（否则等于没放大）"
 
-    u.send_dof(heave=-0.2, force=True)                 # 下潜 → 按倍数放大
-    assert u.dof_out[2] == pytest.approx(-0.2 * k)
+    u.send_dof(heave=-0.2, force=True)
+    assert u.dof_out[2] == pytest.approx(-0.2)
     assert list(sent[-1])[3] < mid, "heave 轴字节应低于中位（下潜方向）"
 
-    u.send_dof(heave=-0.9, force=True)                 # 放大后超范围 → 夹到 -1.0
-    assert u.dof_out[2] == pytest.approx(-1.0)
+    u.send_dof(heave=-0.9, force=True)
+    assert u.dof_out[2] == pytest.approx(-0.9)
 
-    u.send_dof(heave=0.2, force=True)                  # 上浮 → 不动
-    assert u.dof_out[2] == pytest.approx(0.2), "上浮不该被放大"
-    u.send_dof(heave=0.0, sway=-0.2, yaw=0.2, force=True)   # 悬停/平移/转向 → 不动
+    u.send_dof(heave=0.2, force=True)
+    assert u.dof_out[2] == pytest.approx(0.2)
+    u.send_dof(heave=0.0, sway=-0.2, yaw=0.2, force=True)
     assert u.dof_out[2] == pytest.approx(0.0)
     assert u.dof_out[1] == pytest.approx(-0.2), "平移不该被放大"
     assert u.dof_out[3] == pytest.approx(0.2), "转向不该被放大"

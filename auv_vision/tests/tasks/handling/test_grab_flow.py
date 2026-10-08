@@ -211,8 +211,8 @@ def test_refuses_to_run_without_the_depth_floor_capability(monkeypatch):
     assert uart.dofs == []
 
 
-def test_floor_is_raised_before_the_first_axis_command_and_cleared_at_exit(monkeypatch):
-    """★ 安全不变量：**先抬限深下限，再发第一个轴指令**；任务结束必须撤回（0）。"""
+def test_floor_is_set_at_init_and_cleared_at_exit_without_pitch(monkeypatch):
+    """初始化设置任务限深，结束撤回；正常抓取无 pitch 轴任务。"""
     uart = FakeUart()
     task, be = _task(monkeypatch, uart)
     _drive(task, uart, be, radius=_grow, frame=_red_frame())
@@ -222,20 +222,20 @@ def test_floor_is_raised_before_the_first_axis_command_and_cleared_at_exit(monke
     floor = float(S.comm.grab.depth_floor_m)
     assert uart.events[0] == "floor:%.2f" % floor, \
         "第一件事必须是把下限抬到 cfg 值 %.2f，实际 %s" % (floor, uart.events[:2])
-    first_turn = next(i for i, e in enumerate(uart.events) if e.startswith("turn:"))
-    assert first_turn == 1, "抬下限与第一个轴指令之间不该插别的事：%s" % uart.events[:3]
+    assert uart.turns == []
     assert uart.extra_min_depth_m == pytest.approx(0.0), "任务结束必须撤回任务级下限"
     assert float(S.comm.depth_guard.min_depth_m) == pytest.approx(0.50), \
         "全局限深是现场定死值（2026-10-06 定为 0.50），任务不许动它"
 
 
-def test_pitch_up_waits_for_depth_instead_of_driving_shallow(monkeypatch):
-    """深度不够 ⇒ 先下潜；到不了就**放弃抬头**（不发任何轴指令）。"""
+def test_search_depth_hold_descends_without_pitch(monkeypatch):
+    """搜索保留定深下潜，但不再启动抬头动作。"""
     from common.motion.axis import grab_cfg
     uart = FakeUart(depth=float(grab_cfg()["depth_floor_m"]) - 0.15)   # ★ cfg 派生，别写死米数
     task, be = _task(monkeypatch, uart)
-    _drive(task, uart, be, frames=200, radius=_grow, frame=_red_frame())
-    assert task.last_info["reason"] == "depth_depth_timeout"
+    monkeypatch.setattr(be, "circles", lambda frame: [])
+    _drive(task, uart, be, frames=20, frame=_red_frame())
+    assert task._phase == PH_GRAB_SEARCH
     assert uart.turns == [], "深度不够时绝不许抬头"
     assert any(d[2] < 0 for d in uart.dofs), "应该真的在下潜"
 
@@ -272,20 +272,16 @@ def test_missing_down_frame_never_moves_blindly(monkeypatch):
 # 相位顺序与通道
 # --------------------------------------------------------------------------- #
 def test_happy_path_phase_order(monkeypatch):
-    """完整通过：抬头 → 搜索 → yaw 居中 → 对准前进 → 回水平 → 轻微对准 → 下压 → 上升 → 验色。"""
+    """完整通过：搜索 → 交替居中 → 接近 → 对准 → 下压 → 上升 → 验色。"""
     uart = FakeUart()
     task, be = _task(monkeypatch, uart)
     phases = _drive(task, uart, be, radius=_grow, frame=_red_frame(), phases=[])
     assert task.last_info["reason"] == "grab_ok"
     assert task.holds_ball is True
-    for ph in (PH_GRAB_PITCH_UP, PH_GRAB_SEARCH, PH_GRAB_CENTER, PH_GRAB_APPROACH, PH_GRAB_LEVEL, PH_GRAB_ALIGN,
-               PH_GRAB_DIP, PH_GRAB_RISE, PH_GRAB_VERIFY, PH_GRAB_DONE):
-        assert ph in phases, "相位 %s 没走到：%s" % (ph, phases)
-    assert phases.index(PH_GRAB_APPROACH) < phases.index(PH_GRAB_LEVEL) < phases.index(PH_GRAB_ALIGN)
-    # 抬头角 = up_sign × up_deg（极性是**现场实测值**，别写死 ±30）
-    up = pitch_up_deg()
-    assert uart.turns[0] == (2, pytest.approx(up)), "第一次轴动作 = 抬头，实际 %s" % uart.turns[:2]
-    assert uart.turns[1] == (2, pytest.approx(-up)), "第二次 = 回水平（反向），实际 %s" % uart.turns[:2]
+    assert phases == [PH_GRAB_SEARCH, PH_GRAB_CENTER, PH_GRAB_APPROACH,
+                      PH_GRAB_ALIGN, PH_GRAB_DIP, PH_GRAB_RISE,
+                      PH_GRAB_VERIFY, PH_GRAB_DONE]
+    assert uart.turns == []
 
 
 def test_center_uses_translation_only_never_yaw(monkeypatch):
@@ -347,26 +343,26 @@ def test_align_level_uses_sway_and_surge_but_never_yaw(monkeypatch):
         "surge 超了 align_level.surge 的 out_max"
 
 
-def test_level_angle_follows_the_measured_pitch(monkeypatch):
-    """回水平用**实测**：抬头只到 25/30 时，回位角 = 它自己那条的反量（不写死角度）。"""
+def test_grab_does_not_request_pitch_even_with_nonzero_pitch_setting(monkeypatch):
+    """即使旧配置的抬头角非零，新流程仍不发 pitch。"""
+    monkeypatch.setitem(S.comm.grab.pitch, "up_deg", 30.0)
     uart = FakeUart(pitch_gain=25.0 / 30.0)
     task, be = _task(monkeypatch, uart)
     _drive(task, uart, be, radius=_grow, frame=_red_frame())
-    up = pitch_up_deg()
-    assert uart.turns[0] == (2, pytest.approx(up))
-    assert uart.turns[1] == (2, pytest.approx(-up * 25.0 / 30.0)), \
-        "回位角应是实测的反解，实际 %s" % (uart.turns[:2],)
+    assert task.last_info["reason"] == "grab_ok"
+    assert uart.turns == []
 
 
-def test_no_pitch_telemetry_stops_instead_of_dipping(monkeypatch):
-    """拿不到 pitch 遥测 ⇒ 回不了水平 ⇒ **绝不下压**（按着角度压会撞坏东西）。"""
+def test_grab_no_longer_requires_pitch_for_a_leveling_action(monkeypatch):
+    """任务不再等待回水平的 pitch 遥测；外层姿态保护仍独立负责。"""
     uart = FakeUart()
     uart.telemetry.pitch_deg = None
     task, be = _task(monkeypatch, uart)
     _drive(task, uart, be, radius=_grow, frame=_red_frame())
-    assert task.last_info["reason"] == "no_pitch_telemetry"
+    assert task.last_info["reason"] == "grab_ok"
+    assert uart.turns == []
     dip_heave = float(S.comm.grab.dip["heave"])
-    assert not any(abs(d[2] - dip_heave) < 1e-9 for d in uart.dofs), "不许下压"
+    assert any(abs(d[2] - dip_heave) < 1e-9 for d in uart.dofs)
 
 
 def test_detection_uses_the_down_frame_not_the_front_frame(monkeypatch):
@@ -401,12 +397,10 @@ def test_wrong_ball_is_dumped_then_the_second_attempt_is_assumed_ok(monkeypatch)
     # 倒球序列：先右移(sway>0)、再左移(sway<0)、再后退(surge<0)
     assert any(d[1] > 0 for d in uart.dofs) and any(d[1] < 0 for d in uart.dofs)
     assert any(d[0] < 0 for d in uart.dofs)
-    # 两次尝试 ⇒ 每次「抬头 + 回水平」= 4 个 pitch 轴任务。
-    # ⚠️ 别按"角度值"计数：cfg 把 up_deg 设成 0.0（试"不抬头"）时抬头与回水平是同一个元组。
+    # 倒球重试直接回搜索，不再抬头；roll 倒球与回正仍保留。
     pitch_turns = [t for t in uart.turns if t[0] == 2]
-    assert len(pitch_turns) == 4, "倒球后必须重新抬头再夹一次，实际 %s" % (uart.turns,)
-    assert pitch_turns[0] == (2, pytest.approx(pitch_up_deg()))
-    assert pitch_turns[1] == (2, pytest.approx(-pitch_up_deg()))
+    assert pitch_turns == []
+    assert phases.count(PH_GRAB_SEARCH) == 2
     assert PH_GRAB_DIP in phases
 
 

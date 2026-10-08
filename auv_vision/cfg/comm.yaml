@@ -55,10 +55,6 @@ depth_guard:  # 限深保护：只压上浮，不动前进/转向
   snap: true  # 触发时 heave 轴当帧直接回中
   log_ms: 1000  # 触发告警打印节流(ms
 
-dof_comp:  # **底层共用**：单独调"下潜"这一路动力
-  enable: true  # 只对 heave<0
-  dive_scale: 2.0  # 下潜指令 × 它再夹到 [-1,0]
-
 motion:  # **ball / gate 共用的底层运动参数**
   # ★★ 2026-10-07 用户定（修"sway 一直顶在 ±0.55"，依据 log/rungate_20261006_postsway
   #   有测量 236 帧）：`kp 8.0 → 1.0`、`kd 0.05 → 0.02`、**新增 `bias: 0.138`（执行器死区补偿）**。
@@ -165,6 +161,8 @@ grab:  # 任务三 夹取小球（决策层 2026-10-06 起建；**感知全程�
   #      刚出死区的幅值对**前进**已经太猛（该机前进推力大）⇒ 前进靠**短脉冲**慢下来。
   #   ⚠️ 别把 duty 压到 ~0.1 以下 / 窗口缩到几十 ms：推进器来不及起转 ⇒ 变成"完全不走"。
   #   center 最稀、align 次之、approach 减半（还要能接近；不行就往上调它）。
+  # CENTER：左右250ms窗口→前后300ms窗口交替，窗口内沿用各自占空比；重新居中从左右开始。
+  # enable=false 只关闭窗口内的脉冲，CENTER 两轴仍互斥交替。
   duty: {enable: true, duty: 0.35, duty_window_ms: 250, duty_window_ms_surge: 300,
          duty_surge: 0.2, duty_surge_center: 0.15, duty_surge_align: 0.2, duty_surge_approach: 0.5}
   depth_floor_m: 0.50    # ★ 翘头时的**安全下限**（工作区间 0.5~0.6，见 depth_hold）
@@ -176,7 +174,7 @@ grab:  # 任务三 夹取小球（决策层 2026-10-06 起建；**感知全程�
   #      要回退：把这个数改回 0.8（一行），或临时 AUV_CFG_DIR 指向一份更保守的 cfg。
   ensure_depth: true     # 抬头前先下潜到该下限；关掉 = 不再"保证不出水面"（默认必须是开）
   ensure_depth_s: 8.0    # 下潜到位的时间上限；超时 → 放弃抬头（不硬顶）
-  descend_heave: -0.40   # 下潜幅值（占位·未标定；下层还有 dof_comp.dive_scale 会再放大）
+  descend_heave: -0.40   # 下潜幅值（占位·未标定；与上浮使用相同的原始推力比例）
   depth_tol_m: 0.05      # 到位容差(m)：深度遥测有量化误差，别贴死
   # ★ 定深（用户 2026-10-06：翘头时深度控制在 **0.5~0.6**，不准太深也不准太浅）
   #   作用范围：只在抬头**工作段**（SEARCH/CENTER/APPROACH）。DIP/RISE 故意变深度（下压/上升）⇒ 不插手；

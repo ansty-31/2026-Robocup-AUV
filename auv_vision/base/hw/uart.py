@@ -276,7 +276,6 @@ class UartController(object):
         dt = max(0.0, (now - self._last_update_ms) / 1000.0)
         self._last_update_ms = now
         self._dof_out = self._apply_depth_guard(*self._dof_target, now_ms=now)
-        self._dof_out = self._apply_dive_boost(*self._dof_out)
         tgt = dof_to_axis_bytes(*self._dof_out)
         step_max = (256.0 if S.comm.ramp.speed_per_s <= 0
                     else S.comm.ramp.speed_per_s * dt)
@@ -370,16 +369,6 @@ class UartController(object):
             v = 0.0
         self.extra_min_depth_m = max(0.0, v) if math.isfinite(v) else 0.0
         return self.effective_min_depth_m
-
-    def _apply_dive_boost(self, surge, sway, heave, yaw):
-        """**下潜动力单独放大**（底层共用机制，撞球/过门都吃）。"""
-        c = S.get("comm.dof_comp", None) or {}
-        if not bool(c.get("enable", True)) or heave >= 0.0:
-            return (surge, sway, heave, yaw)
-        k = abs(float(c.get("dive_scale", 1.0) or 1.0))
-        if k <= 1.0:
-            return (surge, sway, heave, yaw)
-        return (surge, sway, max(-1.0, heave * k), yaw)
 
     def _apply_depth_guard(self, surge, sway, heave, yaw, now_ms=None):
         """上浮(heave>0)限深：当前深度 ≤ 有效下限 → 本帧禁止上浮。

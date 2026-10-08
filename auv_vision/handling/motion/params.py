@@ -12,6 +12,7 @@ from common.motion.axis import task_node
 
 
 PH_GRAB_INIT = "INIT"
+# Deprecated compatibility names: no grab transition enters these phases.
 PH_GRAB_PITCH_UP = "PITCH_UP"
 PH_GRAB_SEARCH = "SEARCH"
 PH_GRAB_CENTER = "CENTER"

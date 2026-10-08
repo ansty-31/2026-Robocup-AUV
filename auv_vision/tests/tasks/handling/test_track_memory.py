@@ -78,12 +78,15 @@ def test_lost_with_history_predicts_a_small_correction_without_faking_centering(
     now = _feed_ball_moving_left(task, be)
     assert task._mem.seen >= 3, "看得见时要记轨迹"
     monkeypatch.setattr(be, "circles", lambda f: [])          # 球不见了
+    predicted_dofs = []
     for _ in range(20):                                       # 越过 grace_frames=15
         task.process(_red_frame(), now)
+        predicted_dofs.append(uart.dofs[-1])
         now += 50
     assert task.last_info["action"] == "lost_predict"
     surge, sway, heave, yaw = uart.dofs[-1]
-    assert sway < 0.0, "球在往左跑 ⇒ 修正也该往左"
+    assert any(d[1] < 0.0 for d in predicted_dofs), "左右窗口必须向左修正"
+    assert all(d[1] <= 0.0 and not (d[0] and d[1]) for d in predicted_dofs)
     assert abs(sway) <= 0.25 + 1e-9, "丢目标时只能小幅修（有硬上限）"
     assert abs(surge) <= 0.12 + 1e-9, "surge 上限更小：绝不盲冲"
     assert heave == 0.0 and yaw == 0.0

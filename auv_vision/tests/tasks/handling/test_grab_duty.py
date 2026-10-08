@@ -34,6 +34,7 @@ def _center_frame(monkeypatch, now_ms, **duty):
     task._phase = PH_GRAB_CENTER
     be.cx = W / 2.0 + 0.5 * W / 2.0
     be.cy = H / 2.0
+    task.process(_red_frame(), 0)
     task.process(_red_frame(), now_ms)
     return uart.dofs[-1], task
 
@@ -134,6 +135,7 @@ def test_gate_does_not_touch_heave_or_search(monkeypatch):
     task._phase = PH_GRAB_CENTER
     be.cx = W / 2.0 + 0.5 * W / 2.0
     be.cy = H / 2.0
+    task.process(_red_frame(), 0)
     task.process(_red_frame(), 130)                            # 闸门"停"的半区
     surge, sway, heave, _yaw = uart.dofs[-1]
     assert sway == 0.0, "平移该被闸住"

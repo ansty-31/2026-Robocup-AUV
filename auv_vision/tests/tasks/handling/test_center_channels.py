@@ -33,16 +33,30 @@ def _center_dofs(monkeypatch, dx, dy, depth=None):
     return uart.dofs[-1], task
 
 
-def test_center_maps_dx_to_sway_and_dy_to_surge(monkeypatch):
-    """★ dx→sway、dy→surge，**不发 yaw**；heave 归定深（区间内 = 0）。"""
+def test_center_maps_dx_to_sway_then_dy_to_surge(monkeypatch):
+    """★ 居中左右优先：dx 未达标时只发 sway，dx 达标后才发 surge。"""
     (surge, sway, heave, yaw), _ = _center_dofs(monkeypatch, dx=0.5, dy=0.4)
     assert sway > 0.0, "dx>0 应该有横向输出"
-    assert surge > 0.0, "dy>0 应该有前后输出（下视相机里画面上方 = 前方）"
+    assert surge == 0.0, "左右未对齐时不应该前进"
     assert yaw == 0.0, "夹取任务不需要旋转"
     assert heave == 0.0, "heave 归定深，居中不许碰"
 
     (surge2, sway2, _h, _y), _ = _center_dofs(monkeypatch, dx=-0.5, dy=-0.4)
-    assert sway2 < 0.0 and surge2 < 0.0, "反向偏差应该反向输出"
+    assert sway2 < 0.0 and surge2 == 0.0, "左右未对齐时只允许反向横移"
+
+
+def test_center_starts_with_sway_then_allows_surge(monkeypatch):
+    """即使左右已对齐，也按窗口交替；不用的窗口输出零。"""
+    (surge, sway, heave, yaw), _ = _center_dofs(monkeypatch, dx=0.5, dy=0.4)
+    assert sway != 0.0 and surge == 0.0
+    assert heave == 0.0 and yaw == 0.0
+
+    (surge, sway, heave, yaw), task = _center_dofs(monkeypatch, dx=0.0, dy=0.4)
+    assert surge == 0.0 and sway == 0.0
+    task.process(_red_frame(), float(S.comm.grab.duty.duty_window_ms))
+    surge, sway, heave, yaw = task.uart.dofs[-1]
+    assert surge != 0.0 and sway == 0.0
+    assert heave == 0.0 and yaw == 0.0
 
 
 def test_center_sway_is_the_grab_tasks_own_smaller_set(monkeypatch):
@@ -105,5 +119,5 @@ def test_center_gains_are_overridable_from_cfg_without_touching_shared(monkeypat
     own = grab_node()["pid_sway"]
     ratio = float(_cvnode("center").get("surge_ratio", 0.5))
     assert task._pid_csu.kp == pytest.approx(float(own["kp"]) * ratio, rel=0.01)
-    assert sway != 0.0 and surge != 0.0
+    assert sway != 0.0 and surge == 0.0
     assert _cvnode("center")["eps"] > 0.0

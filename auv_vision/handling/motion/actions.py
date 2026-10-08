@@ -141,10 +141,25 @@ class HandlingActions(object):
         """按 `comm.grab.duty` 给**平移**做脉冲闸门（用户 2026-10-07：速度还是太快）。
 
         * 只作用于 sway/surge；`heave` 归定深、`yaw` 恒 0 ⇒ 不碰；
-        * `enable: false` 或 `duty: 1.0` ⇒ 原样通过（一行退回旧行为）；
+        * CENTER 先左右窗口再前后窗口；关脉冲也仍保持交替互斥；
+        * APPROACH/ALIGN 维持各自的原有脉冲；关闭后两路原样通过；
         * 幅值**不变** ⇒ 不会掉到执行器死区之下（这是"能真的更慢"的唯一办法）。
         """
         d = _cvnode("duty")
+        if str(phase) == "CENTER":
+            # 同一出口也覆盖 lost_predict，防止预测分支同时驱动两个平移轴。
+            if self._center_start_ms is None:
+                self._center_start_ms = now_ms
+            w_sw = max(1.0, num(d, "duty_window_ms", 250.0))
+            w_su = max(1.0, num(d, "duty_window_ms_surge", w_sw))
+            elapsed = max(0.0, float(now_ms - self._center_start_ms))
+            slot = elapsed % (w_sw + w_su)
+            enabled = flag(d, "enable", True)
+            if slot < w_sw:
+                duty = num(d, "duty", 1.0) if enabled else 1.0
+                return 0.0, duty_gate(sway, slot, duty, w_sw)
+            duty = num(d, "duty_surge_center", 0.25) if enabled else 1.0
+            return duty_gate(surge, slot - w_sw, duty, w_su), 0.0
         if not flag(d, "enable", True):
             return surge, sway
         w = num(d, "duty_window_ms", 250.0)

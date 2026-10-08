@@ -7,15 +7,13 @@ from common.cfg.cfgnode import flag, merge, pid_kw, sub
 from common.motion.search_sweep import Sweep
 from common.motion.depth_hold import DepthHold
 from handling.percept.track_memory import TrackMemory
-from common.motion.axis import AxisMove, EnsureDepth, TimedDof, _K_DIP, _K_RISE, action_cfg, axis_deg, grab_cfg, grab_node, level_relative_deg, pitch_up_deg
+from common.motion.axis import AxisMove, TimedDof, _K_DIP, _K_RISE, action_cfg, axis_deg, grab_cfg, grab_node
 from handling.percept.cage_color import red_percent
 from common.motion.axis import AxisMove, TimedDof, ZERO_DOF, axis_deg, level_relative_deg, task_node
 from handling.motion.params import (PH_GRAB_INIT,
-                                  PH_GRAB_PITCH_UP,
                                   PH_GRAB_SEARCH,
                                   PH_GRAB_CENTER,
                                   PH_GRAB_APPROACH,
-                                  PH_GRAB_LEVEL,
                                   PH_GRAB_ALIGN,
                                   PH_GRAB_DIP,
                                   PH_GRAB_RISE,
@@ -79,10 +77,10 @@ class HandlingTask(HandlingActions, GrabPhases, PlacePhases):
         self._down_frame = None                # 下视帧（装配层每帧注入）
         self._attempts = 0
         self._dumps = 0
-        self._pitched = False                  # 机头是否还仰着（决定退出前要不要放平）
+        self._pitched = False
         self._exit_reason, self._exit_ok = "", False
         self._exit_deadline = 0.0
-        self._ref_pitch = None                 # 抬头前的 pitch 遥测 = 回水平基准
+        self._ref_pitch = None
         self._ensure = None
         # ★ 搜索用平移扫视（prefix 按当前流程取 cfg 覆盖；place 将来要搜索也用同一个原语）
         self._sweep = Sweep(prefix=("place" if mode == "place" else "grab"), log=self.log)
@@ -95,6 +93,7 @@ class HandlingTask(HandlingActions, GrabPhases, PlacePhases):
         self._lost_cnt = 0
         self._hold_until_ms = None
         self._hit_cnt = 0
+        self._center_start_ms = None           # 居中交替窗口的起点（左右在先）
         self._align_cnt = 0
         self._verify_cnt = 0
         self._pid_yaw = None                   # 居中 sway 通道的 PID（进相位时 reset，不重建）
@@ -273,7 +272,7 @@ class HandlingTask(HandlingActions, GrabPhases, PlacePhases):
                 return S.STATUS_DONE
 
         f = self._frame(frame)
-        if f is None and self._phase not in (PH_GRAB_INIT, PH_GRAB_PITCH_UP, PH_GRAB_DUMP):
+        if f is None and self._phase not in (PH_GRAB_INIT, PH_GRAB_DUMP):
             # 没有下视帧 = 没有感知 ⇒ 本帧停手（绝不盲动）
             self.uart.send_dof(0.0, 0.0, 0.0, 0.0)
             self._set_info("no_frame", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, None)
@@ -312,15 +311,9 @@ class HandlingTask(HandlingActions, GrabPhases, PlacePhases):
         elif self._phase == PH_GRAB_INIT:
             surge, sway, heave, yaw = self._step_grab_init(now_ms)
             action = "init_depth_floor"
-        elif self._phase == PH_GRAB_PITCH_UP:
-            surge, sway, heave, yaw = self._step_pitch_up(now_ms)
-            action = "pitch_up"
         elif self._phase == PH_GRAB_DUMP:
             surge, sway, heave, yaw = self._step_dump(now_ms)
             action = "dump_%s" % self._sub
-        elif self._phase == PH_GRAB_LEVEL:
-            surge, sway, heave, yaw = self._step_level(now_ms)
-            action = "level"
         elif self._phase == PH_GRAB_DIP:
             surge, sway, heave, yaw = self._step_dip(now_ms)
             action = "dip"

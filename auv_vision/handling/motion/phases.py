@@ -9,14 +9,13 @@ from handling.motion.actions import _cvnode, _clip, _dx_norm, _dy_norm, _ratio_r
 
 # ★ 任务三/四的 search = **纯左右平移扫视**（用户 2026-10-06 定；不用 search_scan 的 yaw 慢扫）
 from common.motion.search_sweep import Sweep
-from common.motion.axis import AxisMove, EnsureDepth, TimedDof, _K_DIP, _K_RISE, action_cfg, axis_deg, grab_cfg, grab_node, level_relative_deg, pitch_up_deg
+from common.motion.axis import AxisMove, TimedDof, _K_DIP, _K_RISE, action_cfg, axis_deg, grab_cfg, grab_node
 from common.motion.drop import BallDropSequence
 from common.motion.axis import AxisMove, TimedDof, ZERO_DOF, axis_deg, level_relative_deg, task_node
-from handling.motion.params import (PH_GRAB_PITCH_UP,
+from handling.motion.params import (
                                   PH_GRAB_SEARCH,
                                   PH_GRAB_CENTER,
                                   PH_GRAB_APPROACH,
-                                  PH_GRAB_LEVEL,
                                   PH_GRAB_ALIGN,
                                   PH_GRAB_DIP,
                                   PH_GRAB_RISE,
@@ -46,33 +45,11 @@ class GrabPhases(object):
         c = grab_cfg()
         setter(c["depth_floor_m"])         # 只抬不降；全局 min_depth_m 一个字没动
         self._floor_raised = True
-        self._ensure = EnsureDepth(log=self.log)
-        self._phase = PH_GRAB_PITCH_UP
-        self._sub = "ensure"
-        self.log("[GRAB] 任务级限深下限抬到 %.2fm（全程有效），先下潜到位再抬头"
+        self._phase = PH_GRAB_SEARCH
+        self._sub = ""
+        self._sweep.reset(now_ms, first_dir=self._mem.side_hint())
+        self.log("[GRAB] 任务级限深下限抬到 %.2fm，开始左右扫描"
                  % float(c["depth_floor_m"]))
-        return 0.0, 0.0, 0.0, 0.0
-
-    def _step_pitch_up(self, now_ms):
-        if self._sub == "ensure":
-            st, dof = self._ensure.step(now_ms, self.uart)
-            if st == EnsureDepth.FAILED:
-                self._bail("depth_%s" % self._ensure.why)
-                return 0.0, 0.0, 0.0, 0.0
-            if st != EnsureDepth.DONE:
-                return dof
-            self._move = AxisMove("pitch", pitch_up_deg(), name="pitch", log=self.log)
-            self._sub = "raise"
-        st = self._move.step(now_ms, self.uart)
-        if st == AxisMove.DONE:
-            self._ref_pitch = self._move.ref_deg      # ★ 回水平的基准（动作前的遥测）
-            self._pitched = True
-            self._phase = PH_GRAB_SEARCH
-            self._sweep.reset(now_ms, first_dir=self._mem.side_hint())
-            self.log("[GRAB] 已抬头；水平基准 pitch=%s，开始扫描"
-                     % ("n/a" if self._ref_pitch is None else "%.2f°" % self._ref_pitch))
-        elif st == AxisMove.FAILED:
-            self._bail("pitch_failed")
         return 0.0, 0.0, 0.0, 0.0
 
     def _step_search(self, now_ms, ball):
@@ -81,32 +58,31 @@ class GrabPhases(object):
             self._hit_cnt = 0
             self._ensure_pids()
             self._pid_yaw.reset()
+            self._pid_csu.reset()
+            self._center_start_ms = None
             return 0.0, 0.0, 0.0, 0.0
         # ★ 只左右平移扫视：**不转 yaw**（抬头时转 yaw 会让目标绕圈跑；且不依赖 yaw 遥测）
         sway = _clip(self._sweep.step(now_ms))
         return 0.0, sway, 0.0, 0.0
 
     def _step_center(self, now_ms, dx, dy):
-        """居中段：**dx → sway + dy → surge**（用户 2026-10-07 定），**不发 yaw**。
+        """逐帧更新两路误差；最终由 _grab_duty 交替输出左右、前后。
 
-        * sway 通道 = **与 gate/ball 同一套** `comm.motion.pid_sway`（`_center_pid_kw` 里取）。
-        * surge 通道 = 它的一半（用户："surch 的 pid 可以小一点"）。
-        * 为什么不用 yaw：抬头时转 yaw 会让目标在画面里**绕圈**（2026-10-06 定「不需要旋转」）；
-          下视相机下画面 x→横向（sway）、y→前后（surge），平移只让目标横移/前后移。
-        * `heave` 留给**定深**（`depth_hold`），这里绝不碰。
+        保留原 PID、连续居中判据和定深；不必等左右完全对齐才修正前后。
         """
         self._ensure_pids()                    # 幂等：本相位自包含，谁进来都别指望别人先建 PID
         c = _cvnode("center")
-        sway = _clip(self._pid_yaw.update(dx, now_ms))
-        surge = _clip(self._pid_csu.update(dy, now_ms))
         eps_x = float(c["eps"])
         eps_y = num(c, "eps_y", 0.25)                      # 缺键兜底（不许 req ⇒ 板端旧 cfg 也能跑）
+        sway = _clip(self._pid_yaw.update(dx, now_ms))
+        surge = _clip(self._pid_csu.update(dy, now_ms))
         if abs(dx) <= eps_x and abs(dy) <= eps_y:
             self._hit_cnt += 1
             if self._hit_cnt >= int(c["confirm_frames"]):
                 self._phase = PH_GRAB_APPROACH
                 self._hit_cnt = 0
                 self._pid_sway.reset()
+                return ZERO_DOF
         else:
             self._hit_cnt = 0
         return surge, sway, 0.0, 0.0
@@ -122,34 +98,17 @@ class GrabPhases(object):
             self._hit_cnt += 1
             if self._hit_cnt >= int(a["confirm_frames"]):
                 self._hit_cnt = 0
-                self._phase = PH_GRAB_LEVEL
-                now_deg = axis_deg(self.uart, "pitch")
-                rel = level_relative_deg(self._ref_pitch, now_deg)
-                if rel is None:
-                    # 回水平算不出相对角（没姿态遥测）⇒ 不敢按着角度下压
-                    self.log("[GRAB] ⚠️ 拿不到 pitch 遥测，回不了水平 ⇒ 停手")
-                    self._finish("no_pitch_telemetry")      # 仍仰着 ⇒ 走放平再结束
-                    return 0.0, 0.0, 0.0, 0.0
-                self._move = AxisMove("pitch", rel, name="level", log=self.log)
-                self.log("[GRAB] 面积达标（%.3f ≥ %.3f）→ 回水平（相对角 %+.2f°）"
-                         % (ratio, float(a["dip_ratio"]), rel))
+                self._phase = PH_GRAB_ALIGN
+                self._align_cnt = 0
+                self._ensure_pids()
+                self._pid_asw.reset()
+                self._pid_asu.reset()
+                self.log("[GRAB] 面积达标（%.3f ≥ %.3f）→ 进入最终对准"
+                         % (ratio, float(a["dip_ratio"])))
                 return 0.0, 0.0, 0.0, 0.0
         else:
             self._hit_cnt = 0
         return surge, sway, 0.0, 0.0
-
-    def _step_level(self, now_ms):
-        st = self._move.step(now_ms, self.uart)
-        if st == AxisMove.DONE:
-            self._pitched = False                     # 机头已放平
-            self._phase = PH_GRAB_ALIGN
-            self._align_cnt = 0
-            self._ensure_pids()
-            self._pid_asw.reset()
-            self._pid_asu.reset()
-        elif st == AxisMove.FAILED:
-            self._finish("level_failed")              # 仍仰着 ⇒ 再试着放平
-        return 0.0, 0.0, 0.0, 0.0
 
     def _step_align(self, now_ms, dx, dy):
         """**dx→sway、dy→surge，两通道都轻微（抗水波），不用 yaw**（用户 2026-10-06 定）。"""
@@ -223,15 +182,14 @@ class GrabPhases(object):
             self._bail("dump_failed")
             return 0.0, 0.0, 0.0, 0.0
         if st == BallDropSequence.DONE:
-            # 重来：球在别处，且机身已回水平 ⇒ 从"抬头"重新进任务
-            self._phase = PH_GRAB_PITCH_UP
-            self._sub = "ensure"
-            self._ensure = EnsureDepth(log=self.log)
+            # 重来：球在别处 ⇒ 清空轨迹后重新左右搜索
+            self._phase = PH_GRAB_SEARCH
+            self._sub = ""
             self._ema = None
             self._hit_cnt = 0
             self._mem.clear()                      # 重来一遍 ⇒ 旧轨迹作废
             self._sweep.reset(now_ms, first_dir=self._mem.side_hint())
-            self.log("[GRAB] 回到抬头，重新进夹取")
+            self.log("[GRAB] 倒球完成，重新左右搜索")
             return 0.0, 0.0, 0.0, 0.0
         return dof
 
